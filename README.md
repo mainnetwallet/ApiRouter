@@ -1,87 +1,343 @@
 # MultiAI Router
 
-A protocol-aware multi-provider AI routing layer for Claude Code, Codex, OpenCode, custom applications, and API clients.
+A protocol-aware, health-aware multi-provider AI routing core for Claude Code, Codex, OpenCode, custom applications, and API clients.
 
-## Routing model
+MultiAI Router builds a global pool of provider/model/API-key targets, tracks each target independently, and selects available targets using health-aware routing and automatic fallback.
 
-Every configured provider/model/key combination is an independent routing target:
+> Current status: the repository contains the routing, health, configuration, and HTTP discovery core. Provider-specific request adapters and final upstream proxy endpoints are the next integration layer.
 
-provider + model + key
+## Features
 
-A provider is eligible only when all three required values are configured:
+- Multi-provider routing
+- Multi-model support
+- Multiple API keys per provider/model
+- Per-target health tracking
+- Global health-based ranking
+- Automatic fallback on retryable failures
+- 15-minute failure cooldown
+- Periodic health-refresh infrastructure
+- Sticky routing sessions
+- Protocol-aware provider adapter architecture
+- Environment-based secret management
+- Designed for Claude Code, Codex, OpenCode and custom clients
+
+## Routing Architecture
+
+Every configured combination of provider + model + API key becomes an independent routing target.
+
+    Any AI Client
+           |
+           v
+    +----------------+
+    | MultiAI Router |
+    +-------+--------+
+            |
+      +-----+-----+
+      |           |
+      v           v
+    Health     Route Session
+    Registry
+      |           |
+      +-----+-----+
+            |
+            v
+    Global Target Ranking
+            |
+            v
+    Best Available Target
+            |
+      retryable failure?
+        /          \
+      yes           no
+       |             |
+       v             v
+    next target    return error
+
+## Health and Fallback
+
+Each target maintains its own health state:
+
+- health score
+- status
+- success count
+- failure count
+- consecutive failures
+- latency
+- last HTTP status
+- cooldown expiration
+
+Example ranking:
+
+    Gemini / model-A / key-2       health 97
+    Groq / model-X / key-1         health 94
+    AgentRouter / model-B / key-1  health 90
+    Gemini / model-A / key-1       health 71
+
+The highest-ranked available target is selected first. A retryable failure records the failure and moves routing to the next available target.
+
+## 15-Minute Cooldown
+
+A failed target enters a 15-minute cooldown by default.
+
+    Target fails
+        |
+        v
+    Record failure
+        |
+        v
+    Cooldown for 15 minutes
+        |
+        v
+    Remove from active routing
+        |
+        v
+    Health refresh
+        |
+        v
+    Re-evaluate target
+
+Cooldown is applied to the exact provider + model + API key target. A failed key does not automatically disable sibling keys.
+
+## Retry Policy
+
+Retryable HTTP statuses are configured with:
+
+    RETRY_STATUS_CODES=402,408,429,500,502,503,504
+
+| Status | Typical meaning |
+|---|---|
+| 402 | Quota / payment / budget exhaustion |
+| 408 | Request timeout |
+| 429 | Rate limit |
+| 500 | Provider server error |
+| 502 | Bad gateway |
+| 503 | Service unavailable |
+| 504 | Gateway timeout |
+
+Authentication/configuration errors such as 401 and 403 are not retryable by default.
+
+## Automatic Health Refresh
+
+The health layer includes a 15-minute refresh monitor.
+
+The intended cycle is:
+
+    Check every configured target
+            |
+            v
+    Record health result
+            |
+            v
+    Update health state
+            |
+            v
+    Rebuild global ranking
+            |
+            v
+    Route using new ranking
+
+Providers expose different protocols, so health checks are designed to be supplied by protocol-aware provider adapters rather than assuming one generic HTTP request works for every provider.
+
+## Sticky Routing
+
+RouteSession remembers the last successful target using its provider/model/key identity.
+
+Example:
+
+    Request 1
+      Target A fails
+      Target B succeeds
+
+    Request 2
+      Start from Target B
+      If B fails, continue forward
+      Do not backtrack to an already-failed target
+
+For multi-process production deployments, session state should use a shared store such as Redis instead of process-local memory.
+
+## Multiple API Keys
+
+Multiple keys for the same provider/model are expanded into separate targets.
+
+    Gemini / model-A / key-1
+    Gemini / model-A / key-2
+    Gemini / model-A / key-3
+
+Each target has independent health score, cooldown, success count, failure count, latency, and last status.
+
+## Provider Catalog
+
+The initial catalog includes:
+
+- AgentRouter
+- Gemini
+- Groq
+- Hugging Face
+- Mistral
+- OpenRouter
+- Cerebras
+- Cloudflare
+- SambaNova
+- Cohere
+- Z.AI
+
+Provider-specific protocol adapters are intentionally separated from the core routing engine because these services do not all expose identical APIs.
+
+## Configuration
+
+A provider is eligible only when all three values are configured:
 
 1. API keys
 2. Models
 3. Base URL
 
-If any one is missing, the whole provider is skipped.
+If any one is missing, the provider produces no routing targets and is skipped.
 
-## Health-ranked fallback
+The environment template is organized as:
 
-The router does not use a fixed provider-first order. It builds one global pool of all configured targets and ranks them by health.
+    1. API KEYS
+    2. MODELS
+    3. BASE URLS
+    4. RETRY POLICY
 
-Example:
+Real credentials belong only in the local .env file.
 
-1. Gemini / model-A / key-2 — health 97
-2. Groq / model-X / key-1 — health 94
-3. AgentRouter / model-B / key-1 — health 90
-4. Gemini / model-A / key-1 — health 71
+## Run on Windows / PowerShell
 
-The highest healthy target is tried first. A retryable failure moves to the next available target in the current ranking.
+### 1. Install Node.js
 
-Health is tracked independently for every API key. A failed key does not disable its sibling keys for the same model.
+Install Node.js 20 or newer.
 
-## 15-minute failure cooldown
+Verify:
 
-When a target fails with a retryable status, that exact provider/model/key target enters a 15-minute cooldown.
+    node --version
+    npm --version
 
-During the cooldown it is excluded from routing.
+### 2. Clone the repository
 
-After the cooldown, the target becomes eligible for the next health refresh and can return to the ranking if it is healthy again.
+    git clone https://github.com/mainnetwallet/MultiAI-Router.git
+    cd MultiAI-Router
 
-The default retryable statuses are:
+### 3. Install dependencies
 
-402, 408, 429, 500, 502, 503, 504
+    npm install
 
-They are controlled by RETRY_STATUS_CODES.
+### 4. Create local configuration
 
-## Automatic health refresh
+    Copy-Item .env.example .env
+    notepad .env
 
-The health layer provides a 15-minute refresh monitor. It checks every configured provider/model/key target and stores a new health state.
+Add your provider API keys, models, and base URLs.
 
-Because providers use different protocols, the monitor receives a protocol-aware check(target) function from the provider adapter layer. The core router does not pretend that one generic HTTP request is a valid health check for every provider.
+### 5. Start the router
 
-The refresh cycle is:
+    npm start
 
-health check all targets
-→ save results
-→ rebuild global health ranking
-→ route using the new ranking
+Expected output:
 
-## Sticky routing
+    MultiAI Router listening on http://127.0.0.1:8788
 
-A RouteSession remembers the last successful target by its provider/model/key identity.
+### Development mode
 
-The next request for the same session starts from that target when it is still available. If it is unavailable, routing continues forward through the current health-ranked targets.
+    npm run dev
 
-The router never backtracks to a target that already failed during the same request.
+## Verify the Server
 
-## Multiple keys
+Check service health:
 
-Multiple API keys are expanded into independent targets.
+    Invoke-RestMethod http://127.0.0.1:8788/health
 
-For example:
+Check available/ranked models:
 
-Gemini / model-A / key-1
-Gemini / model-A / key-2
-Gemini / model-A / key-3
+    Invoke-RestMethod http://127.0.0.1:8788/v1/models
 
-Each key gets its own health score, cooldown, success count, failure count, latency, and last status.
+## Run Tests
+
+    npm test
+
+The test suite covers routing and health primitives including:
+
+- retryable status handling
+- health-ranked fallback
+- per-key cooldown
+- sibling-key availability
+- sticky routing
+- provider configuration validation
+- incomplete-provider exclusion
+- health refresh across configured targets
+
+## Current HTTP Endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | /health | Service and target health information |
+| GET | /v1/models | Available and ranked routing targets |
+
+The current HTTP server exposes discovery and health endpoints. The provider-specific request adapter layer is still required for forwarding chat/message requests to upstream services.
+
+## Project Structure
+
+    MultiAI-Router/
+    ├─ src/
+    │  ├─ config.js
+    │  ├─ health.js
+    │  ├─ router.js
+    │  ├─ server.js
+    │  └─ providers/
+    │     └─ catalog.js
+    ├─ test/
+    │  └─ router.test.js
+    ├─ .env.example
+    ├─ .gitignore
+    ├─ package.json
+    └─ README.md
 
 ## Security
 
-Keep API keys in environment variables or a local .env file. Never commit real credentials.
+Never commit real API credentials.
 
-## Providers
+The repository ignores local environment files. Keep production credentials in deployment environment variables or a dedicated secret manager.
 
-The initial catalog is designed for AgentRouter, Gemini, Groq, Hugging Face, Mistral, OpenRouter, Cerebras, Cloudflare, SambaNova, Cohere, and Z.AI.
+If an API key is accidentally exposed, revoke or rotate it immediately.
+
+## Production Considerations
+
+Before using the router as a production upstream gateway, add:
+
+- protocol-specific request adapters
+- upstream request forwarding endpoints
+- shared session storage for multi-process deployments
+- persistent health storage
+- provider-specific authentication handling
+- structured logging
+- rate-limit/backoff controls
+- metrics and observability
+- TLS/reverse-proxy deployment
+- deployment-level secret management
+
+## Design Principle
+
+MultiAI Router separates routing intelligence from provider protocol implementation.
+
+    Client
+      |
+      v
+    Router
+      ├─ Target selection
+      ├─ Health ranking
+      ├─ Key-level health
+      ├─ Cooldown
+      ├─ Retry/fallback
+      └─ Session routing
+            |
+            v
+      Provider Adapter
+            |
+            v
+      Upstream AI Provider
+
+This keeps the routing core reusable while allowing each provider to implement the protocol it actually supports.
+
+## License
+
+See the repository for the current project license and distribution terms.
