@@ -1,70 +1,56 @@
 # Claude Code + MultiAI Router
 
-Use MultiAI Router as Claude Code's Anthropic-format gateway.
+Use the router as Claude Code's Anthropic-compatible gateway.
 
-Anthropic documents LLM gateway usage through ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN. The router exposes /v1/messages for this client protocol.
+## Start
 
-## 1. Start MultiAI Router
+```powershell
+npm start
+```
 
-From the router repository:
+Default:
 
-    npm start
+```text
+http://127.0.0.1:8788
+```
 
-Default address:
+## Configure provider
 
-    http://127.0.0.1:8788
+Example:
 
-## 2. Configure AgentRouter or another Anthropic-compatible target
+```env
+AGENTROUTER_API_KEYS=YOUR_PROVIDER_KEY
+AGENTROUTER_MODELS=claude-opus-5,claude-opus-4-8
+AGENTROUTER_BASE_URL=https://agentrouter.org/
+```
 
-Edit .env:
-
-    AGENTROUTER_API_KEYS=YOUR_KEY
-    AGENTROUTER_MODELS=claude-opus-5,claude-opus-4-8
-    AGENTROUTER_BASE_URL=https://agentrouter.org/
-
-Only fully configured targets enter routing.
-
-## 3. Configure Claude Code
+## Configure Claude Code
 
 PowerShell:
 
-    $env:ANTHROPIC_BASE_URL="http://127.0.0.1:8788"
-    $env:ANTHROPIC_AUTH_TOKEN="YOUR_LOCAL_ROUTER_KEY"
-    $env:ANTHROPIC_API_KEY=$null
-    claude
+```powershell
+$env:ANTHROPIC_BASE_URL="http://127.0.0.1:8788"
+$env:ANTHROPIC_AUTH_TOKEN="YOUR_LOCAL_ROUTER_KEY"
+$env:ANTHROPIC_API_KEY=$null
+claude
+```
 
-If MULTIAI_ROUTER_API_KEYS is empty, the local router accepts the request without gateway authentication. If it is configured, use one of those values as ANTHROPIC_AUTH_TOKEN.
+If `MULTIAI_ROUTER_API_KEYS` is empty, local gateway authentication is not required.
 
-## 4. How routing works
+Claude Code uses:
 
-    Claude Code
-        |
-        v
-    POST /v1/messages
-        |
-        v
-    MultiAI Router
-        |
-        +--> health ranking
-        +--> sticky session
-        +--> retryable failure
-        +--> next provider/model/key
+```text
+POST /v1/messages
+```
 
-The gateway rewrites the upstream model field to the selected target model.
+The router selects only compatible Anthropic targets.
 
-## 5. Important
+## Check
 
-Claude Code uses the Anthropic messages protocol. The router therefore selects targets configured for the Anthropic protocol instead of blindly sending Claude requests to an OpenAI-only provider.
+```powershell
+Invoke-RestMethod http://127.0.0.1:8788/health
+```
 
-Keep real credentials in .env and never commit them.
+Keep real keys in `.env`.
 
-## Troubleshooting
-
-Check:
-
-    Invoke-RestMethod http://127.0.0.1:8788/health
-
-Then verify that an Anthropic-compatible target is configured.
-
-Official reference:
-https://docs.anthropic.com/en/docs/claude-code/llm-gateway
+Reference: https://docs.anthropic.com/en/docs/claude-code/llm-gateway
