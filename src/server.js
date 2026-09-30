@@ -1,7 +1,7 @@
 import http from "node:http";
 import { loadConfig, buildTargets } from "./config.js";
 import { getAllHealth, rankTargets, healthRegistry } from "./health.js";
-import { withFallback } from "./router.js";
+import { RouteSession, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 
@@ -26,7 +26,7 @@ function getSession(req, protocol) {
   const requested = String(req.headers["x-multi-ai-session-id"] || "").trim();
   const id = requested || createSessionId();
   const key = protocol + ":" + id;
-  if (!sessions.has(key)) sessions.set(key, { id, protocol, session: new (class { constructor(){ this.targetId=null; } }()) });
+  if (!sessions.has(key)) sessions.set(key, { id, protocol, session: new RouteSession() });
   return { id, state: sessions.get(key) };
 }
 
@@ -90,8 +90,20 @@ async function proxy(req, res, protocol) {
       "x-multi-ai-key-index": String(result.target.keyIndex),
       "x-multi-ai-session-id": sessionId
     });
-    if (result.upstream.body) result.upstream.body.pipeTo(WritableStream.from(res)).catch(() => res.end());
-    else res.end();
+    if (result.upstream.body) {
+      const reader = result.upstream.body.getReader();
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          res.write(Buffer.from(chunk.value));
+        }
+      } finally {
+        res.end();
+      }
+    } else {
+      res.end();
+    }
   } catch (error) {
     return json(res, error.status || 502, { error: { message: error.message || "All routing targets failed", type: "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
   }
