@@ -350,5 +350,7 @@ Use the same MultiAI Router gateway from different AI clients:
 - [Codex](docs/clients/CODEX.md) — OpenAI `/v1/responses`
 - [OpenCode](docs/clients/OPENCODE.md) — OpenAI-compatible `/v1/chat/completions`
 - [All client protocols](docs/clients/CLIENTS.md)
+- [Generic OpenAI-compatible clients](docs/clients/GENERIC_OPENAI.md)
+- [Other AI clients](docs/clients/OTHER_CLIENTS.md)
 
 The client guides intentionally use separate configuration files so each client can be configured independently while sharing the same router.
