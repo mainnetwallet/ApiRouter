@@ -219,3 +219,25 @@ test("the default probe timeout is defined and bounded", () => {
   assert.ok(Number.isFinite(PROBE_TIMEOUT_MS));
   assert.ok(PROBE_TIMEOUT_MS <= 10000);
 });
+
+
+test("AgentRouter health probe forwards explicitly configured client headers", () => {
+  const plan = healthProbePlan({
+    provider: "agentrouter",
+    model: "model-a",
+    baseUrl: "https://agentrouter.org",
+    apiKey: "secret",
+    protocols: ["openai-chat"],
+    clientHeaders: {
+      originator: "approved-client",
+      version: "1.2.3",
+      "user-agent": "ApprovedClient/1.2.3"
+    }
+  });
+
+  assert.equal(plan.url, "https://agentrouter.org/v1/models");
+  assert.equal(plan.headers.authorization, "Bearer secret");
+  assert.equal(plan.headers.originator, "approved-client");
+  assert.equal(plan.headers.version, "1.2.3");
+  assert.equal(plan.headers["user-agent"], "ApprovedClient/1.2.3");
+});
