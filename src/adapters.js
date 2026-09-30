@@ -98,6 +98,6 @@ export function clientProtocol(pathname) {
   if (pathname === "/v1/messages") return "anthropic";
   if (pathname === "/v1/responses") return "openai-responses";
   if (pathname === "/v1/chat/completions") return "openai-chat";
-  if (pathname === "/v1beta/models:generateContent") return "gemini";
+  if (/^\/v1beta\/models\/[^/]+:generateContent$/.test(pathname)) return "gemini";
   return null;
 }
