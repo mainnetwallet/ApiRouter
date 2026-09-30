@@ -36,7 +36,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && req.url === "/v1/models") {
-    const data = targets.map((target) => ({
+    const data = rankTargets(targets).map((target) => ({
       id: target.model,
       object: "model",
       provider: target.provider,
