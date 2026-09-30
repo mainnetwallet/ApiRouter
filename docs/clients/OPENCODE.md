@@ -1,68 +1,52 @@
 # OpenCode + MultiAI Router
 
-OpenCode supports custom providers and configurable base URLs. MultiAI Router can be used as an OpenAI-compatible custom provider.
+OpenCode can use the router as an OpenAI-compatible provider.
 
-## 1. Start MultiAI Router
+## Gateway
 
-    npm start
+```text
+http://127.0.0.1:8788/v1
+```
 
-Gateway base URL:
+## Configure
 
-    http://127.0.0.1:8788/v1
-
-## 2. Configure OpenCode
-
-Edit your OpenCode config, for example:
-
-    notepad $HOME\.config\opencode\opencode.json
+Use OpenCode's custom OpenAI-compatible provider configuration.
 
 Example:
 
-    {
-      "$schema": "https://opencode.ai/config.json",
-      "providers": {
-        "multi-ai-router": {
-          "package": "@opencode/ai/providers/openai-compatible",
-          "name": "MultiAI Router",
-          "settings": {
-            "baseURL": "http://127.0.0.1:8788/v1",
-            "apiKey": "{env:MULTIAI_ROUTER_API_KEY}"
-          },
-          "models": {
-            "your-model": {
-              "name": "Router Model"
-            }
-          }
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "multi-ai-router": {
+      "package": "@opencode/ai/providers/openai-compatible",
+      "name": "MultiAI Router",
+      "settings": {
+        "baseURL": "http://127.0.0.1:8788/v1",
+        "apiKey": "{env:MULTIAI_ROUTER_API_KEY}"
+      },
+      "models": {
+        "your-model": {
+          "name": "Router Model"
         }
       }
     }
+  }
+}
+```
 
-Then set:
+Set the gateway key when authentication is enabled:
 
-    $env:MULTIAI_ROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
+```powershell
+$env:MULTIAI_ROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
+```
 
-Use /models in OpenCode to select the configured model.
+OpenCode uses:
 
-## 3. Routing
+```text
+POST /v1/chat/completions
+```
 
-OpenCode
-   |
-   v
-OpenAI-compatible endpoint
-   |
-   v
-MultiAI Router
-   |
-   +--> global health ranking
-   +--> key-level health
-   +--> cooldown
-   +--> automatic fallback
+Keep provider keys inside the router.
 
-## 4. Notes
-
-OpenCode's current provider documentation supports custom OpenAI-compatible providers and baseURL configuration.
-
-Keep API keys outside the repository.
-
-Official reference:
-https://opencode.ai/docs/providers
+Reference: https://opencode.ai/docs/providers
