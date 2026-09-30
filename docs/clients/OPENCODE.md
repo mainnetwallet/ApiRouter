@@ -20,11 +20,11 @@ Example:
 
     {
       "$schema": "https://opencode.ai/config.json",
-      "provider": {
+      "providers": {
         "multi-ai-router": {
-          "npm": "@ai-sdk/openai-compatible",
+          "package": "@opencode/ai/providers/openai-compatible",
           "name": "MultiAI Router",
-          "options": {
+          "settings": {
             "baseURL": "http://127.0.0.1:8788/v1",
             "apiKey": "{env:MULTIAI_ROUTER_API_KEY}"
           },
