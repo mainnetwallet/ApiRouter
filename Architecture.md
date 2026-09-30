@@ -96,9 +96,49 @@ failures
 consecutiveFailures
 latencyMs
 lastStatus
+lastReason
 cooldownUntil
 updatedAt
 ```
+
+States:
+
+```text
+unknown    no health claim has been established yet
+healthy    the latest accepted observation succeeded
+failed     the latest accepted observation failed
+cooldown   a failed target that is still inside its cooldown window
+```
+
+`status` stores the outcome of the last accepted observation. `cooldown` is derived from `cooldownUntil` when health is reported, so routing never depends on it. Health is tracked per `provider + model + key`: a failed key or model never changes the state of a sibling target.
+
+### Provider-aware probing
+
+A generic `GET <baseUrl>` cannot establish that a provider is healthy, and it never exercises the API key. Each protocol capability therefore gets an explicit, quota-free probe against the provider's own model-listing endpoint:
+
+| Capability | Probe | Credential |
+|---|---|---|
+| Gemini | `GET {base}/v1beta/models` | `x-goog-api-key` |
+| OpenAI Chat / Responses | `GET {base}/v1/models` | `Authorization: Bearer` |
+| Anthropic only | none | passive |
+
+Probes list models, so they never send a prompt and never consume generation quota. Probe URLs never carry a credential in the query string.
+
+Probe results are normalized to `{ ok, status, latencyMs, reason }`:
+
+```text
+ok: true   2xx — reachable and the credential was accepted
+ok: false  401, 402, 403, 408, 429, 5xx, timeout, unreachable
+ok: null   passive — the endpoint is missing (404/405/501), or the provider
+           has no safe probe. The previous state is preserved untouched, so
+           the router never fabricates a health claim.
+```
+
+Authentication failures are never reported as healthy.
+
+### Observation ordering
+
+Every observation carries the timestamp at which it was taken. An observation is only applied when it is at least as new as the newest one already recorded. A slow health probe that started before a routing failure therefore cannot overwrite that failure or clear the cooldown it established, while a newer successful probe can still recover a cooled-down target.
 
 Default failed-target cooldown:
 
@@ -112,7 +152,7 @@ Default health refresh interval:
 15 minutes
 ```
 
-The server starts the health monitor at startup and stops it cleanly on SIGINT/SIGTERM.
+The server starts the health monitor at startup and stops it cleanly on SIGINT/SIGTERM. Refresh cycles never overlap, run with bounded concurrency (4 probes at a time) so one slow provider cannot stall the cycle, and a failing provider never prevents the others from being checked.
 
 Retryable status codes:
 
@@ -164,6 +204,7 @@ src/
 ├── config.js              environment + target construction
 ├── router.js              fallback + sticky routing
 ├── health.js              health + ranking + cooldown
+├── health-checks.js       provider-aware health probes
 ├── adapters.js            protocol + upstream request adapter
 └── providers/
     └── catalog.js         provider catalog
@@ -177,6 +218,7 @@ The core implementation is separated by responsibility:
 - `src/config.js` — environment parsing and routing-target construction.
 - `src/router.js` — health-ranked fallback and sticky routing.
 - `src/health.js` — target health, scoring, cooldown and health-refresh infrastructure.
+- `src/health-checks.js` — provider-aware, quota-free health probes and status classification.
 - `src/adapters.js` — client protocol detection and upstream request construction.
 - `src/providers/catalog.js` — provider catalog.
 

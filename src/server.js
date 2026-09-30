@@ -2,7 +2,8 @@ import http from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { loadConfig, buildTargets } from "./config.js";
-import { getAllHealth, rankTargets, healthRegistry, startHealthMonitor } from "./health.js";
+import { describeHealth, rankTargets, healthRegistry, startHealthMonitor } from "./health.js";
+import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
 import { RouteSession, SessionStore, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
@@ -28,33 +29,14 @@ function toTimeoutError(message) {
   return error;
 }
 
-async function checkTargetHealth(target) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.min(config.timeoutMs, 10000));
-
-  try {
-    const upstream = await fetch(target.baseUrl, {
-      method: "GET",
-      headers: { authorization: "Bearer " + target.apiKey },
-      signal: controller.signal
-    });
-
-    if (upstream.status >= 500 || upstream.status === 429) {
-      const error = new Error("Provider health endpoint returned HTTP " + upstream.status);
-      error.status = upstream.status;
-      throw error;
-    }
-
-    return { ok: true, status: upstream.status };
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw toTimeoutError("Provider health check timed out");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+/**
+ * Health probes are provider-aware (see src/health-checks.js) and capped well
+ * below the request timeout so a single slow provider cannot stall a cycle.
+ */
+const checkTargetHealth = (target) =>
+  probeTargetHealth(target, {
+    timeoutMs: Math.min(config.timeoutMs, PROBE_TIMEOUT_MS)
+  });
 
 function json(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
@@ -168,7 +150,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && pathname === "/health") {
     const ranked = rankTargets(targets).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, protocols: target.protocols }));
-    return json(res, 200, { ok: true, service: "multi-ai-router", providers: PROVIDERS, configuredTargets: targets.length, health: getAllHealth(), rankedTargets: ranked, retryableStatus: [...config.retryableStatus] });
+    return json(res, 200, { ok: true, service: "multi-ai-router", providers: PROVIDERS, configuredTargets: targets.length, health: describeHealth(targets), rankedTargets: ranked, retryableStatus: [...config.retryableStatus] });
   }
 
   if (req.method === "GET" && pathname === "/v1/models") {
