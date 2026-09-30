@@ -9,6 +9,9 @@
     "dev": "node --watch src/server.js",
     "test": "node --test"
   },
+  "dependencies": {
+    "dotenv": "^17.2.2"
+  },
   "engines": {
     "node": ">=20"
   }
