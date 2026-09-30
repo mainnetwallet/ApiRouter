@@ -2,12 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildTargets, isProviderConfigured, loadConfig } from "../src/config.js";
 import {
-  HealthRegistry,
   RouteSession,
   isRetryableStatus,
   withFallback
 } from "../src/router.js";
-import { refreshAllHealth } from "../src/health.js";
+import { HealthRegistry, refreshAllHealth } from "../src/health.js";
 
 test("retryable statuses include quota/rate-limit/server failures", () => {
   for (const code of [402, 408, 429, 500, 502, 503, 504]) {
