@@ -74,3 +74,48 @@ test("Gemini request uses native generateContent endpoint", () => {
   assert.equal(request.options.headers["x-goog-api-key"], "secret");
   assert.equal(JSON.parse(request.options.body).model, undefined);
 });
+
+
+test("AgentRouter applies only explicitly configured client headers", () => {
+  const request = buildUpstreamRequest(
+    {
+      provider: "agentrouter",
+      model: "model-a",
+      baseUrl: "https://agentrouter.org",
+      apiKey: "secret",
+      clientHeaders: {
+        originator: "approved-client",
+        version: "1.2.3",
+        "user-agent": "ApprovedClient/1.2.3"
+      }
+    },
+    "openai-chat",
+    { messages: [{ role: "user", content: "hi" }] }
+  );
+
+  assert.equal(request.options.headers.authorization, "Bearer secret");
+  assert.equal(request.options.headers.originator, "approved-client");
+  assert.equal(request.options.headers.version, "1.2.3");
+  assert.equal(request.options.headers["user-agent"], "ApprovedClient/1.2.3");
+});
+
+test("other providers do not receive AgentRouter client headers", () => {
+  const request = buildUpstreamRequest(
+    {
+      provider: "groq",
+      model: "model-a",
+      baseUrl: "https://example.test/v1",
+      apiKey: "secret",
+      clientHeaders: {
+        originator: "should-not-forward",
+        version: "1.2.3",
+        "user-agent": "should-not-forward"
+      }
+    },
+    "openai-chat",
+    { messages: [] }
+  );
+
+  assert.equal(request.options.headers.originator, undefined);
+  assert.equal(request.options.headers.version, undefined);
+});
