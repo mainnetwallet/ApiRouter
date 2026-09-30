@@ -1,6 +1,6 @@
 import http from "node:http";
 import { loadConfig, buildTargets } from "./config.js";
-import { getAllHealth, rankTargets, healthRegistry } from "./health.js";
+import { getAllHealth, rankTargets, healthRegistry, startHealthMonitor } from "./health.js";
 import { RouteSession, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
@@ -8,6 +8,35 @@ import { PROVIDERS } from "./providers/catalog.js";
 const config = loadConfig();
 const targets = buildTargets(config.providers);
 const sessions = new Map();
+
+async function checkTargetHealth(target) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(config.timeoutMs, 10000));
+
+  try {
+    const upstream = await fetch(target.baseUrl, {
+      method: "GET",
+      headers: { authorization: "Bearer " + target.apiKey },
+      signal: controller.signal
+    });
+
+    if (upstream.status >= 500 || upstream.status === 429) {
+      const error = new Error("Provider health endpoint returned HTTP " + upstream.status);
+      error.status = upstream.status;
+      throw error;
+    }
+
+    return { ok: true, status: upstream.status };
+  } catch (error) {
+    if (error.name === "AbortError") {
+      error.status = 408;
+      error.message = "Provider health check timed out";
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function json(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
@@ -126,6 +155,16 @@ const server = http.createServer(async (req, res) => {
   if (protocol) return proxy(req, res, protocol);
 
   return json(res, 404, { error: { message: "Not found", type: "not_found" } });
+});
+
+const stopHealthMonitor = startHealthMonitor(targets, checkTargetHealth);
+process.once("SIGINT", () => {
+  stopHealthMonitor();
+  server.close(() => process.exit(0));
+});
+process.once("SIGTERM", () => {
+  stopHealthMonitor();
+  server.close(() => process.exit(0));
 });
 
 server.listen(config.port, () => console.log("MultiAI Router listening on http://127.0.0.1:" + config.port));
