@@ -3,6 +3,11 @@ export function isRetryableStatus(status, retryableStatus = new Set([402, 408, 4
 
 
 export async function withFallback(targets, invoke, retryableStatus = new Set([402, 408, 429, 500, 502, 503, 504])) {
+  if (!Array.isArray(targets) || targets.length === 0) {
+    const err = new Error("No fully configured routing targets available");
+    err.status = 503;
+    throw err;
+  }
   const failures = [];
   for (const target of targets) {
     try { return await invoke(target); }
