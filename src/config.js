@@ -1,3 +1,5 @@
+import { providerProtocol } from "./adapters.js";
+
 const DEFAULT_RETRY_STATUS_CODES = [402, 408, 429, 500, 502, 503, 504];
 
 const PROVIDER_IDS = [
