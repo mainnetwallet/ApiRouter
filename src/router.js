@@ -2,8 +2,45 @@ import { HealthRegistry } from "./health.js";
 
 const DEFAULT_RETRY_STATUS_CODES = new Set([402, 408, 429, 500, 502, 503, 504]);
 
+// Sessions are keyed by a client-supplied header, so the store must be bounded:
+// an unbounded map would grow without limit on a long-running gateway.
+const DEFAULT_MAX_SESSIONS = 10000;
+
 export function isRetryableStatus(status, retryableStatus = DEFAULT_RETRY_STATUS_CODES) {
   return retryableStatus.has(Number(status));
+}
+
+/** Insertion-ordered, least-recently-used bounded session store. */
+export class SessionStore {
+  constructor({ maxEntries = DEFAULT_MAX_SESSIONS } = {}) {
+    this.maxEntries = maxEntries;
+    this.entries = new Map();
+  }
+
+  get size() {
+    return this.entries.size;
+  }
+
+  get(key) {
+    const existing = this.entries.get(key);
+    if (existing === undefined) return null;
+    // Re-insert so Map insertion order tracks recency.
+    this.entries.delete(key);
+    this.entries.set(key, existing);
+    return existing;
+  }
+
+  set(key, value) {
+    this.entries.delete(key);
+    this.entries.set(key, value);
+
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value;
+      this.entries.delete(oldest);
+    }
+
+    return value;
+  }
 }
 
 export class RouteSession {
@@ -54,15 +91,17 @@ export async function withFallback(
     throw err;
   }
 
+  // Try the session's sticky target first, then every other ranked target.
+  // Scanning forward from the sticky target's rank would silently abandon
+  // better-ranked healthy targets whenever the sticky target fails.
   const preferred = session.current(ranked, health);
   const preferredId = health.key(preferred);
-  const start = Math.max(
-    0,
-    ranked.findIndex((target) => health.key(target) === preferredId)
-  );
+  const order = [
+    preferred,
+    ...ranked.filter((target) => health.key(target) !== preferredId)
+  ];
 
-  for (let index = start; index < ranked.length; index += 1) {
-    const target = ranked[index];
+  for (const target of order) {
     if (!health.isAvailable(target)) continue;
 
     const startedAt = Date.now();

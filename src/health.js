@@ -95,27 +95,8 @@ export class HealthRegistry {
 
 export const healthRegistry = new HealthRegistry();
 
-export function setHealth(id, status, extra = {}) {
-  const previous = healthRegistry.get(id);
-  healthRegistry.states.set(id, {
-    ...previous,
-    id,
-    status,
-    updatedAt: new Date().toISOString(),
-    ...extra
-  });
-}
-
-export function getHealth(id) {
-  return healthRegistry.get(id);
-}
-
 export function getAllHealth() {
   return healthRegistry.all();
-}
-
-export function ensureTargetHealth(target) {
-  return healthRegistry.ensureTarget(target);
 }
 
 export function isAvailable(target, now = Date.now()) {

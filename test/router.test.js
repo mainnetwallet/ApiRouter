@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { buildTargets, isProviderConfigured, loadConfig } from "../src/config.js";
 import {
   RouteSession,
+  SessionStore,
   isRetryableStatus,
   withFallback
 } from "../src/router.js";
-import { HealthRegistry, refreshAllHealth } from "../src/health.js";
+import { HealthRegistry, refreshAllHealth, healthRegistry } from "../src/health.js";
 
 test("retryable statuses include quota/rate-limit/server failures", () => {
   for (const code of [402, 408, 429, 500, 502, 503, 504]) {
@@ -52,8 +53,8 @@ test("fallback uses best health first and then next best target", async () => {
 
   assert.equal(result, "b");
   assert.deepEqual(tried, ["c", "b"]);
-  assert.equal(health.ensure(targets[2]).status, "failed");
-  assert.ok(health.ensure(targets[2]).cooldownUntil > Date.now());
+  assert.equal(health.ensureTarget(targets[2]).status, "failed");
+  assert.ok(health.ensureTarget(targets[2]).cooldownUntil > Date.now());
 });
 
 test("failed key is cooled down without disabling sibling keys", async () => {
@@ -62,13 +63,16 @@ test("failed key is cooled down without disabling sibling keys", async () => {
     { provider: "gemini", model: "model-a", keyIndex: 1 }
   ];
   const health = new HealthRegistry({ cooldownMs: 900000 });
+  // Rank key-0 first so the failing key is the one the router reaches first.
+  health.markSuccess(targets[0], {}, Date.now());
   health.markSuccess(targets[0], {}, Date.now());
   health.markSuccess(targets[1], {}, Date.now());
-  health.markSuccess(targets[1], {}, Date.now());
 
+  const tried = [];
   const result = await withFallback(
     targets,
     async (target) => {
+      tried.push(target.keyIndex);
       if (target.keyIndex === 1) return "key2";
       const e = new Error("rate limited");
       e.status = 429;
@@ -80,8 +84,13 @@ test("failed key is cooled down without disabling sibling keys", async () => {
   );
 
   assert.equal(result, "key2");
-  assert.equal(health.ensure(targets[0]).status, "failed");
-  assert.equal(health.ensure(targets[1]).status, "healthy");
+  assert.deepEqual(tried, [0, 1]);
+  assert.equal(health.ensureTarget(targets[0]).status, "failed");
+  assert.equal(health.ensureTarget(targets[1]).status, "healthy");
+  // The failed key is cooled down, but its sibling stays routable.
+  assert.equal(health.isAvailable(targets[0]), false);
+  assert.equal(health.isAvailable(targets[1]), true);
+  assert.ok(health.ensureTarget(targets[0]).cooldownUntil > Date.now());
 });
 
 test("sticky session starts from the last successful target", async () => {
@@ -106,8 +115,7 @@ test("sticky session starts from the last successful target", async () => {
     return "ok";
   }, undefined, session, health);
 
-  assert.equal(tried[0], "b");
-});
+  assert.equal(tried[0], "b");});
 
 test("provider is invalid when any required field is missing", () => {
   assert.equal(isProviderConfigured({
@@ -154,6 +162,190 @@ test("health refresh checks every configured key/model target", async () => {
   assert.equal(results.length, 3);
   assert.equal(checked.length, 3);
   assert.equal(new Set(checked).size, 3);
+});
+
+// Regression: the sticky target was used as the loop's *starting index*, so a
+// failing sticky target abandoned every better-ranked healthy target and the
+// request failed with 502 while usable targets remained.
+test("a failing sticky target does not abandon better-ranked healthy targets", async () => {
+  const targets = [
+    { provider: "a", model: "m1", keyIndex: 0 },
+    { provider: "b", model: "m2", keyIndex: 0 },
+    { provider: "c", model: "m3", keyIndex: 0 }
+  ];
+  const health = new HealthRegistry({ cooldownMs: 900000 });
+
+  // a and b end up ranked above c.
+  health.markSuccess(targets[0], {}, Date.now());
+  health.markSuccess(targets[0], {}, Date.now());
+  health.markSuccess(targets[0], {}, Date.now());
+  health.markSuccess(targets[1], {}, Date.now());
+  health.markSuccess(targets[1], {}, Date.now());
+  health.markSuccess(targets[2], {}, Date.now());
+
+  assert.deepEqual(health.rank(targets).map((t) => t.provider), ["a", "b", "c"]);
+
+  // c was the last successful target for this session.
+  const session = new RouteSession();
+  session.saveSuccess(targets[2], health);
+
+  const tried = [];
+  const result = await withFallback(
+    targets,
+    async (target) => {
+      tried.push(target.provider);
+      if (target.provider === "c") {
+        const e = new Error("quota");
+        e.status = 402;
+        throw e;
+      }
+      return target.provider;
+    },
+    undefined,
+    session,
+    health
+  );
+
+  assert.equal(result, "a");
+  assert.deepEqual(tried, ["c", "a"]);
+});
+
+test("routing never retries a target that already failed in the same request", async () => {
+  const targets = [
+    { provider: "a", model: "m1", keyIndex: 0 },
+    { provider: "b", model: "m2", keyIndex: 0 }
+  ];
+  const health = new HealthRegistry({ cooldownMs: 900000 });
+
+  const tried = [];
+  await withFallback(
+    targets,
+    async (target) => {
+      tried.push(target.provider);
+      const e = new Error("nope");
+      e.status = 503;
+      throw e;
+    },
+    undefined,
+    new RouteSession(),
+    health
+  ).catch(() => {});
+
+  assert.deepEqual(tried, ["a", "b"]);
+  assert.equal(new Set(tried).size, tried.length);
+});
+
+test("a non-retryable failure stops routing immediately", async () => {
+  const targets = [
+    { provider: "a", model: "m1", keyIndex: 0 },
+    { provider: "b", model: "m2", keyIndex: 0 }
+  ];
+  const health = new HealthRegistry({ cooldownMs: 900000 });
+  const session = new RouteSession();
+
+  const tried = [];
+  await assert.rejects(
+    () => withFallback(
+      targets,
+      async (target) => {
+        tried.push(target.provider);
+        const e = new Error("unauthorized");
+        e.status = 401;
+        throw e;
+      },
+      undefined,
+      session,
+      health
+    ),
+    (error) => error.status === 401
+  );
+
+  assert.deepEqual(tried, ["a"]);
+  // A non-retryable failure must not cool the target down.
+  assert.equal(health.isAvailable(targets[0]), true);
+});
+
+test("cooldown expiry makes a target routable again", async () => {
+  const target = { provider: "a", model: "m1", keyIndex: 0 };
+  const health = new HealthRegistry({ cooldownMs: 1000 });
+  const t0 = Date.now();
+
+  health.markFailure(target, 429, {}, t0);
+  assert.equal(health.isAvailable(target, t0 + 500), false);
+  assert.equal(health.isAvailable(target, t0 + 1500), true);
+});
+
+test("ranking excludes cooled-down targets but keeps sibling keys", () => {
+  const key0 = { provider: "gemini", model: "m", keyIndex: 0 };
+  const key1 = { provider: "gemini", model: "m", keyIndex: 1 };
+  const health = new HealthRegistry({ cooldownMs: 60000 });
+
+  health.markFailure(key0, 429);
+
+  assert.deepEqual(health.rank([key0, key1]), [key1]);
+  assert.equal(health.isAvailable(key1), true);
+});
+
+test("health refreshes recover a cooled-down target", async (t) => {
+  const target = { provider: "probe", model: "recover", keyIndex: 0 };
+  t.after(() => healthRegistry.states.delete("probe:recover:key-0"));
+
+  healthRegistry.markFailure(target, 503);
+  assert.equal(healthRegistry.isAvailable(target), false);
+
+  await refreshAllHealth([target], async () => ({ ok: true, status: 200 }));
+
+  assert.equal(healthRegistry.isAvailable(target), true);
+  assert.equal(healthRegistry.get("probe:recover:key-0").status, "healthy");
+});
+
+test("a failed health check records the provider status", async (t) => {
+  const target = { provider: "probe", model: "down", keyIndex: 0 };
+  t.after(() => healthRegistry.states.delete("probe:down:key-0"));
+
+  await refreshAllHealth([target], async () => ({ ok: false, status: 500 }));
+
+  const state = healthRegistry.get("probe:down:key-0");
+  assert.equal(state.status, "failed");
+  assert.equal(state.lastStatus, 500);
+});
+
+test("a health check that throws cools the target down", async (t) => {
+  t.after(() => healthRegistry.states.delete("probe:throwing:key-0"));
+
+  const target = { provider: "probe", model: "throwing", keyIndex: 0 };
+  const results = await refreshAllHealth([target], async () => {
+    const error = new Error("connection refused");
+    error.status = 503;
+    throw error;
+  });
+
+  assert.equal(results[0].error, "connection refused");
+  assert.equal(healthRegistry.get("probe:throwing:key-0").status, "failed");
+  assert.equal(healthRegistry.get("probe:throwing:key-0").lastStatus, 503);
+});
+
+test("session store bounds client-supplied sessions and evicts the least recent", () => {
+  const store = new SessionStore({ maxEntries: 2 });
+
+  store.set("a", { id: "a" });
+  store.set("b", { id: "b" });
+
+  // Touch "a" so "b" becomes the least recently used entry.
+  assert.deepEqual(store.get("a"), { id: "a" });
+
+  store.set("c", { id: "c" });
+
+  assert.equal(store.size, 2);
+  assert.deepEqual(store.get("a"), { id: "a" });
+  assert.equal(store.get("b"), null);
+  assert.deepEqual(store.get("c"), { id: "c" });
+});
+
+test("session store is empty until a session is used", () => {
+  const store = new SessionStore();
+  assert.equal(store.get("missing"), null);
+  assert.equal(store.size, 0);
 });
 
 function targetId(target) {

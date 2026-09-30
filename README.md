@@ -54,6 +54,7 @@ Retryable statuses:
 | POST | /v1/messages |
 | POST | /v1/responses |
 | POST | /v1/chat/completions |
+| POST | /v1beta/models/{model}:generateContent |
 
 ## Test
 

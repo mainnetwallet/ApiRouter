@@ -6,10 +6,6 @@ export function providerProtocols(provider) {
   return ["openai-chat"];
 }
 
-export function providerProtocol(provider) {
-  return providerProtocols(provider)[0];
-}
-
 function joinUrl(baseUrl, suffix) {
   const base = String(baseUrl || "").replace(/\/+$/, "");
   const path = String(suffix || "").replace(/^\/+/, "");
