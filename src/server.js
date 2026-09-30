@@ -1,13 +1,32 @@
 import http from "node:http";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { loadConfig, buildTargets } from "./config.js";
 import { getAllHealth, rankTargets, healthRegistry, startHealthMonitor } from "./health.js";
-import { RouteSession, withFallback } from "./router.js";
+import { RouteSession, SessionStore, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 
 const config = loadConfig();
 const targets = buildTargets(config.providers);
-const sessions = new Map();
+const sessions = new SessionStore();
+
+function isAbortError(error) {
+  return error?.name === "AbortError" || error?.name === "TimeoutError";
+}
+
+/**
+ * `fetch` rejects with a DOMException whose `message`/`name` are getter-only,
+ * so an aborted request must be converted into a fresh Error. Assigning to
+ * `error.message` directly throws a TypeError and destroys the 408 status,
+ * which silently disables retry/fallback for timed-out upstreams.
+ */
+function toTimeoutError(message) {
+  const error = new Error(message);
+  error.name = "TimeoutError";
+  error.status = 408;
+  return error;
+}
 
 async function checkTargetHealth(target) {
   const controller = new AbortController();
@@ -28,9 +47,8 @@ async function checkTargetHealth(target) {
 
     return { ok: true, status: upstream.status };
   } catch (error) {
-    if (error.name === "AbortError") {
-      error.status = 408;
-      error.message = "Provider health check timed out";
+    if (isAbortError(error)) {
+      throw toTimeoutError("Provider health check timed out");
     }
     throw error;
   } finally {
@@ -55,8 +73,13 @@ function getSession(req, protocol) {
   const requested = String(req.headers["x-multi-ai-session-id"] || "").trim();
   const id = requested || createSessionId();
   const key = protocol + ":" + id;
-  if (!sessions.has(key)) sessions.set(key, { id, protocol, session: new RouteSession() });
-  return { id, state: sessions.get(key) };
+
+  let state = sessions.get(key);
+  if (!state) {
+    state = sessions.set(key, { id, protocol, session: new RouteSession() });
+  }
+
+  return { id, state };
 }
 
 function publicFailure(error) {
@@ -69,7 +92,7 @@ function publicFailure(error) {
   }));
 }
 
-async function proxy(req, res, protocol) {
+async function proxy(req, res, protocol, pathname) {
   if (!authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
 
   let body;
@@ -80,7 +103,10 @@ async function proxy(req, res, protocol) {
   const compatible = targets.filter((target) => target.protocols.includes(protocol));
   if (compatible.length === 0) return json(res, 503, { error: { message: "No configured provider targets support this client protocol", type: "no_route" } });
 
-  const geminiPathModel = protocol === "gemini" ? pathname.match(/^\/v1beta\/models\/([^:]+):generateContent$/)?.[1] : "";\n  const requestedModel = typeof body.model === "string" ? body.model : (geminiPathModel || "");
+  const geminiPathModel = protocol === "gemini"
+    ? pathname.match(/^\/v1beta\/models\/([^:]+):generateContent$/)?.[1] || ""
+    : "";
+  const requestedModel = typeof body.model === "string" ? body.model : geminiPathModel;
   const exact = requestedModel ? compatible.filter((target) => target.model === requestedModel) : [];
   const routeTargets = exact.length ? exact : compatible;
 
@@ -101,7 +127,7 @@ async function proxy(req, res, protocol) {
           }
           return { upstream, target };
         } catch (error) {
-          if (error.name === "AbortError") { error.status = 408; error.message = "Upstream request timed out"; }
+          if (isAbortError(error)) throw toTimeoutError("Upstream request timed out");
           throw error;
         } finally { clearTimeout(timer); }
       },
@@ -120,15 +146,14 @@ async function proxy(req, res, protocol) {
       "x-multi-ai-session-id": sessionId
     });
     if (result.upstream.body) {
-      const reader = result.upstream.body.getReader();
       try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          res.write(Buffer.from(chunk.value));
-        }
-      } finally {
-        res.end();
+        // pipeline() applies backpressure and tears down the upstream reader
+        // when the client disconnects.
+        await pipeline(Readable.fromWeb(result.upstream.body), res);
+      } catch {
+        // Headers are already on the wire, so the failure cannot be reported
+        // as a JSON error response. Drop the connection instead.
+        res.destroy();
       }
     } else {
       res.end();
@@ -152,7 +177,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   const protocol = req.method === "POST" ? clientProtocol(pathname) : null;
-  if (protocol) return proxy(req, res, protocol);
+  if (protocol) return proxy(req, res, protocol, pathname);
 
   return json(res, 404, { error: { message: "Not found", type: "not_found" } });
 });

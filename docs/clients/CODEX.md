@@ -16,12 +16,15 @@ http://127.0.0.1:8788/v1
 
 ## Configure provider
 
-Use an OpenAI-compatible provider configured in `.env`, for example:
+Codex speaks the OpenAI Responses protocol, so you need a provider whose
+capability includes OpenAI Responses. AgentRouter does; ordinary
+OpenAI-chat-only providers (Groq, Mistral, Cerebras, ...) do not and will be
+rejected with `503 no_route`.
 
 ```env
-GROQ_API_KEYS=YOUR_PROVIDER_KEY
-GROQ_MODELS=YOUR_MODEL
-GROQ_BASE_URL=https://api.groq.com/openai/v1
+AGENTROUTER_API_KEYS=YOUR_PROVIDER_KEY
+AGENTROUTER_MODELS=YOUR_MODEL
+AGENTROUTER_BASE_URL=https://agentrouter.org/
 ```
 
 ## Configure Codex

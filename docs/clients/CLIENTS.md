@@ -9,6 +9,11 @@ MultiAI Router provides one gateway for different AI client protocols.
 | OpenCode | `/v1/chat/completions` | OpenAI-compatible |
 | Qwen Code | `/v1/chat/completions` | OpenAI-compatible |
 | OpenAI SDKs | `/v1/chat/completions` | OpenAI-compatible |
+| Gemini clients | `/v1beta/models/{model}:generateContent` | Gemini generateContent |
+
+Provider protocol capabilities are explicit. OpenAI Chat Completions and OpenAI
+Responses are separate capabilities, so a chat-only provider never receives a
+Responses request. Gemini is served by its native `generateContent` protocol.
 
 ## Gateway key
 
