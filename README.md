@@ -354,16 +354,3 @@ This keeps the routing core reusable while allowing each provider to implement t
 ## License
 
 See the repository for the current project license and distribution terms.
-
-## Client Integration Guides
-
-Use the same MultiAI Router gateway from different AI clients:
-
-- [Claude Code](docs/clients/CLAUDE_CODE.md) — Anthropic `/v1/messages`
-- [Codex](docs/clients/CODEX.md) — OpenAI `/v1/responses`
-- [OpenCode](docs/clients/OPENCODE.md) — OpenAI-compatible `/v1/chat/completions`
-- [All client protocols](docs/clients/CLIENTS.md)
-- [Generic OpenAI-compatible clients](docs/clients/GENERIC_OPENAI.md)
-- [Other AI clients](docs/clients/OTHER_CLIENTS.md)
-
-The client guides intentionally use separate configuration files so each client can be configured independently while sharing the same router.
