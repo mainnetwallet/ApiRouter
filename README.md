@@ -6,6 +6,19 @@ MultiAI Router builds a global pool of provider/model/API-key targets, tracks ea
 
 > Current status: the repository contains the routing, health, configuration, and HTTP discovery core. Provider-specific request adapters and final upstream proxy endpoints are the next integration layer.
 
+## Client Integration Guides
+
+Use MultiAI Router with different AI clients:
+
+- [Claude Code](docs/clients/CLAUDE_CODE.md) — Anthropic `/v1/messages`
+- [Codex](docs/clients/CODEX.md) — OpenAI `/v1/responses`
+- [OpenCode](docs/clients/OPENCODE.md) — OpenAI-compatible `/v1/chat/completions`
+- [Generic OpenAI-compatible clients](docs/clients/GENERIC_OPENAI.md)
+- [Other AI clients](docs/clients/OTHER_CLIENTS.md)
+- [All client protocols](docs/clients/CLIENTS.md)
+
+The client guides are separated so each client can be configured independently while sharing the same MultiAI Router gateway.
+
 ## Features
 
 - Multi-provider routing
