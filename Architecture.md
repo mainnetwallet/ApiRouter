@@ -73,10 +73,14 @@ This allows one failed API key to enter cooldown while sibling keys remain avail
 ## Protocol Mapping
 
 ```text
-AgentRouter → anthropic, openai
-Gemini      → gemini
-Other       → openai
+AgentRouter → Anthropic Messages, OpenAI Chat, OpenAI Responses
+Gemini      → Gemini generateContent
+Other       → OpenAI Chat Completions
 ```
+
+Client protocol capabilities are matched explicitly. OpenAI Chat and OpenAI Responses are separate capabilities, so a chat-only provider cannot receive a Responses request.
+
+Gemini uses the native `generateContent` protocol and standard model path.
 
 The adapter converts the common gateway request into the provider request format.
 
@@ -102,11 +106,13 @@ Default failed-target cooldown:
 15 minutes
 ```
 
-Default health refresh interval provided by the health module:
+Default health refresh interval:
 
 ```text
 15 minutes
 ```
+
+The server starts the health monitor at startup and stops it cleanly on SIGINT/SIGTERM.
 
 Retryable status codes:
 
