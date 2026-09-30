@@ -1,11 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-const OPENAI_PROTOCOL_PROVIDERS = new Set(["groq","huggingface","mistral","openrouter","cerebras","sambanova","cohere","zai"]);
-
 export function providerProtocols(provider) {
-  if (provider === "agentrouter") return ["anthropic", "openai"];
+  if (provider === "agentrouter") return ["anthropic", "openai-chat", "openai-responses"];
   if (provider === "gemini") return ["gemini"];
-  return ["openai"];
+  return ["openai-chat"];
 }
 
 export function providerProtocol(provider) {
@@ -19,44 +17,87 @@ function joinUrl(baseUrl, suffix) {
 }
 
 export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {}) {
-  const payload = { ...(body || {}), model: target.model };
-  const headers = { "content-type": "application/json", accept: incomingHeaders.accept || "application/json" };\n  if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];\n  if (incomingHeaders.originator) headers.originator = incomingHeaders.originator;
+  const headers = {
+    "content-type": "application/json",
+    accept: incomingHeaders.accept || "application/json"
+  };
+
+  if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
+  if (incomingHeaders.originator) headers.originator = incomingHeaders.originator;
+
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
   let url;
+  let payload = { ...(body || {}) };
 
   if (protocol === "anthropic") {
     url = joinUrl(base, base.endsWith("/v1") ? "messages" : "v1/messages");
+    payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
     headers["anthropic-version"] = incomingHeaders["anthropic-version"] || "2023-06-01";
     if (incomingHeaders["anthropic-beta"]) headers["anthropic-beta"] = incomingHeaders["anthropic-beta"];
-  } else if (protocol === "responses") {
+  } else if (protocol === "openai-responses") {
     url = joinUrl(base, base.endsWith("/v1") ? "responses" : "v1/responses");
+    payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
-  } else {
+  } else if (protocol === "openai-chat") {
     url = joinUrl(base, base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions");
+    payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
+  } else if (protocol === "gemini") {
+    url = joinUrl(
+      base,
+      "v1beta/models/" + encodeURIComponent(target.model) + ":generateContent"
+    );
+    headers["x-goog-api-key"] = target.apiKey;
+  } else {
+    throw new Error("Unsupported upstream protocol: " + protocol);
   }
 
-  return { url, options: { method: "POST", headers, body: JSON.stringify(payload) } };
+  return {
+    url,
+    options: {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload)
+    }
+  };
 }
 
-export function createSessionId() { return randomUUID(); }
+export function createSessionId() {
+  return randomUUID();
+}
 
 export async function readJsonBody(req, maxBytes = 10 * 1024 * 1024) {
   const chunks = [];
   let size = 0;
+
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > maxBytes) { const error = new Error("Request body too large"); error.status = 413; throw error; }
+
+    if (size > maxBytes) {
+      const error = new Error("Request body too large");
+      error.status = 413;
+      throw error;
+    }
+
     chunks.push(chunk);
   }
+
   if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    const error = new Error("Invalid JSON request body");
+    error.status = 400;
+    throw error;
+  }
 }
 
 export function clientProtocol(pathname) {
   if (pathname === "/v1/messages") return "anthropic";
-  if (pathname === "/v1/responses") return "responses";
-  if (pathname === "/v1/chat/completions") return "openai";
+  if (pathname === "/v1/responses") return "openai-responses";
+  if (pathname === "/v1/chat/completions") return "openai-chat";
+  if (pathname === "/v1beta/models:generateContent") return "gemini";
   return null;
 }
