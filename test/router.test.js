@@ -26,12 +26,12 @@ test("fallback uses best health first and then next best target", async () => {
     { provider: "c", model: "m3", keyIndex: 0 }
   ];
   const health = new HealthRegistry({ cooldownMs: 900000 });
-  health.recordSuccess(targets[0], null, Date.now());
-  health.recordSuccess(targets[1], null, Date.now());
-  health.recordSuccess(targets[1], null, Date.now());
-  health.recordSuccess(targets[2], null, Date.now());
-  health.recordSuccess(targets[2], null, Date.now());
-  health.recordSuccess(targets[2], null, Date.now());
+  health.markSuccess(targets[0], null, Date.now());
+  health.markSuccess(targets[1], null, Date.now());
+  health.markSuccess(targets[1], null, Date.now());
+  health.markSuccess(targets[2], null, Date.now());
+  health.markSuccess(targets[2], null, Date.now());
+  health.markSuccess(targets[2], null, Date.now());
 
   const tried = [];
   const result = await withFallback(
@@ -62,9 +62,9 @@ test("failed key is cooled down without disabling sibling keys", async () => {
     { provider: "gemini", model: "model-a", keyIndex: 1 }
   ];
   const health = new HealthRegistry({ cooldownMs: 900000 });
-  health.recordSuccess(targets[0], null, Date.now());
-  health.recordSuccess(targets[1], null, Date.now());
-  health.recordSuccess(targets[1], null, Date.now());
+  health.markSuccess(targets[0], null, Date.now());
+  health.markSuccess(targets[1], null, Date.now());
+  health.markSuccess(targets[1], null, Date.now());
 
   const result = await withFallback(
     targets,
