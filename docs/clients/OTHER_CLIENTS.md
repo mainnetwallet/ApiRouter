@@ -1,39 +1,34 @@
 # Other AI Clients
 
-MultiAI Router is intentionally not tied to one CLI.
+## OpenAI-compatible
 
-## OpenAI-compatible clients
+Use:
 
-Use the gateway base URL:
+```text
+http://127.0.0.1:8788/v1
+```
 
-    http://127.0.0.1:8788/v1
+This pattern can work with clients that support a custom OpenAI-compatible provider, including:
 
-Typical clients that can use a custom OpenAI-compatible endpoint include:
-
-- OpenAI SDK applications
-- OpenCode
 - Cursor
 - Cline
 - Roo Code
 - Continue
 - Qwen Code
 - Crush
-- custom Node.js applications
-- custom Python applications
+- custom Node.js/Python apps
 - cURL/API clients
 
-Exact UI/configuration names differ by application, so use the client's provider settings to set its custom base URL and API key.
+Set the custom base URL and use the MultiAI Router gateway key if authentication is enabled.
 
-## Claude-compatible clients
+## Anthropic-compatible
 
 Clients using the Anthropic Messages protocol should use:
 
-    http://127.0.0.1:8788
+```text
+http://127.0.0.1:8788
+```
 
-with the Anthropic authentication environment variables or equivalent custom gateway configuration.
+The router only falls back between targets compatible with the requested protocol.
 
-## Protocol rule
-
-Do not force an Anthropic client through an OpenAI-only target or an OpenAI Responses client through a provider that does not implement Responses.
-
-MultiAI Router keeps protocol selection separate from health ranking so fallback only occurs across compatible targets.
+For exact client configuration, use the client's own documentation.
