@@ -2,10 +2,14 @@ import { randomUUID } from "node:crypto";
 
 const OPENAI_PROTOCOL_PROVIDERS = new Set(["groq","huggingface","mistral","openrouter","cerebras","sambanova","cohere","zai"]);
 
+export function providerProtocols(provider) {
+  if (provider === "agentrouter") return ["anthropic", "openai"];
+  if (provider === "gemini") return ["gemini"];
+  return ["openai"];
+}
+
 export function providerProtocol(provider) {
-  if (provider === "agentrouter") return "anthropic";
-  if (provider === "gemini") return "gemini";
-  return OPENAI_PROTOCOL_PROVIDERS.has(provider) || provider === "cloudflare" ? "openai" : "openai";
+  return providerProtocols(provider)[0];
 }
 
 function joinUrl(baseUrl, suffix) {
@@ -16,7 +20,7 @@ function joinUrl(baseUrl, suffix) {
 
 export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {}) {
   const payload = { ...(body || {}), model: target.model };
-  const headers = { "content-type": "application/json", accept: incomingHeaders.accept || "application/json" };
+  const headers = { "content-type": "application/json", accept: incomingHeaders.accept || "application/json" };\n  if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];\n  if (incomingHeaders.originator) headers.originator = incomingHeaders.originator;
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
   let url;
 
