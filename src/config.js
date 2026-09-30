@@ -1,4 +1,4 @@
-export const RETRYABLE_STATUS = new Set([402, 408, 429, 500, 502, 503, 504]);
+const DEFAULT_RETRY_STATUS_CODES = [402, 408, 429, 500, 502, 503, 504];
 
 const PROVIDER_DEFAULTS = {
   agentrouter: { baseUrl: "https://agentrouter.org/" },
@@ -30,7 +30,7 @@ export function loadConfig(env = process.env) {
   return {
     port: Number(env.PORT || 8788),
     timeoutMs: Number(env.REQUEST_TIMEOUT_MS || 120000),
-    retryableStatus: RETRYABLE_STATUS,
+    retryableStatus: new Set(\n      (env.RETRY_STATUS_CODES || DEFAULT_RETRY_STATUS_CODES.join(","))\n        .split(",")\n        .map((v) => Number(v.trim()))\n        .filter((v) => Number.isInteger(v) && v >= 100 && v <= 599)\n    ),
     providers
   };
 }
