@@ -48,7 +48,7 @@ async function proxy(req, res, protocol) {
   catch (error) { return json(res, error.status || 400, { error: { message: error.message, type: "invalid_request_error" } }); }
 
   const sessionInfo = getSession(req, protocol);
-  const compatible = targets.filter((target) => target.protocols.includes(protocol === "responses" ? "openai" : protocol));
+  const compatible = targets.filter((target) => target.protocols.includes(protocol));
   if (compatible.length === 0) return json(res, 503, { error: { message: "No configured provider targets support this client protocol", type: "no_route" } });
 
   const requestedModel = typeof body.model === "string" ? body.model : "";
