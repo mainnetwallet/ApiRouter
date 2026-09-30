@@ -1,3 +1,4 @@
+import "dotenv/config";
 import http from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
