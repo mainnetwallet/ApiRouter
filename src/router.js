@@ -1,6 +1,6 @@
-import { RETRYABLE_STATUS } from "./config.js";
+export function isRetryableStatus(status, retryableStatus) { return retryableStatus.has(Number(status)); }
 
-export function isRetryableStatus(status) { return RETRYABLE_STATUS.has(Number(status)); }
+
 
 export async function withFallback(targets, invoke) {
   const failures = [];
