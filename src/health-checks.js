@@ -67,7 +67,7 @@ export function healthProbePlan(target) {
 
   if (protocols.includes("openai-chat") || protocols.includes("openai-responses")) {
     return {
-      provider: "openai-compatible",
+      provider: target.provider === "agentrouter" ? "agentrouter-openai" : "openai-compatible",
       // GET /v1/models — the OpenAI-compatible List Models endpoint, resolved
       // against the same base the request adapter targets.
       url: versionedBase(base, OPENAI_API_VERSION) + "/models",
