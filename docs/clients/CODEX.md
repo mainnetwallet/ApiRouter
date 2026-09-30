@@ -1,75 +1,65 @@
 # Codex + MultiAI Router
 
-Use MultiAI Router as a custom OpenAI-compatible provider for Codex.
+Use the router as Codex's OpenAI Responses gateway.
 
-Codex supports custom model_providers with base_url and env_key in its user-level config.toml.
+## Start
 
-## 1. Start MultiAI Router
+```powershell
+npm start
+```
 
-    npm start
+Gateway:
 
-Default gateway:
+```text
+http://127.0.0.1:8788/v1
+```
 
-    http://127.0.0.1:8788
+## Configure provider
 
-## 2. Configure the router
+Use an OpenAI-compatible provider configured in `.env`, for example:
 
-Example .env:
+```env
+GROQ_API_KEYS=YOUR_PROVIDER_KEY
+GROQ_MODELS=YOUR_MODEL
+GROQ_BASE_URL=https://api.groq.com/openai/v1
+```
 
-    GROQ_API_KEYS=YOUR_KEY
-    GROQ_MODELS=YOUR_MODEL
-    GROQ_BASE_URL=https://api.groq.com/openai/v1
+## Configure Codex
 
-Or configure any of the OpenAI-compatible providers supported by the repository.
+Edit:
 
-## 3. Configure Codex
-
-Open the user-level Codex config:
-
-    notepad $HOME\.codex\config.toml
+```powershell
+notepad $HOME\.codex\config.toml
+```
 
 Example:
 
-    model_provider = "multi_ai_router"
+```toml
+model_provider = "multi_ai_router"
 
-    [model_providers.multi_ai_router]
-    name = "MultiAI Router"
-    base_url = "http://127.0.0.1:8788/v1"
-    env_key = "MULTIAI_ROUTER_API_KEY"
-    wire_api = "responses"
+[model_providers.multi_ai_router]
+name = "MultiAI Router"
+base_url = "http://127.0.0.1:8788/v1"
+env_key = "MULTIAI_ROUTER_API_KEY"
+wire_api = "responses"
+```
 
-Then set the gateway key if gateway authentication is enabled:
+Then, if gateway authentication is enabled:
 
-    $env:MULTIAI_ROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
+```powershell
+$env:MULTIAI_ROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
+```
 
-Start Codex:
+Start:
 
-    codex
+```powershell
+codex
+```
 
-## 4. Model selection
+Codex requests use:
 
-Set the model requested by Codex to a model configured in the router when you want exact-model routing.
+```text
+POST /v1/responses
+```
 
-If that exact model is unavailable, the router can use another configured target in the same compatible protocol pool when fallback is required.
-
-## 5. Routing flow
-
-    Codex
-      |
-      v
-    POST /v1/responses
-      |
-      v
-    MultiAI Router
-      |
-      +--> health-ranked target
-      +--> provider/model/key
-      +--> retryable failure
-      +--> next target
-
-## 6. Important
-
-Codex uses the OpenAI Responses wire API here. The router maps /v1/responses to its OpenAI-compatible upstream target adapter.
-
-Official reference:
-https://developers.openai.com/docs/config-file/config-reference
+Reference: https://developers.openai.com/docs/config-file/config-reference
