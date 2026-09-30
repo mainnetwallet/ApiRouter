@@ -26,7 +26,13 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
   let payload = { ...(body || {}) };
 
   if (protocol === "anthropic") {
-    url = joinUrl(base, base.endsWith("/v1") ? "messages" : "v1/messages");
+    // AgentRouter exposes Anthropic Messages at the root host (no /v1),
+    // while its OpenAI-compatible API uses /v1. Keep a single configured
+    // AgentRouter base URL and normalize it per protocol here.
+    const anthropicBase = target.provider === "agentrouter"
+      ? base.replace(/\/v1$/i, "")
+      : base;
+    url = joinUrl(anthropicBase, "v1/messages");
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
     headers["anthropic-version"] = incomingHeaders["anthropic-version"] || "2023-06-01";
