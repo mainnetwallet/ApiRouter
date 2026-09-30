@@ -80,7 +80,7 @@ async function proxy(req, res, protocol) {
   const compatible = targets.filter((target) => target.protocols.includes(protocol));
   if (compatible.length === 0) return json(res, 503, { error: { message: "No configured provider targets support this client protocol", type: "no_route" } });
 
-  const requestedModel = typeof body.model === "string" ? body.model : "";
+  const geminiPathModel = protocol === "gemini" ? pathname.match(/^\/v1beta\/models\/([^:]+):generateContent$/)?.[1] : "";\n  const requestedModel = typeof body.model === "string" ? body.model : (geminiPathModel || "");
   const exact = requestedModel ? compatible.filter((target) => target.model === requestedModel) : [];
   const routeTargets = exact.length ? exact : compatible;
 
