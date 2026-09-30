@@ -31,6 +31,8 @@ export function buildTargets(providers) {
           provider: providerId,
           model,
           baseUrl: provider.baseUrl,
+          apiKey: provider.apiKeys[keyIndex],
+          protocol: providerProtocol(providerId),
           keyIndex
         });
       }
