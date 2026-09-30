@@ -8,9 +8,14 @@ import net from "node:net";
  *   { status, headers, body }        - body: string | Buffer | object
  *   { status, stream: [chunk, ...] } - chunked/SSE response
  *   { hang: true }                   - never responds (timeout tests)
+ *
+ * `options.health` scripts the health-probe (GET) response, which defaults to
+ * 404 so unrelated tests keep observing a provider without a models endpoint.
+ * It accepts the same descriptors as `script`, or a function of the record.
  */
-export async function startMockUpstream(script) {
+export async function startMockUpstream(script, options = {}) {
   const requests = [];
+  const healthScript = options.health ?? (() => ({ status: 404, body: {} }));
 
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -29,10 +34,28 @@ export async function startMockUpstream(script) {
       };
       requests.push(record);
 
-      // Health monitor probes the provider base URL with GET.
+      // Health probes are GETs; route them to the health script.
       if (req.method === "GET") {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end("{}");
+        const descriptor = (typeof healthScript === "function"
+          ? healthScript(record, requests.length - 1)
+          : healthScript) || {};
+
+        if (descriptor.hang) return; // probe timeout tests
+
+        const healthDelay = descriptor.delayMs || 0;
+        const reply = () => {
+          const body = typeof descriptor.body === "string" || Buffer.isBuffer(descriptor.body)
+            ? descriptor.body
+            : JSON.stringify(descriptor.body ?? {});
+          res.writeHead(descriptor.status || 200, {
+            "content-type": "application/json",
+            ...(descriptor.headers || {})
+          });
+          res.end(body);
+        };
+
+        if (healthDelay) setTimeout(reply, healthDelay);
+        else reply();
         return;
       }
 
