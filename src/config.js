@@ -1,4 +1,4 @@
-import { providerProtocol } from "./adapters.js";
+import { providerProtocols } from "./adapters.js";
 
 const DEFAULT_RETRY_STATUS_CODES = [402, 408, 429, 500, 502, 503, 504];
 
@@ -34,7 +34,7 @@ export function buildTargets(providers) {
           model,
           baseUrl: provider.baseUrl,
           apiKey: provider.apiKeys[keyIndex],
-          protocol: providerProtocol(providerId),
+          protocols: providerProtocols(providerId),
           keyIndex
         });
       }
