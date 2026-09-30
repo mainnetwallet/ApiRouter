@@ -48,7 +48,7 @@ async function proxy(req, res, protocol) {
   catch (error) { return json(res, error.status || 400, { error: { message: error.message, type: "invalid_request_error" } }); }
 
   const sessionInfo = getSession(req, protocol);
-  const compatible = targets.filter((target) => target.protocol === (protocol === "responses" ? "openai" : protocol));
+  const compatible = targets.filter((target) => target.protocols.includes(protocol === "responses" ? "openai" : protocol));
   if (compatible.length === 0) return json(res, 503, { error: { message: "No configured provider targets support this client protocol", type: "no_route" } });
 
   const requestedModel = typeof body.model === "string" ? body.model : "";
@@ -113,7 +113,7 @@ const server = http.createServer(async (req, res) => {
   const pathname = new URL(req.url, "http://127.0.0.1").pathname;
 
   if (req.method === "GET" && pathname === "/health") {
-    const ranked = rankTargets(targets).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, protocol: target.protocol }));
+    const ranked = rankTargets(targets).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, protocols: target.protocols }));
     return json(res, 200, { ok: true, service: "multi-ai-router", providers: PROVIDERS, configuredTargets: targets.length, health: getAllHealth(), rankedTargets: ranked, retryableStatus: [...config.retryableStatus] });
   }
 
