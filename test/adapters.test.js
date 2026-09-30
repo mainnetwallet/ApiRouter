@@ -10,7 +10,7 @@ test("client protocols are explicit", () => {
   assert.equal(clientProtocol("/v1/messages"), "anthropic");
   assert.equal(clientProtocol("/v1/responses"), "openai-responses");
   assert.equal(clientProtocol("/v1/chat/completions"), "openai-chat");
-  assert.equal(clientProtocol("/v1beta/models:generateContent"), "gemini");
+  assert.equal(clientProtocol("/v1beta/models/gemini-model:generateContent"), "gemini");
 });
 
 test("provider capabilities distinguish chat and responses", () => {
