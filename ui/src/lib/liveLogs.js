@@ -67,8 +67,11 @@ export const STATE_TONE = Object.freeze({
 export const LIVE_STATES = Object.freeze([STATE.ROUTING, STATE.RUNNING, STATE.RETRYING]);
 export const isLive = (row) => LIVE_STATES.includes(row?.state);
 
-/** Cap on retained rows, so a long-open tab cannot grow without bound. */
-export const MAX_ROWS = 1000;
+/**
+ * Live Logs keeps the last 50 calls. When a newer call arrives past that, the
+ * oldest one is dropped, so the view stays short and a long-open tab cannot grow.
+ */
+export const MAX_ROWS = 50;
 
 const isNum = (value) => typeof value === "number" && Number.isFinite(value);
 const optInt = (value) => (Number.isInteger(value) ? value : null);

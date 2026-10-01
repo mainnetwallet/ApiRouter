@@ -12,14 +12,15 @@ import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
 import { getRequests } from "../api/requests.js";
 import { openRequestStream } from "../api/liveStream.js";
-import { filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows } from "../lib/liveLogs.js";
+import { MAX_ROWS, filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows } from "../lib/liveLogs.js";
 import { providerLabel } from "../lib/format.js";
 
 /** Only a fallback: while the live stream is open nothing is polled. */
 const POLL_MS = 1_000;
 /** How often the elapsed time of a running call ticks on screen. */
 const TICK_MS = 250;
-const PAGE_LIMIT = 200;
+/** Same as the number of calls the page keeps, so a snapshot never fetches more. */
+const PAGE_LIMIT = MAX_ROWS;
 
 /**
  * Live execution log.
@@ -72,7 +73,7 @@ export default function LiveLogs() {
     maxSeq.current = next;
     if (restarted) {
       floor.current = 0;
-      setRows(fresh);
+      setRows(mergeRows([], fresh));
     } else if (fresh.length > 0) {
       setRows((current) => mergeRows(current, fresh));
     }
@@ -196,7 +197,7 @@ export default function LiveLogs() {
         <FilterBar
           actions={
             <span className="tiny dim nowrap">
-              {filtering ? `${visible.length} of ${rows.length} calls` : `${rows.length} calls`}
+              {filtering ? `${visible.length} of ${rows.length} calls` : `${rows.length} calls`} · keeps last {MAX_ROWS}
             </span>
           }
         >

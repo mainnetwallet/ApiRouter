@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  STATE, STEP, buildRow, filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows
+  MAX_ROWS, STATE, STEP, buildRow, filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows
 } from "../liveLogs.js";
 import { createSseParser } from "../../api/liveStream.js";
 import { LiveLogList, LiveLogRow, describeOutcome, describeStepOutcome, formatClock } from "../../components/domain/LiveLogList.jsx";
@@ -424,5 +424,39 @@ describe("SSE parser", () => {
   it("handles CRLF and skips malformed data without throwing", () => {
     const out = collect(['event: snapshot\r\ndata: {"ok":true}\r\n\r\n', "event: x\ndata: {oops\n\n", 'event: y\ndata: {"n":1}\n\n']);
     expect(out.map((e) => e.event)).toEqual(["snapshot", "y"]);
+  });
+});
+
+describe("only the last 50 calls are kept", () => {
+  const call = (n) => buildRow(finished({ startSeq: n, seq: n, id: `id-${n}`, receivedAt: T0 + n * 1000 }));
+
+  it("keeps 50", () => {
+    expect(MAX_ROWS).toBe(50);
+  });
+
+  it("drops the oldest call as soon as a newer one arrives past 50", () => {
+    let rows = [];
+    for (let n = 1; n <= 50; n += 1) rows = mergeRows(rows, [call(n)]);
+    expect(rows).toHaveLength(50);
+    expect(rows[0].requestId).toBe("id-1");
+
+    rows = mergeRows(rows, [call(51)]);
+    expect(rows).toHaveLength(50);
+    expect(rows[0].requestId).toBe("id-2");
+    expect(rows.at(-1).requestId).toBe("id-51");
+  });
+
+  it("a burst of new calls keeps only the newest 50, in order", () => {
+    const rows = mergeRows([], Array.from({ length: 120 }, (_, i) => call(i + 1)));
+    expect(rows).toHaveLength(50);
+    expect(rows[0].requestId).toBe("id-71");
+    expect(rows.at(-1).requestId).toBe("id-120");
+  });
+
+  it("updating a call already shown does not push another one out", () => {
+    let rows = mergeRows([], Array.from({ length: 50 }, (_, i) => call(i + 1)));
+    rows = mergeRows(rows, [call(50)]);
+    expect(rows).toHaveLength(50);
+    expect(rows[0].requestId).toBe("id-1");
   });
 });

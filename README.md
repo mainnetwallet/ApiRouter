@@ -136,7 +136,8 @@ its own box: `CALLING` (on the wire, with a live timer), `FAILED` (status and
 reason) or `SUCCESS`. When a box fails, a `FALLBACK` line follows and the next
 model's box appears below it. Every change is pushed over a server-sent event
 stream, so boxes appear with no polling delay; the page polls only while that
-stream is not connected.
+stream is not connected. The page keeps the last 50 calls; when a newer one
+arrives past that, the oldest is dropped.
 
 To see the Live Logs page populated without real provider keys, run
 `npm run ui:build` then `npm run demo:live-logs`. It starts the router against
