@@ -200,6 +200,16 @@ function recordRequest(fields) {
   }
 }
 
+/** Live-view bookkeeping has the same rule: it must never break a request. */
+function beginRequest(fields) {
+  try { return requestLog.begin(fields); } catch { return null; }
+}
+
+function progressRequest(startSeq, update) {
+  if (startSeq === null || startSeq === undefined) return;
+  try { requestLog.progress(startSeq, update); } catch { /* observability only */ }
+}
+
 /**
  * Optional pin headers. Returns `{ provider, keyIndex }`, or `{ error }` for a
  * malformed key index so a typo is reported rather than ignored.
@@ -229,9 +239,11 @@ pinnedHealth.isAvailable = () => true;
 async function proxy(req, res, protocol, pathname) {
   const receivedAt = Date.now();
   const attempts = [];
+  let liveSeq = null;
 
   if (!authorized(req)) {
     recordRequest({
+      pendingSeq: liveSeq,
       receivedAt,
       protocol,
       httpStatus: 401,
@@ -247,6 +259,7 @@ async function proxy(req, res, protocol, pathname) {
   try { body = await readJsonBody(req, config.maxBodyBytes); }
   catch (error) {
     recordRequest({
+      pendingSeq: liveSeq,
       receivedAt,
       protocol,
       httpStatus: error.status || 400,
@@ -292,9 +305,12 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "gemini" ? geminiProtocol(target)
     : bridgeProtocol(target);
 
+  liveSeq = beginRequest({ id: sessionInfo.id, receivedAt, protocol, requestedModel });
+
   const pin = readPin(req);
   if (pin.error) {
     recordRequest({
+      pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: "invalid_request_error", errorMessage: pin.error, attempts
     });
@@ -306,6 +322,7 @@ async function proxy(req, res, protocol, pathname) {
     const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;
     const message = `No configured target matches the pinned selection (${sanitizeMessage(where)})`;
     recordRequest({
+      pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 404,
       outcome: "failed", errorType: "no_route", errorMessage: message, attempts
     });
@@ -325,6 +342,7 @@ async function proxy(req, res, protocol, pathname) {
 
   if (selection.compatible.length === 0) {
     recordRequest({
+      pendingSeq: liveSeq,
       id: sessionInfo.id,
       receivedAt,
       protocol,
@@ -364,6 +382,15 @@ async function proxy(req, res, protocol, pathname) {
           : config.timeoutMs;
         const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
         const attemptStartedAt = Date.now();
+        progressRequest(liveSeq, {
+          inflight: {
+            provider: target.provider,
+            model: target.model,
+            keyIndex: target.keyIndex,
+            protocol: upstreamProtocol,
+            startedAt: attemptStartedAt
+          }
+        });
 
         // Records one real upstream attempt, in the order `withFallback` makes
         // them. This is the true fallback chain, observed rather than
@@ -384,6 +411,7 @@ async function proxy(req, res, protocol, pathname) {
             latencyMs: Date.now() - attemptStartedAt,
             errorMessage: sanitizeMessage(errorMessage)
           });
+          progressRequest(liveSeq, { attempts, inflight: null });
         };
 
         try {
@@ -454,6 +482,7 @@ async function proxy(req, res, protocol, pathname) {
       }
 
       recordRequest({
+        pendingSeq: liveSeq,
         id: sessionId,
         receivedAt,
         protocol,
@@ -520,6 +549,7 @@ async function proxy(req, res, protocol, pathname) {
     // stale list. `latencyMs` is time-to-upstream-response, which is the
     // figure an operator acts on; stream duration is not included.
     recordRequest({
+      pendingSeq: liveSeq,
       id: sessionId,
       receivedAt,
       protocol,
@@ -564,6 +594,7 @@ async function proxy(req, res, protocol, pathname) {
     }
   } catch (error) {
     recordRequest({
+      pendingSeq: liveSeq,
       id: sessionInfo.id,
       receivedAt,
       protocol,

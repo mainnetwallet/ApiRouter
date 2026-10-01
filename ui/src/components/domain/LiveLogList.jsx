@@ -1,4 +1,4 @@
-import { EVENT, EVENT_TONE, shortRequestId } from "../../lib/liveLogs.js";
+import { STATE, STATE_TONE, isLive, shortRequestId } from "../../lib/liveLogs.js";
 import { sanitizeText } from "../../lib/sanitize.js";
 import { EMPTY, formatLatency, providerLabel } from "../../lib/format.js";
 
@@ -11,92 +11,111 @@ export function formatClock(ts) {
 }
 
 /** `Provider · model · key N` — every part optional, key shown by index only. */
-export function describeTarget(event) {
+export function describeTarget(target) {
   return [
-    event.provider ? providerLabel(event.provider) : null,
-    event.model ?? null,
-    Number.isInteger(event.keyIndex) ? `key ${event.keyIndex}` : null
+    target?.provider ? providerLabel(target.provider) : null,
+    target?.model ?? null,
+    Number.isInteger(target?.keyIndex) ? `key ${target.keyIndex}` : null
   ].filter(Boolean).join(" · ");
 }
 
-/** The right-hand figures: `429 · rate limited`, `200 · 612 ms`, `200 · 1.82 s`. */
-export function describeOutcome(event) {
-  const parts = [];
-  if (Number.isInteger(event.status)) parts.push(String(event.status));
-  if (event.type === EVENT.FAILED && event.reason) parts.push(event.reason);
-  if (event.type === EVENT.COMPLETE && event.outcome === "failed" && !Number.isInteger(event.status)) {
-    parts.push("failed");
+const isNum = (value) => typeof value === "number" && Number.isFinite(value);
+
+/**
+ * The right-hand figures. A finished row shows `200 · 1.09 s`; a running one
+ * shows the time elapsed so far, which `now` keeps ticking.
+ */
+export function describeOutcome(row, now = Date.now()) {
+  if (isLive(row)) {
+    return isNum(row.ts) && isNum(now) ? formatLatency(Math.max(0, now - row.ts)) : "";
   }
-  if (Number.isFinite(event.durationMs)) parts.push(formatLatency(event.durationMs));
+  const parts = [];
+  if (Number.isInteger(row.status)) parts.push(String(row.status));
+  if (row.state === STATE.FAILED && !Number.isInteger(row.status)) parts.push("failed");
+  if (isNum(row.durationMs)) parts.push(formatLatency(row.durationMs));
   return parts.join(" · ");
 }
 
-function mainText(event) {
-  const target = describeTarget(event);
-
-  switch (event.type) {
-    case EVENT.START: {
-      const detail = [event.protocol, event.reason].filter(Boolean).join(" · ");
-      return detail ? `request ${detail}` : "request received";
-    }
-    case EVENT.FALLBACK:
-      return target ? `→ ${target}` : "→ next target";
-    case EVENT.COMPLETE:
-      return target ? `${target}` : "";
-    default:
-      return target;
-  }
+/** What the row says while it has no target yet, or besides the target. */
+function requestText(row) {
+  return [row.protocol, row.requestedModel].filter(Boolean).join(" · ");
 }
 
-/**
- * One compact timeline row. Missing optional fields simply drop out of the
- * line; nothing here can throw on a sparse event.
- */
-export function LiveLogRow({ event, onSelectRequest = null }) {
-  if (!event) return null;
+const STATE_HINT = Object.freeze({
+  [STATE.ROUTING]: "Choosing a target",
+  [STATE.RUNNING]: "Waiting for the provider",
+  [STATE.RETRYING]: "A target failed; trying the next one"
+});
 
-  const tone = EVENT_TONE[event.type] ?? "neutral";
-  const outcome = describeOutcome(event);
-  const main = sanitizeText(mainText(event));
-  const detail = event.detail ? sanitizeText(event.detail) : "";
-  const completeReason = event.type === EVENT.COMPLETE && event.reason ? sanitizeText(event.reason) : "";
-  const rid = shortRequestId(event.requestId);
+/**
+ * One compact row per API call. Missing optional fields simply drop out of the
+ * line; nothing here can throw on a sparse row.
+ */
+export function LiveLogRow({ row, now = Date.now(), onSelectRequest = null }) {
+  if (!row) return null;
+
+  const tone = STATE_TONE[row.state] ?? "neutral";
+  const live = isLive(row);
+  const outcome = describeOutcome(row, now);
+  const target = sanitizeText(describeTarget(row));
+  const request = sanitizeText(requestText(row));
+  const reason = row.reason ? sanitizeText(row.reason) : "";
+  const rid = shortRequestId(row.requestId);
 
   return (
     <li
-      className={`livelog__row livelog__row--${tone}`}
-      data-event-type={event.type}
-      data-request-id={event.requestId ?? undefined}
+      className={`livelog__row livelog__row--${tone}${live ? " livelog__row--live" : ""}`}
+      data-state={row.state}
+      data-request-id={row.requestId ?? undefined}
     >
-      <time className="livelog__time mono tabular">{formatClock(event.ts)}</time>
-      <span className={`livelog__type livelog__type--${tone}`}>{event.type}</span>
+      <time className="livelog__time mono tabular">{formatClock(row.ts)}</time>
+      <span
+        className={`livelog__type livelog__type--${tone}${live ? " livelog__type--live" : ""}`}
+        title={STATE_HINT[row.state]}
+      >
+        {row.state}
+      </span>
 
       <span className="livelog__main">
-        {main ? <span className="livelog__target mono" title={main}>{main}</span> : null}
-        {event.type === EVENT.COMPLETE && event.requestId ? (
-          <span className="livelog__sub dim mono">request {rid}</span>
-        ) : null}
-        {detail || completeReason ? (
-          <span className="livelog__detail mono" title={detail || completeReason}>
-            {detail || completeReason}
-          </span>
-        ) : null}
+        {target ? <span className="livelog__target mono" title={target}>{target}</span> : null}
+        {request ? <span className="livelog__sub dim mono" title={request}>{request}</span> : null}
+
+        {row.chain.map((attempt, index) => {
+          const via = sanitizeText(describeTarget(attempt));
+          const why = sanitizeText([
+            Number.isInteger(attempt.status) ? String(attempt.status) : null,
+            attempt.reason,
+            Number.isFinite(attempt.durationMs) ? formatLatency(attempt.durationMs) : null
+          ].filter(Boolean).join(" · "));
+          const text = `↳ ${via}${why ? ` · ${why}` : ""}`;
+          return (
+            <span
+              key={index}
+              className="livelog__detail livelog__detail--failed mono"
+              title={attempt.detail ? sanitizeText(attempt.detail) : text}
+            >
+              {text}
+            </span>
+          );
+        })}
+
+        {reason ? <span className="livelog__detail mono" title={reason}>{reason}</span> : null}
       </span>
 
       <span className="livelog__outcome mono tabular">{outcome}</span>
 
-      {rid && event.type !== EVENT.COMPLETE ? (
+      {rid ? (
         onSelectRequest ? (
           <button
             type="button"
             className="livelog__rid mono"
-            title={`Filter to request ${event.requestId}`}
-            onClick={() => onSelectRequest(event.requestId)}
+            title={`Filter to request ${row.requestId}`}
+            onClick={() => onSelectRequest(row.requestId)}
           >
             {rid}
           </button>
         ) : (
-          <span className="livelog__rid mono" title={event.requestId}>{rid}</span>
+          <span className="livelog__rid mono" title={row.requestId}>{rid}</span>
         )
       ) : (
         <span className="livelog__rid" />
@@ -105,12 +124,12 @@ export function LiveLogRow({ event, onSelectRequest = null }) {
   );
 }
 
-/** The scrollable chronological list. Newest events render last. */
-export function LiveLogList({ events, onSelectRequest = null }) {
+/** The scrollable chronological list. Newest rows render last. */
+export function LiveLogList({ rows, now = Date.now(), onSelectRequest = null }) {
   return (
-    <ol className="livelog__list" role="log" aria-live="off" aria-label="Execution events">
-      {events.map((event) => (
-        <LiveLogRow key={event.id} event={event} onSelectRequest={onSelectRequest} />
+    <ol className="livelog__list" role="log" aria-live="off" aria-label="API calls">
+      {rows.map((row) => (
+        <LiveLogRow key={row.key} row={row} now={now} onSelectRequest={onSelectRequest} />
       ))}
     </ol>
   );

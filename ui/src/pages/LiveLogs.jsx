@@ -11,26 +11,30 @@ import { LiveLogList } from "../components/domain/LiveLogList.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
 import { getRequests } from "../api/requests.js";
-import { filterEvents, ingestEntries, isNearBottom, mergeEvents } from "../lib/liveLogs.js";
+import { filterRows, ingestPayload, isLive, isNearBottom, mergeRows } from "../lib/liveLogs.js";
 import { providerLabel } from "../lib/format.js";
 
-const POLL_MS = 2_000;
+const POLL_MS = 1_000;
+/** How often the elapsed time of a running call ticks on screen. */
+const TICK_MS = 250;
 const PAGE_LIMIT = 200;
 
 /**
  * Live execution log.
  *
- * Reuses the existing request log (`GET /api/requests`) and the panel's polling
- * hook — the gateway has no push channel, so this polls rather than pretending
- * otherwise. Each completed request is expanded into the real attempts it made
- * (see `lib/liveLogs.js`); nothing is predicted or reconstructed.
+ * One row per API call. Reuses the existing request log (`GET /api/requests`)
+ * and the panel's polling hook — the gateway has no push channel, so this polls
+ * rather than pretending otherwise. The payload lists calls that are still
+ * running as well as finished ones, so a row appears the moment a call starts
+ * and changes state as it moves on (see `lib/liveLogs.js`); nothing is
+ * predicted or reconstructed.
  *
- * Pause stops polling and freezes the view; resuming catches up from the last
- * ingested sequence number. Clear empties the view and remembers the high-water
- * mark, so cleared events do not reappear on the next poll.
+ * Pause stops polling and freezes the view; resuming catches up. Clear empties
+ * the view and remembers the high-water mark, so cleared calls do not reappear
+ * on the next poll.
  */
 export default function LiveLogs() {
-  const [events, setEvents] = useState([]);
+  const [rows, setRows] = useState([]);
   const [paused, setPaused] = useState(false);
   const [provider, setProvider] = useState(null);
   const [status, setStatus] = useState(null);
@@ -42,6 +46,8 @@ export default function LiveLogs() {
   const debouncedRequestId = useDebouncedValue(requestId, 150);
 
   const maxSeq = useRef(0);
+  const floor = useRef(0);
+  const [now, setNow] = useState(() => Date.now());
   const scroller = useRef(null);
 
   const log = useApi(({ signal }) => getRequests({ limit: PAGE_LIMIT }, { signal }), {
@@ -49,26 +55,42 @@ export default function LiveLogs() {
     enabled: !paused
   });
 
-  // Ingest each new page exactly once; the sequence high-water mark makes a
-  // repeated poll of the same entries a no-op.
+  // Every poll upserts its rows by call, so a running row is replaced by its
+  // next state rather than duplicated.
   useEffect(() => {
     if (!log.data) return;
-    const { events: fresh, maxSeq: next, restarted } = ingestEntries(log.data.entries, maxSeq.current);
+    const { rows: fresh, maxSeq: next, restarted } = ingestPayload(log.data, {
+      floor: floor.current,
+      maxSeq: maxSeq.current
+    });
     maxSeq.current = next;
-    if (restarted) setEvents(fresh);
-    else if (fresh.length > 0) setEvents((current) => mergeEvents(current, fresh));
+    if (restarted) {
+      floor.current = 0;
+      setRows(fresh);
+    } else if (fresh.length > 0) {
+      setRows((current) => mergeRows(current, fresh));
+    }
   }, [log.data]);
 
   const filters = useMemo(() => ({
     provider, status, search: debouncedSearch, requestId: debouncedRequestId
   }), [provider, status, debouncedSearch, debouncedRequestId]);
 
-  const visible = useMemo(() => filterEvents(events, filters), [events, filters]);
+  const visible = useMemo(() => filterRows(rows, filters), [rows, filters]);
+
+  // Tick the clock only while something is running, so an idle page is idle.
+  const anyRunning = useMemo(() => visible.some(isLive), [visible]);
+  useEffect(() => {
+    if (!anyRunning || paused) return undefined;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), TICK_MS);
+    return () => clearInterval(timer);
+  }, [anyRunning, paused]);
 
   const providers = useMemo(
-    () => [...new Set(events.map((event) => event.provider).filter(Boolean))].sort()
+    () => [...new Set(rows.map((row) => row.provider).filter(Boolean))].sort()
       .map((value) => ({ value, label: providerLabel(value) })),
-    [events]
+    [rows]
   );
 
   // Follow the newest event, but only while the operator is at the bottom.
@@ -87,10 +109,14 @@ export default function LiveLogs() {
     setStuck(true);
   };
 
-  const clear = () => setEvents([]);
+  const clear = () => {
+    // Everything seen so far is cleared; only calls that start later come back.
+    floor.current = maxSeq.current;
+    setRows([]);
+  };
 
   const filtering = Boolean(provider || status || debouncedSearch.trim() || debouncedRequestId.trim());
-  const initialLoading = log.loading && !log.data && events.length === 0;
+  const initialLoading = log.loading && !log.data && rows.length === 0;
   const disconnected = Boolean(log.error) && !paused;
 
   const state = paused
@@ -105,7 +131,7 @@ export default function LiveLogs() {
     <div className="page page--livelog">
       <PageHeader
         title="Live Logs"
-        description="Every upstream attempt, in the order the router made it"
+        description="One row per API call, updating live as the router works through it"
         lastUpdatedAt={log.lastUpdatedAt}
         refreshing={log.refreshing}
         paused={log.paused}
@@ -123,7 +149,7 @@ export default function LiveLogs() {
               <Icon name={paused ? "play" : "stop"} className="btn__icon" size={12} />
               {paused ? "Resume" : "Pause"}
             </button>
-            <button type="button" className="btn" onClick={clear} disabled={events.length === 0}>
+            <button type="button" className="btn" onClick={clear} disabled={rows.length === 0}>
               <Icon name="trash" className="btn__icon" size={12} />
               Clear
             </button>
@@ -137,7 +163,7 @@ export default function LiveLogs() {
         <FilterBar
           actions={
             <span className="tiny dim nowrap">
-              {filtering ? `${visible.length} of ${events.length} events` : `${events.length} events`}
+              {filtering ? `${visible.length} of ${rows.length} calls` : `${rows.length} calls`}
             </span>
           }
         >
@@ -147,7 +173,7 @@ export default function LiveLogs() {
               id="livelog-search"
               value={search}
               onChange={setSearch}
-              label="Search events"
+              label="Search calls"
               placeholder="Provider, model, status, reason…"
             />
           </div>
@@ -156,7 +182,11 @@ export default function LiveLogs() {
             label="Status"
             value={status}
             onChange={setStatus}
-            options={[{ value: "success", label: "Success" }, { value: "failed", label: "Failed" }]}
+            options={[
+              { value: "running", label: "Running" },
+              { value: "success", label: "Success" },
+              { value: "failed", label: "Failed" }
+            ]}
           />
           <div className="field">
             <label className="field__label" htmlFor="livelog-request">Request ID</label>
@@ -173,10 +203,10 @@ export default function LiveLogs() {
         <div className="livelog__viewport">
           <div className="livelog__scroll" ref={scroller} onScroll={onScroll} tabIndex={0}>
             {initialLoading ? (
-              <div className="panel__body"><TableSkeleton rows={10} label="Loading execution events" /></div>
+              <div className="panel__body"><TableSkeleton rows={10} label="Loading API calls" /></div>
             ) : visible.length === 0 ? (
               filtering ? (
-                <EmptyState title="No events match these filters" icon="filter">
+                <EmptyState title="No calls match these filters" icon="filter">
                   <button
                     type="button"
                     className="btn btn--sm"
@@ -186,14 +216,14 @@ export default function LiveLogs() {
                   </button>
                 </EmptyState>
               ) : (
-                <EmptyState title="No execution events yet" icon="list">
-                  Events appear as requests are routed. The log is in-memory and starts empty when
+                <EmptyState title="No API calls yet" icon="list">
+                  Calls appear the moment they start. The log is in-memory and starts empty when
                   the gateway restarts — send a request from the <strong>Playground</strong> to see
                   one.
                 </EmptyState>
               )
             ) : (
-              <LiveLogList events={visible} onSelectRequest={setRequestId} />
+              <LiveLogList rows={visible} now={now} onSelectRequest={setRequestId} />
             )}
           </div>
 

@@ -264,6 +264,16 @@ contained them. Error text is additionally passed through `sanitizeMessage`.
 Because the attempt list is recorded by the same closure `withFallback` calls,
 the fallback chain the UI shows is observed rather than reconstructed.
 
+### In-flight requests
+
+`RequestLog.begin()` registers a request when routing starts and `progress()`
+records each attempt as it goes on the wire and finishes; `record()` retires it
+into the completed log. Pending entries live in their own map, so metrics, the
+model catalogue and the Requests page never see an unfinished request. They are
+exposed as `pending` on `GET /api/requests`, and both forms share a `startSeq`,
+which lets Live Logs show one row per call and update it in place. A request
+that never reports back is dropped after 10 minutes and the set is capped.
+
 ### Real-time
 
 Polling, with conditional requests. The gateway has no SSE or WebSocket

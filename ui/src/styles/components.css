@@ -904,6 +904,18 @@
 .livelog__type--danger { color: var(--danger); }
 .livelog__type--warn { color: var(--warn); }
 .livelog__type--ok { color: var(--ok); }
+/* A call that is still running: a pulsing dot ahead of its state. */
+.livelog__type--live::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: middle;
+  animation: pulse 1.2s ease-in-out infinite;
+}
 
 .livelog__main { display: flex; flex-direction: column; min-width: 0; }
 .livelog__target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
@@ -914,6 +926,9 @@
   white-space: nowrap;
   color: var(--text-muted);
 }
+
+.livelog__detail--failed { color: var(--warn); }
+.livelog__row--live .livelog__outcome { color: var(--info); }
 
 .livelog__outcome { color: var(--text-muted); white-space: nowrap; text-align: right; }
 

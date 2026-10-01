@@ -346,7 +346,10 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
           provider: searchParams.get("provider"),
           protocol: searchParams.get("protocol"),
           outcome: searchParams.get("outcome")
-        })
+        }),
+        // Requests still running, so the Live Logs view can show them before
+        // they finish. Never part of `entries`, so metrics are unaffected.
+        pending: requestLog.pending()
       });
     }
 

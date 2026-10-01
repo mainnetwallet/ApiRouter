@@ -104,7 +104,7 @@ otherwise. None of these can change routing, health or provider behaviour.
 | POST | /api/health/refresh | Run one health cycle now |
 | GET | /api/providers | Provider rollup joined with safe config |
 | GET | /api/models | Model catalogue with health and usage |
-| GET | /api/requests | Request log (`limit`, `cursor`, `outcome`, `provider`, `protocol`, `status`) |
+| GET | /api/requests | Request log (`limit`, `cursor`, `outcome`, `provider`, `protocol`, `status`), plus `pending`: calls still running |
 | GET | /api/requests/:id | One request's full lifecycle |
 | GET | /api/router/preview | The routing decision for a protocol/model |
 | GET | /api/analytics | Series and breakdowns (`range=5m\|15m\|1h\|6h\|24h\|7d`) |
@@ -127,6 +127,11 @@ npm run test:all    # backend + frontend
 
 Twelve pages: Dashboard, Providers, Models, Health Monitor, Router, Fallback,
 Playground, Requests, Live Logs, Analytics, Configuration, System.
+
+Live Logs shows one row per API call and updates it in place while the call
+runs: `ROUTING` → `RUNNING` (the attempt on the wire, with a live timer) →
+`RETRYING` (a target failed, the next one is on the wire) → `SUCCESS` / `FAILED`.
+Attempts that failed along the way stay under the row as `↳` lines.
 
 To see the Live Logs page populated without real provider keys, run
 `npm run ui:build` then `npm run demo:live-logs`. It starts the router against

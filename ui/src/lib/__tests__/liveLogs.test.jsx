@@ -2,18 +2,19 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  EVENT, buildEvents, compareEvents, filterEvents, ingestEntries, isNearBottom, mergeEvents
+  STATE, buildRow, filterRows, ingestPayload, isLive, isNearBottom, mergeRows
 } from "../liveLogs.js";
-import { LiveLogList, LiveLogRow, formatClock } from "../../components/domain/LiveLogList.jsx";
+import { LiveLogList, LiveLogRow, describeOutcome, formatClock } from "../../components/domain/LiveLogList.jsx";
 
 const SECRET = "sk-super-secret-provider-key-1234567890";
 const T0 = Date.UTC(2026, 9, 1, 14, 2, 11);
 
 /** key 0 -> 429, key 1 -> 200, same provider and model. */
-function fallbackEntry(overrides = {}) {
+function finished(overrides = {}) {
   return {
-    seq: 1,
-    id: "abc123",
+    seq: 5,
+    startSeq: 1,
+    id: "abc12345-aaaa",
     protocol: "gemini",
     requestedModel: "gemini-3.7-flash",
     receivedAt: T0,
@@ -31,154 +32,153 @@ function fallbackEntry(overrides = {}) {
   };
 }
 
-const render = (events) => renderToStaticMarkup(<LiveLogList events={events} />);
-const types = (events) => events.map((event) => event.type);
+function running(overrides = {}) {
+  return {
+    startSeq: 2,
+    id: "run00001-bbbb",
+    protocol: "anthropic",
+    requestedModel: "Qwen/Qwen2.5-Coder-32B-Instruct",
+    receivedAt: T0,
+    outcome: "pending",
+    attempts: [],
+    attemptCount: 0,
+    fallbackCount: 0,
+    inflight: null,
+    ...overrides
+  };
+}
 
-describe("live log event derivation", () => {
-  it("emits only the executed events, in order", () => {
-    const events = buildEvents(fallbackEntry());
+const wire = { provider: "huggingface", model: "Qwen/Qwen2.5-Coder-32B-Instruct", keyIndex: 0, startedAt: T0 + 5 };
+const render = (rows, now = T0 + 2500) => renderToStaticMarkup(<LiveLogList rows={rows} now={now} />);
+const li = (html) => (html.match(/<li /g) ?? []).length;
 
-    expect(types(events)).toEqual([
-      EVENT.START, EVENT.ATTEMPT, EVENT.FAILED, EVENT.FALLBACK, EVENT.SUCCESS, EVENT.COMPLETE
-    ]);
+describe("one row per API call", () => {
+  it("a finished call with a fallback is still a single row", () => {
+    const row = buildRow(finished());
+    expect(row.state).toBe(STATE.SUCCESS);
+    expect(li(render([row]))).toBe(1);
   });
 
-  it("keeps the same model on key 0 and key 1 as separate events", () => {
-    const events = buildEvents(fallbackEntry());
-    const failed = events.find((event) => event.type === EVENT.FAILED);
-    const success = events.find((event) => event.type === EVENT.SUCCESS);
+  it("the headline is the target that answered; the failed attempt rides along", () => {
+    const row = buildRow(finished());
+    expect(row).toMatchObject({ provider: "gemini", keyIndex: 1, status: 200, durationMs: 1820 });
+    expect(row.chain).toHaveLength(1);
+    expect(row.chain[0]).toMatchObject({ keyIndex: 0, status: 429, reason: "rate limited" });
 
-    expect(failed).toMatchObject({ model: "gemini-3.7-flash", keyIndex: 0, status: 429, outcome: "failed" });
-    expect(success).toMatchObject({ model: "gemini-3.7-flash", keyIndex: 1, status: 200, outcome: "success" });
-    expect(events.filter((event) => event.model === "gemini-3.7-flash" && event.keyIndex === 0).length).toBe(2);
+    const html = render([row]);
+    expect(html).toContain("Gemini · gemini-3.7-flash · key 1");
+    expect(html).toContain("↳ Gemini · gemini-3.7-flash · key 0 · 429 · rate limited");
+    expect(html).toContain("200 · 1.82 s");
+    expect(html).toContain("abc12345");
   });
 
-  it("never reports a fallback that was not actually attempted", () => {
-    // Both attempts failed and nothing came after: no FALLBACK, no phantom target.
-    const events = buildEvents(fallbackEntry({
+  it("a plain success has no fallback lines", () => {
+    const row = buildRow(finished({ attempts: [{ provider: "gemini", model: "m", keyIndex: 1, ok: true, status: 200, latencyMs: 90 }] }));
+    expect(row.chain).toEqual([]);
+    expect(render([row])).not.toContain("↳");
+  });
+
+  it("a failed call shows every failed attempt and the reason", () => {
+    const row = buildRow(finished({
       outcome: "failed",
       httpStatus: 502,
+      errorMessage: "All routing targets failed",
+      finalProvider: "gemini", finalModel: "m", finalKeyIndex: 1,
       attempts: [
-        { provider: "gemini", model: "m", keyIndex: 0, ok: false, status: 429, startedAt: T0, latencyMs: 100 }
+        { provider: "gemini", model: "m", keyIndex: 0, ok: false, status: 429, latencyMs: 50 },
+        { provider: "gemini", model: "m", keyIndex: 1, ok: false, status: 500, latencyMs: 60 }
       ]
     }));
-
-    expect(types(events)).toEqual([EVENT.START, EVENT.ATTEMPT, EVENT.FAILED, EVENT.COMPLETE]);
-    expect(events.some((event) => event.type === EVENT.FALLBACK)).toBe(false);
-  });
-
-  it("derives timestamps from per-attempt start and latency", () => {
-    const events = buildEvents(fallbackEntry());
-    const failed = events.find((event) => event.type === EVENT.FAILED);
-    const complete = events.find((event) => event.type === EVENT.COMPLETE);
-
-    expect(failed.ts).toBe(T0 + 410);
-    expect(complete.ts).toBe(T0 + 1820);
-    expect(complete.durationMs).toBe(1820);
-  });
-
-  it("still orders attempts when startedAt was not recorded", () => {
-    const entry = fallbackEntry();
-    entry.attempts = entry.attempts.map(({ startedAt, ...rest }) => rest);
-    const events = buildEvents(entry);
-
-    expect(types(events)).toEqual([
-      EVENT.START, EVENT.ATTEMPT, EVENT.FAILED, EVENT.FALLBACK, EVENT.SUCCESS, EVENT.COMPLETE
-    ]);
-    expect([...events].sort(compareEvents).map((event) => event.id)).toEqual(events.map((event) => event.id));
+    expect(row.state).toBe(STATE.FAILED);
+    expect(row.chain).toHaveLength(2);
+    const html = render([row]);
+    expect(html).toContain("FAILED");
+    expect(html).toContain("All routing targets failed");
+    expect(html).toContain("502");
   });
 
   it("represents a request that never reached a provider", () => {
-    const events = buildEvents({ seq: 3, id: "r3", receivedAt: T0, httpStatus: 401, outcome: "failed", errorMessage: "client authentication failed", attempts: [] });
-
-    expect(types(events)).toEqual([EVENT.START, EVENT.COMPLETE]);
-    expect(events[1]).toMatchObject({ outcome: "failed", status: 401, reason: "client authentication failed" });
+    const row = buildRow({ seq: 3, id: "r3", receivedAt: T0, httpStatus: 401, outcome: "failed", errorMessage: "client authentication failed", attempts: [] });
+    expect(row).toMatchObject({ state: STATE.FAILED, status: 401, reason: "client authentication failed", key: 3 });
   });
 });
 
-describe("live log rendering", () => {
-  const events = buildEvents(fallbackEntry());
-
-  it("renders the log", () => {
-    const html = render(events);
-    expect(html).toContain('role="log"');
-    expect(html).toContain("REQUEST START");
-    expect(html).toContain("COMPLETE");
-    expect((html.match(/<li /g) ?? []).length).toBe(events.length);
+describe("a row moves through the call", () => {
+  it("ROUTING: received, nothing on the wire yet", () => {
+    const row = buildRow(running());
+    expect(row.state).toBe(STATE.ROUTING);
+    expect(isLive(row)).toBe(true);
+    const html = render([row]);
+    expect(html).toContain("ROUTING");
+    expect(html).toContain("livelog__type--live");
+    expect(html).toContain("anthropic · Qwen/Qwen2.5-Coder-32B-Instruct");
   });
 
-  it("renders an attempt event", () => {
-    const html = renderToStaticMarkup(<LiveLogRow event={events.find((e) => e.type === EVENT.ATTEMPT)} />);
-    expect(html).toContain("ATTEMPT");
-    expect(html).toContain("Gemini · gemini-3.7-flash · key 0");
+  it("RUNNING: the first attempt is on the wire", () => {
+    const row = buildRow(running({ inflight: wire }));
+    expect(row.state).toBe(STATE.RUNNING);
+    expect(render([row])).toContain("Hugging Face · Qwen/Qwen2.5-Coder-32B-Instruct · key 0");
   });
 
-  it("renders a failure event with status and reason", () => {
-    const html = renderToStaticMarkup(<LiveLogRow event={events.find((e) => e.type === EVENT.FAILED)} />);
-    expect(html).toContain("FAILED");
-    expect(html).toContain("key 0");
-    expect(html).toContain("429 · rate limited");
-  });
-
-  it("renders a fallback event pointing at the next executed target", () => {
-    const html = renderToStaticMarkup(<LiveLogRow event={events.find((e) => e.type === EVENT.FALLBACK)} />);
-    expect(html).toContain("FALLBACK");
-    expect(html).toContain("→ Gemini · gemini-3.7-flash · key 1");
-  });
-
-  it("renders a success event with status and duration", () => {
-    const html = renderToStaticMarkup(<LiveLogRow event={events.find((e) => e.type === EVENT.SUCCESS)} />);
-    expect(html).toContain("SUCCESS");
+  it("RETRYING: a failure happened and the next target is on the wire", () => {
+    const row = buildRow(running({
+      attempts: [{ provider: "huggingface", model: "m", keyIndex: 0, ok: false, status: 429, latencyMs: 300 }],
+      attemptCount: 1,
+      inflight: { provider: "huggingface", model: "m", keyIndex: 1, startedAt: T0 + 400 }
+    }));
+    expect(row.state).toBe(STATE.RETRYING);
+    expect(row.keyIndex).toBe(1);
+    const html = render([row]);
+    expect(html).toContain("RETRYING");
     expect(html).toContain("key 1");
-    expect(html).toContain("200 · 612 ms");
+    expect(html).toContain("↳ Hugging Face · m · key 0 · 429 · rate limited");
   });
 
-  it("renders complete with the total duration and request id", () => {
-    const html = renderToStaticMarkup(<LiveLogRow event={events.find((e) => e.type === EVENT.COMPLETE)} />);
-    expect(html).toContain("COMPLETE");
-    expect(html).toContain("1.82 s");
-    expect(html).toContain("abc123");
-  });
-
-  it("shows key 0 FAILED and key 1 SUCCESS as two distinct rows", () => {
-    const html = render(events);
-    expect(html).toMatch(/livelog__type--danger">FAILED/);
-    expect(html).toMatch(/livelog__type--ok">SUCCESS/);
-    expect(html.match(/key 0/g).length).toBeGreaterThanOrEqual(2); // attempt + failure
-    expect(html.match(/key 1/g).length).toBeGreaterThanOrEqual(2); // fallback + success
-  });
-
-  it("does not crash on sparse events", () => {
-    const sparse = [
-      {},
-      { id: "x", type: EVENT.ATTEMPT },
-      { id: "y", type: EVENT.FAILED, status: "oops", durationMs: "slow", keyIndex: "0" },
-      ...buildEvents({ seq: 9, attempts: [null, {}, { ok: true }] }),
-      ...buildEvents(null),
-      ...buildEvents({})
+  it("the same call keeps one key from start to finish, so it updates in place", () => {
+    const rows = [
+      buildRow(running({ startSeq: 7 })),
+      buildRow(running({ startSeq: 7, inflight: wire })),
+      buildRow({ ...finished({ startSeq: 7, seq: 9 }) })
     ];
+    expect(new Set(rows.map((row) => row.key))).toEqual(new Set([7]));
 
-    expect(() => render(sparse)).not.toThrow();
-    expect(renderToStaticMarkup(<LiveLogRow event={null} />)).toBe("");
+    let current = [];
+    for (const row of rows) current = mergeRows(current, [row]);
+    expect(current).toHaveLength(1);
+    expect(current[0].state).toBe(STATE.SUCCESS);
+  });
+
+  it("the elapsed time of a running call follows the clock; a finished call is fixed", () => {
+    const row = buildRow(running({ inflight: wire }));
+    expect(describeOutcome(row, T0 + 1500)).toBe("1.50 s");
+    expect(describeOutcome(row, T0 + 4200)).toBe("4.20 s");
+    expect(describeOutcome(buildRow(finished()), T0 + 99_000)).toBe("200 · 1.82 s");
+  });
+});
+
+describe("rendering safety", () => {
+  it("does not crash on sparse rows", () => {
+    const rows = [
+      buildRow({}), buildRow(null), buildRow({ seq: 9, attempts: [null, {}, { ok: true }] }),
+      buildRow({ startSeq: 4, outcome: "pending" })
+    ].filter(Boolean);
+    expect(() => render(rows)).not.toThrow();
+    expect(renderToStaticMarkup(<LiveLogRow row={null} />)).toBe("");
     expect(formatClock(undefined)).toBe("—");
   });
 
   it("never renders secrets or credential-bearing text", () => {
-    const entry = fallbackEntry({
+    const row = buildRow(finished({
       errorMessage: `all failed: Authorization: Bearer ${SECRET}`,
       outcome: "failed",
-      attempts: [
-        {
-          provider: "gemini", model: "gemini-3.7-flash", keyIndex: 0, ok: false, status: 401,
-          startedAt: T0, latencyMs: 50,
-          errorMessage: `invalid key ${SECRET} (x-goog-api-key rejected, api_key=${SECRET})`,
-          // Fields that must never be read, even if something upstream leaked them.
-          apiKey: SECRET, authorization: `Bearer ${SECRET}`, headers: { authorization: `Bearer ${SECRET}` }
-        }
-      ]
-    });
+      attempts: [{
+        provider: "gemini", model: "gemini-3.7-flash", keyIndex: 0, ok: false, status: 401, latencyMs: 50,
+        errorMessage: `invalid key ${SECRET} (x-goog-api-key rejected, api_key=${SECRET})`,
+        apiKey: SECRET, authorization: `Bearer ${SECRET}`, headers: { authorization: `Bearer ${SECRET}` }
+      }]
+    }));
 
-    const html = render(buildEvents(entry));
+    const html = render([row]);
     expect(html).not.toContain(SECRET);
     expect(html).not.toMatch(/Bearer/i);
     expect(html).not.toMatch(/authorization/i);
@@ -186,61 +186,70 @@ describe("live log rendering", () => {
     expect(html).toContain("key 0");
   });
 
-  it("scrubs secrets even when handed an unsanitized event directly", () => {
+  it("scrubs secrets even when handed an unsanitized row directly", () => {
     const html = renderToStaticMarkup(
-      <LiveLogRow event={{ id: "1:1", seq: 1, order: 1, type: EVENT.FAILED, detail: `boom ${SECRET}`, provider: "groq", keyIndex: 2 }} />
+      <LiveLogRow row={{
+        key: 1, state: STATE.FAILED, provider: "groq", keyIndex: 2, reason: `boom ${SECRET}`,
+        chain: [{ provider: "groq", keyIndex: 2, status: 500, detail: `x ${SECRET}`, reason: `y ${SECRET}` }]
+      }} />
     );
     expect(html).not.toContain(SECRET);
     expect(html).toContain("key 2");
   });
 });
 
-describe("live log ingestion and filtering", () => {
-  it("ingests each entry once and only entries newer than the high-water mark", () => {
-    const first = ingestEntries([fallbackEntry({ seq: 2, id: "b" }), fallbackEntry({ seq: 1, id: "a" })], 0);
-    expect(first.maxSeq).toBe(2);
-    expect(first.events.length).toBe(12);
+describe("ingestion and filtering", () => {
+  it("builds rows from both finished entries and running ones", () => {
+    const { rows, maxSeq } = ingestPayload({ entries: [finished()], pending: [running({ startSeq: 8 })] });
+    expect(rows.map((row) => row.state).sort()).toEqual([STATE.ROUTING, STATE.SUCCESS]);
+    expect(maxSeq).toBe(8);
+  });
 
-    const again = ingestEntries([fallbackEntry({ seq: 2, id: "b" }), fallbackEntry({ seq: 1, id: "a" })], first.maxSeq);
-    expect(again.events).toEqual([]);
+  it("a running call becomes its finished row on the next poll", () => {
+    const first = ingestPayload({ entries: [], pending: [running({ startSeq: 3, inflight: wire })] });
+    const after = ingestPayload({ entries: [finished({ startSeq: 3, seq: 4 })], pending: [] }, { maxSeq: first.maxSeq });
 
-    const next = ingestEntries([fallbackEntry({ seq: 3, id: "c" })], first.maxSeq);
-    expect(next.events.every((event) => event.requestId === "c")).toBe(true);
+    const merged = mergeRows(mergeRows([], first.rows), after.rows);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].state).toBe(STATE.SUCCESS);
+  });
+
+  it("does not bring back rows that were cleared", () => {
+    const { rows } = ingestPayload({ entries: [finished({ startSeq: 1, seq: 2 }), finished({ startSeq: 3, seq: 4, id: "later" })] }, { floor: 2, maxSeq: 4 });
+    expect(rows.map((row) => row.requestId)).toEqual(["later"]);
   });
 
   it("detects a gateway restart (sequence counter reset)", () => {
-    const result = ingestEntries([fallbackEntry({ seq: 1, id: "fresh" })], 57);
+    const result = ingestPayload({ entries: [finished({ startSeq: 1, seq: 2, id: "fresh" })] }, { floor: 50, maxSeq: 57 });
     expect(result.restarted).toBe(true);
-    expect(result.events.length).toBe(6);
+    expect(result.rows.map((row) => row.requestId)).toEqual(["fresh"]);
   });
 
   it("merges chronologically with the newest last, de-duplicated and capped", () => {
-    const early = buildEvents(fallbackEntry({ seq: 1, id: "a", receivedAt: T0 }));
-    const late = buildEvents(fallbackEntry({ seq: 2, id: "b", receivedAt: T0 + 60_000 }));
+    const early = buildRow(finished({ startSeq: 1, receivedAt: T0 }));
+    const late = buildRow(finished({ startSeq: 2, receivedAt: T0 + 60_000, id: "late" }));
 
-    const merged = mergeEvents(late, early);
-    expect(merged[0].requestId).toBe("a");
-    expect(merged.at(-1).requestId).toBe("b");
-    expect(mergeEvents(merged, early).length).toBe(merged.length);
-    expect(mergeEvents(merged, late, { max: 4 }).length).toBe(4);
+    const merged = mergeRows([late], [early]);
+    expect(merged.map((row) => row.key)).toEqual([1, 2]);
+    expect(mergeRows(merged, [early])).toHaveLength(2);
+    expect(mergeRows(merged, [buildRow(finished({ startSeq: 3, receivedAt: T0 + 120_000 }))], { max: 2 })).toHaveLength(2);
   });
 
   it("filters by provider, status, search and request id", () => {
     const all = [
-      ...buildEvents(fallbackEntry({ seq: 1, id: "abc123" })),
-      ...buildEvents(fallbackEntry({
-        seq: 2, id: "zzz999", finalProvider: "groq",
-        attempts: [{ provider: "groq", model: "model-a", keyIndex: 0, ok: true, status: 200, startedAt: T0, latencyMs: 90 }]
-      }))
+      buildRow(finished({ startSeq: 1, id: "abc123" })),
+      buildRow(finished({ startSeq: 2, id: "zzz999", finalProvider: "groq", attempts: [{ provider: "groq", model: "model-a", keyIndex: 0, ok: true, status: 200, latencyMs: 90 }] })),
+      buildRow(finished({ startSeq: 3, id: "bad", outcome: "failed", httpStatus: 502, errorMessage: "boom" })),
+      buildRow(running({ startSeq: 4, id: "live1", inflight: wire }))
     ];
 
-    expect(filterEvents(all, { provider: "groq" }).every((event) => event.provider === "groq")).toBe(true);
-    expect(filterEvents(all, { status: "failed" }).map((event) => event.type)).toEqual([EVENT.FAILED]);
-    expect(filterEvents(all, { requestId: "zzz" }).every((event) => event.requestId === "zzz999")).toBe(true);
-    expect(filterEvents(all, { search: "rate limited" }).length).toBe(1);
-    expect(filterEvents(all, { search: "KEY 1", requestId: "abc123" }).map((event) => event.type))
-      .toEqual([EVENT.FALLBACK, EVENT.SUCCESS, EVENT.COMPLETE]);
-    expect(filterEvents(all, {})).toHaveLength(all.length);
+    expect(filterRows(all, { provider: "groq" }).map((row) => row.requestId)).toEqual(["zzz999"]);
+    expect(filterRows(all, { status: "failed" }).map((row) => row.requestId)).toEqual(["bad"]);
+    expect(filterRows(all, { status: "success" })).toHaveLength(2);
+    expect(filterRows(all, { status: "running" }).map((row) => row.requestId)).toEqual(["live1"]);
+    expect(filterRows(all, { requestId: "zzz" }).map((row) => row.requestId)).toEqual(["zzz999"]);
+    expect(filterRows(all, { search: "rate limited" }).map((row) => row.requestId)).toContain("abc123");
+    expect(filterRows(all, {})).toHaveLength(all.length);
   });
 });
 

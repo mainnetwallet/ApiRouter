@@ -8,6 +8,32 @@ export const OUTCOMES = Object.freeze({
 });
 
 /**
+ * In-flight requests are kept apart from completed ones (`entries`), so
+ * analytics, the model catalogue and the Requests page never see a request
+ * that has not finished. A request that never reports back is dropped after
+ * this long, and the set is capped, so a leak cannot grow without bound.
+ */
+const PENDING_TTL_MS = 10 * 60 * 1000;
+const MAX_PENDING = 200;
+
+function normalizeAttempts(list) {
+  return (Array.isArray(list) ? list : []).map((attempt, index) => ({
+    index: index + 1,
+    provider: attempt?.provider ?? null,
+    model: attempt?.model ?? null,
+    keyIndex: Number.isInteger(attempt?.keyIndex) ? attempt.keyIndex : null,
+    protocol: attempt?.protocol ?? null,
+    // A skipped attempt never reached the network; only real attempts count
+    // toward the fallback total the UI shows.
+    ok: attempt?.ok === true,
+    status: Number.isInteger(attempt?.status) ? attempt.status : null,
+    startedAt: Number.isFinite(attempt?.startedAt) ? attempt.startedAt : null,
+    latencyMs: Number.isFinite(attempt?.latencyMs) ? attempt.latencyMs : null,
+    errorMessage: sanitizeMessage(attempt?.errorMessage)
+  }));
+}
+
+/**
  * Bounded, in-memory record of routed requests.
  *
  * Bounded because the gateway is long-running: an unbounded log would grow
@@ -24,7 +50,73 @@ export class RequestLog {
   constructor({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) {
     this.maxEntries = maxEntries;
     this.entries = new Map();
+    this.pendingEntries = new Map();
     this.sequence = 0;
+  }
+
+  #prunePending(now = Date.now()) {
+    for (const [key, entry] of this.pendingEntries) {
+      if (now - (entry.receivedAt ?? now) > PENDING_TTL_MS) this.pendingEntries.delete(key);
+    }
+    while (this.pendingEntries.size > MAX_PENDING) {
+      this.pendingEntries.delete(this.pendingEntries.keys().next().value);
+    }
+  }
+
+  /**
+   * Register a request that has started but not finished, so a live view can
+   * show it while it runs. Returns its `startSeq`; pass that as `pendingSeq`
+   * to `record()` when the request completes and the pending entry is retired.
+   * Same allow-list rule as `record()`: no bodies, headers or credentials.
+   */
+  begin(entry = {}) {
+    this.sequence += 1;
+    const startSeq = this.sequence;
+    this.pendingEntries.set(startSeq, {
+      startSeq,
+      id: entry.id ?? null,
+      receivedAt: Number.isFinite(entry.receivedAt) ? entry.receivedAt : Date.now(),
+      protocol: entry.protocol ?? null,
+      requestedModel: sanitizeMessage(entry.requestedModel, { maxLength: 120 }),
+      outcome: "pending",
+      attempts: [],
+      attemptCount: 0,
+      fallbackCount: 0,
+      inflight: null
+    });
+    this.#prunePending();
+    return startSeq;
+  }
+
+  /**
+   * Update a pending request: the attempts finished so far, and/or the attempt
+   * currently on the wire (`inflight`, or `null` once it has answered).
+   */
+  progress(startSeq, { attempts, inflight } = {}) {
+    const pending = this.pendingEntries.get(startSeq);
+    if (!pending) return;
+    if (attempts !== undefined) {
+      pending.attempts = normalizeAttempts(attempts);
+      pending.attemptCount = pending.attempts.length;
+      pending.fallbackCount = Math.max(0, pending.attempts.length - 1);
+    }
+    if (inflight !== undefined) {
+      pending.inflight = inflight
+        ? {
+          provider: inflight.provider ?? null,
+          model: inflight.model ?? null,
+          keyIndex: Number.isInteger(inflight.keyIndex) ? inflight.keyIndex : null,
+          protocol: inflight.protocol ?? null,
+          startedAt: Number.isFinite(inflight.startedAt) ? inflight.startedAt : null
+        }
+        : null;
+    }
+  }
+
+  /** Requests currently in flight, oldest first. */
+  pending() {
+    this.#prunePending();
+    return [...this.pendingEntries.values()];
   }
 
   get size() {
@@ -47,23 +139,15 @@ export class RequestLog {
   record(entry = {}) {
     this.sequence += 1;
 
-    const attempts = (Array.isArray(entry.attempts) ? entry.attempts : []).map((attempt, index) => ({
-      index: index + 1,
-      provider: attempt?.provider ?? null,
-      model: attempt?.model ?? null,
-      keyIndex: Number.isInteger(attempt?.keyIndex) ? attempt.keyIndex : null,
-      protocol: attempt?.protocol ?? null,
-      // A skipped attempt never reached the network; only real attempts count
-      // toward the fallback total the UI shows.
-      ok: attempt?.ok === true,
-      status: Number.isInteger(attempt?.status) ? attempt.status : null,
-      startedAt: Number.isFinite(attempt?.startedAt) ? attempt.startedAt : null,
-      latencyMs: Number.isFinite(attempt?.latencyMs) ? attempt.latencyMs : null,
-      errorMessage: sanitizeMessage(attempt?.errorMessage)
-    }));
+    const attempts = normalizeAttempts(entry.attempts);
+    const startSeq = Number.isInteger(entry.pendingSeq) ? entry.pendingSeq : null;
+    if (startSeq !== null) this.pendingEntries.delete(startSeq);
 
     const stored = {
       seq: this.sequence,
+      // Order the request *began* in. Equals `seq` for a request that was never
+      // registered as pending, so it is a stable key for a live view either way.
+      startSeq: startSeq ?? this.sequence,
       id: entry.id ?? null,
       receivedAt: entry.receivedAt ?? null,
       completedAt: entry.completedAt ?? null,
@@ -156,6 +240,7 @@ export class RequestLog {
 
   clear() {
     this.entries.clear();
+    this.pendingEntries.clear();
   }
 }
 
