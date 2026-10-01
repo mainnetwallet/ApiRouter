@@ -32,10 +32,42 @@ Clients using the Anthropic Messages protocol should use:
 http://127.0.0.1:8788
 ```
 
+## Gemini-compatible
+
+Clients using the Gemini `generateContent` protocol should use:
+
+```text
+http://127.0.0.1:8788
+```
+
+### Tool choice through the bridge
+
+A Gemini client that sends `toolConfig.functionCallingConfig` reaches a
+chat-only provider through a translation bridge. The tool choice is translated
+as follows:
+
+| Gemini | Forwarded to the chat provider |
+| --- | --- |
+| `mode: "NONE"` | `tool_choice: "none"` |
+| `mode: "ANY"`, one allowed function | `tool_choice: {type: "function", function: {name}}` |
+| `mode: "ANY"`, several allowed functions | `tool_choice: "required"`, with only the allowed declarations forwarded |
+| `mode: "ANY"`, empty or undeclared names | `tool_choice: "required"`, all declarations forwarded |
+| `mode: "AUTO"` with allowed names | the default choice, with only the allowed declarations forwarded |
+
+OpenAI-compatible APIs can express "call *some* function" but not "call one of
+exactly these N". When several functions are allowed the bridge keeps the
+restriction by forwarding only the allowed declarations, so a `required` choice
+can only select among them — the upstream request means the same thing as the
+original. When the restriction cannot be represented (an empty list, or a name
+with no matching declaration to send), the bridge falls back to `required` and
+drops the name restriction; the model is still told it must call a tool.
+
 ## Fallback
 
-Requests are health-ranked, an exact match for the requested model is tried
-first, and a retryable failure moves the request to the next reachable target.
+Requests are health-ranked within each group of targets. An exact match for the
+requested model is tried first, and only once those targets have failed or are
+cooling down does the request widen to the remaining compatible targets. A
+retryable failure moves the request to the next reachable target.
 
 Falling back is no longer limited to targets that speak the client's own
 protocol. Every client protocol the gateway accepts can fall back to **any**
