@@ -369,20 +369,19 @@ test("GET /api/router/preview widens when the model is not configured", async (t
   assert.ok(body.selected, "routing must widen rather than fail");
 });
 
-test("GET /api/router/preview rejects a missing or unsupported protocol", async (t) => {
+test("GET /api/router/preview rejects a missing protocol", async (t) => {
   const { router } = await withRig(t);
 
   const missing = await getJson(router, "/api/router/preview");
   assert.equal(missing.res.status, 400);
 
-  const unsupported = await getJson(router, "/api/router/preview?protocol=gemini");
-  assert.equal(unsupported.res.status, 400);
-  assert.match(unsupported.body.error.message, /not served/);
-  // A chat-only provider can serve all three bridged client protocols, so the
-  // valid values the UI is offered include the bridged ones.
+  // A chat-only provider can serve all three bridged client protocols — the
+  // Gemini client protocol included, since `src/gemini-bridge.js` translates it.
+  const supported = await getJson(router, "/api/router/preview?protocol=gemini");
+  assert.equal(supported.res.status, 200);
   assert.deepEqual(
-    unsupported.body.error.details.supported,
-    ["anthropic", "openai-chat", "openai-responses"]
+    supported.body.protocols,
+    ["anthropic", "gemini", "openai-chat", "openai-responses"]
   );
 });
 

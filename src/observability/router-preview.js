@@ -1,7 +1,7 @@
 import { selectTargetsForProtocol, planFallbackOrder } from "./route-select.js";
 
 /** Client protocols whose requests can be bridged to a non-native provider. */
-const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses"]);
+const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses", "gemini"]);
 
 /**
  * A faithful, read-only rendering of the decision the router makes for a given
