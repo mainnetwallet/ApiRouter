@@ -35,6 +35,17 @@ export function healthProbePlan(target) {
     };
   }
 
+  // Workers AI has no /ai/v1/models; its model listing is /ai/models/search and
+  // needs the account-scoped URL. Probing /models there only ever returned 404,
+  // which left every Cloudflare target stuck at "unknown".
+  if (target.provider === "cloudflare" && /\/accounts\/[^/]+\/ai\/v1$/i.test(base)) {
+    return {
+      provider: "cloudflare",
+      url: base.replace(/\/v1$/i, "") + "/models/search?per_page=1",
+      headers: { accept: "application/json", authorization: "Bearer " + target.apiKey }
+    };
+  }
+
   if (protocols.includes("openai-chat") || protocols.includes("openai-responses")) {
     const headers = { accept: "application/json", authorization: "Bearer " + target.apiKey };
     applyConfiguredClientHeaders(headers, target);

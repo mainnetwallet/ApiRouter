@@ -27,6 +27,16 @@ const chatTarget = (overrides = {}) => ({
   ...overrides
 });
 
+test("cloudflare probes the account-scoped model search endpoint, not /models", () => {
+  const plan = healthProbePlan(chatTarget({
+    provider: "cloudflare",
+    baseUrl: "https://api.cloudflare.com/client/v4/accounts/abc123/ai/v1",
+    apiKey: "cf-token"
+  }));
+  assert.equal(plan.url, "https://api.cloudflare.com/client/v4/accounts/abc123/ai/models/search?per_page=1");
+  assert.equal(plan.headers.authorization, "Bearer cf-token");
+});
+
 /** Minimal fetch stub that records the call and returns a scripted response. */
 function stubFetch(response) {
   const calls = [];
