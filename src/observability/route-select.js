@@ -9,7 +9,20 @@ export function selectRouteTargets(targets, protocol, requestedModel) {
   const compatible = all.filter((target) => Array.isArray(target.protocols) && target.protocols.includes(protocol));
   const model = typeof requestedModel === "string" && requestedModel ? requestedModel : "";
   const exact = model ? compatible.filter((target) => target.model === model) : [];
-  return { protocol, requestedModel: model || null, modelMatched: exact.length > 0, compatible, exact, selected: exact.length > 0 ? exact : compatible };
+  // Exact matches lead, but they do not replace the rest of the candidates.
+  // The four live protocols route through the bridge selectors below, which all
+  // return `[...exact, ...rest]`; this generic shape has to agree with them, or
+  // a protocol routed here would silently lose every fallback the moment the
+  // requested model happened to be configured.
+  const rest = compatible.filter((target) => !exact.includes(target));
+  return {
+    protocol,
+    requestedModel: model || null,
+    modelMatched: exact.length > 0,
+    compatible,
+    exact,
+    selected: exact.length > 0 ? [...exact, ...rest] : compatible
+  };
 }
 
 export function selectTargetsForProtocol(targets, protocol, requestedModel) {
