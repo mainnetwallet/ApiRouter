@@ -20,6 +20,14 @@ export function describeTarget(target) {
   ].filter(Boolean).join(" · ");
 }
 
+/** `Provider · model`, without the key: the key sits with the figures in the card header. */
+export function describeModel(target) {
+  return [
+    target?.provider ? providerLabel(target.provider) : null,
+    target?.model ?? null
+  ].filter(Boolean).join(" · ");
+}
+
 const isNum = (value) => typeof value === "number" && Number.isFinite(value);
 
 /**
@@ -68,16 +76,15 @@ const STEP_HINT = Object.freeze({
 });
 
 /** One attempt: its own box with CALLING / FAILED / SUCCESS. */
-function StepBox({ step, now }) {
+function StepBox({ step }) {
   const tone = STEP_TONE[step.state] ?? "neutral";
   const calling = step.state === STEP.CALLING;
   const target = step.state === STEP.ROUTING
     ? "Choosing next target…"
-    : sanitizeText(describeTarget(step));
+    : sanitizeText(describeModel(step));
   const why = step.state === STEP.FAILED
     ? sanitizeText([step.reason, step.detail].filter(Boolean).join(" · "))
     : "";
-  const outcome = describeStepOutcome(step, now);
 
   return (
     <div
@@ -92,7 +99,6 @@ function StepBox({ step, now }) {
           {step.state}
         </span>
         <span className="livelog__target mono" title={target}>{target}</span>
-        <span className="livelog__outcome mono tabular">{outcome}</span>
       </div>
       {why ? <div className="livelog__detail livelog__detail--failed mono" title={why}>{why}</div> : null}
     </div>
@@ -191,6 +197,12 @@ export function LiveLogRow({ row, now = Date.now(), onSelectRequest = null }) {
         const cardLive = last && live;
         const time = Number.isFinite(step.startedAt) ? step.startedAt : (index === 0 ? row.ts : null);
         const reason = last && row.reason ? sanitizeText(row.reason) : "";
+        // The figures live in the header only: key, then status and time (the
+        // call's total on the last card, this model's own on the others).
+        const figures = [
+          Number.isInteger(step.keyIndex) ? `key ${step.keyIndex}` : null,
+          last ? describeOutcome(row, now) : describeStepOutcome(step, now)
+        ].filter(Boolean).join(" · ");
 
         return (
           <Fragment key={index}>
@@ -202,11 +214,11 @@ export function LiveLogRow({ row, now = Date.now(), onSelectRequest = null }) {
             >
               <CardHead
                 time={time} state={state} tone={badgeTone} live={cardLive} request={request}
-                outcome={last ? describeOutcome(row, now) : describeStepOutcome(step, now)}
+                outcome={figures}
                 row={row} rid={rid} onSelectRequest={onSelectRequest}
               />
               <div className="livelog__steps">
-                <StepBox step={step} now={now} />
+                <StepBox step={step} />
               </div>
               {reason ? <div className="livelog__detail mono livelog__reason" title={reason}>{reason}</div> : null}
             </li>

@@ -101,11 +101,9 @@ describe("one full card per model tried", () => {
     expect(row.steps[0]).toMatchObject({ keyIndex: 0, status: 429, reason: "rate limited" });
 
     const html = render([row]);
-    expect(html).toContain("Gemini · gemini-3.7-flash · key 0");
-    expect(html).toContain("Gemini · gemini-3.7-flash · key 1");
-    expect(html).toContain("429 · 410 ms");
-    expect(html).toContain("200 · 612 ms");
-    expect(html).toContain("200 · 1.82 s");
+    expect(html).toContain("Gemini · gemini-3.7-flash");
+    expect(html).toContain("key 0 · 429 · 410 ms");
+    expect(html).toContain("key 1 · 200 · 1.82 s");
     expect(html).toContain("abc12345");
   });
 
@@ -183,7 +181,8 @@ describe("a row moves through the call", () => {
     expect(row.steps.map((step) => step.state)).toEqual([STEP.CALLING]);
     const html = render([row]);
     expect(html).toContain("CALLING");
-    expect(html).toContain("Hugging Face · Qwen/Qwen2.5-Coder-32B-Instruct · key 0");
+    expect(html).toContain("Hugging Face · Qwen/Qwen2.5-Coder-32B-Instruct");
+    expect(html).toContain("key 0 · 2.50 s");
   });
 
   it("RETRYING: a failure happened and the next target is on the wire", () => {
@@ -198,8 +197,9 @@ describe("a row moves through the call", () => {
     expect(html).toContain("RETRYING");
     expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.CALLING]);
     expect(html).toContain("FALLBACK · 429 · rate limited");
-    expect(html).toContain("Hugging Face · m · key 0");
-    expect(html).toContain("Hugging Face · m · key 1");
+    expect(html).toContain("Hugging Face · m");
+    expect(html).toContain("key 0 · 429 · 300 ms");
+    expect(html).toContain("key 1 · ");
   });
 
   it("after a failure with nothing on the wire yet, the next box is a ROUTING placeholder", () => {
@@ -352,6 +352,26 @@ describe("auto-scroll", () => {
     expect(isNearBottom({ scrollTop: 480, scrollHeight: 1000, clientHeight: 500 })).toBe(true);
     expect(isNearBottom({ scrollTop: 100, scrollHeight: 1000, clientHeight: 500 })).toBe(false);
     expect(isNearBottom({})).toBe(true);
+  });
+});
+
+describe("the model box is just the model; key and figures live in the card header", () => {
+  it("the box shows `Provider · model` only, with no key and no status or time", () => {
+    const html = render([buildRow(finished())]);
+    const boxHtml = [...html.matchAll(/<div class="livelog__step livelog__step--[a-z]+[^"]*"[\s\S]*?<\/div><\/div>/g)].map((m) => m[0]);
+    expect(boxHtml).toHaveLength(2);
+    for (const box of boxHtml) {
+      expect(box).toContain("Gemini · gemini-3.7-flash");
+      expect(box).not.toMatch(/key \d/);
+      expect(box).not.toMatch(/\b(200|429)\b/);
+      expect(box).not.toMatch(/\d\s?(ms|s)\b/);
+    }
+  });
+
+  it("the header shows the key first, then status and time", () => {
+    const html = render([buildRow(finished())]);
+    expect(html).toContain("key 0 · 429 · 410 ms");
+    expect(html).toContain("key 1 · 200 · 1.82 s");
   });
 });
 
