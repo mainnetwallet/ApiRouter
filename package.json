@@ -12,7 +12,8 @@
     "test:all": "npm test && npm run test:ui",
     "ui:dev": "vite --config ui/vite.config.js",
     "ui:build": "vite build --config ui/vite.config.js",
-    "ui:preview": "vite preview --config ui/vite.config.js"
+    "ui:preview": "vite preview --config ui/vite.config.js",
+    "demo:live-logs": "node scripts/demo-live-logs.mjs"
   },
   "dependencies": {
     "dotenv": "^17.2.2",

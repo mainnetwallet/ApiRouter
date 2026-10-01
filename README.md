@@ -116,6 +116,11 @@ npm run test:all    # backend + frontend
 Twelve pages: Dashboard, Providers, Models, Health Monitor, Router, Fallback,
 Playground, Requests, Live Logs, Analytics, Configuration, System.
 
+To see the Live Logs page populated without real provider keys, run
+`npm run ui:build` then `npm run demo:live-logs`. It starts the router against
+scripted mock providers and prints a `/live-logs` URL; the traffic includes
+`429` key 0 -> key 1 fallbacks and a request that exhausts its targets.
+
 Real-time data uses polling with conditional `ETag` requests — the gateway has
 no push channel and no fake one is invented. Polling pauses while the tab is
 hidden and backs off when the gateway is failing.
