@@ -919,12 +919,25 @@
   align-items: baseline;
 }
 
-/* The line between a failed box and the model the router fell back to. */
+/* The line between a failed box and the model the router fell back to:
+   centred, with a rule on each side and clear space above and below. */
 .livelog__fallback {
-  padding: var(--sp-1, 2px) 0 var(--sp-1, 2px) var(--sp-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
   color: var(--warn);
   font-weight: 600;
   letter-spacing: 0.04em;
+  text-align: center;
+}
+.livelog__fallback::before,
+.livelog__fallback::after {
+  content: "";
+  flex: 1 1 0;
+  height: 1px;
+  background: var(--border-subtle);
 }
 
 .livelog__time { color: var(--text-dim); }
