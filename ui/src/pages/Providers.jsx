@@ -1,4 +1,7 @@
 import { useMemo, useState } from "react";
+import { getProviders } from "../api/providers.js";
+import { useApi } from "../hooks/useApi.js";
+import { useConnection } from "../context/ConnectionContext.jsx";
 import { PageHeader } from "../components/layout/PageHeader.jsx";
 import { DataTable } from "../components/ui/DataTable.jsx";
 import { Drawer } from "../components/ui/Overlays.jsx";
@@ -10,7 +13,6 @@ import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { HealthDistribution } from "../components/charts/Charts.jsx";
-import { useHealth } from "../context/HealthContext.jsx";
 import { formatLatency, formatPercent, formatRelativeTime, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 
 /**
@@ -22,7 +24,23 @@ import { formatLatency, formatPercent, formatRelativeTime, protocolLabel, provid
  * material into the browser, so nothing here can leak one.
  */
 export default function Providers() {
-  const { providers, targets, error, loading, reload, lastUpdatedAt, refreshing } = useHealth();
+  const { generation } = useConnection();
+  const {
+    data: providerData,
+    error,
+    loading,
+    reload,
+    lastUpdatedAt,
+    refreshing
+  } = useApi(getProviders, {
+    intervalMs: 10_000,
+    deps: [generation]
+  });
+  const providers = providerData?.providers ?? [];
+  const targets = useMemo(
+    () => providers.flatMap((provider) => provider.targets ?? []),
+    [providers]
+  );
   const [selectedId, setSelectedId] = useState(null);
   const [sort, setSort] = useState({ key: "provider", direction: "asc" });
 
