@@ -927,7 +927,7 @@
   justify-content: center;
   gap: var(--sp-2);
   margin: var(--sp-3) 0;
-  color: var(--warn);
+  color: var(--accent);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-align: center;
