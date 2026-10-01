@@ -89,7 +89,7 @@ test("an unknown gemini path model falls back to a compatible gemini target", as
   assert.equal(upstream.apiRequests[0].url, "/v1beta/models/gemini-2.0-flash:generateContent");
 });
 
-test("a chat-only provider never receives a Responses request", async (t) => {
+test("a chat-only provider is reached by a Responses request through the Codex bridge", async (t) => {
   const { upstream, router } = await withRig(
     t,
     () => ok(),
@@ -102,12 +102,12 @@ test("a chat-only provider never receives a Responses request", async (t) => {
 
   const res = await router.request("/v1/responses", postJson({ model: "llama-x", input: "hi" }));
 
-  assert.equal(res.status, 503);
-  assert.equal((await res.json()).error.type, "no_route");
-  assert.equal(upstream.apiRequests.length, 0);
+  assert.equal(res.status, 200);
+  assert.equal(upstream.apiRequests.length, 1);
+  assert.equal(upstream.apiRequests[0].url, "/v1/chat/completions");
 });
 
-test("a gemini-only provider never receives a Chat or Responses request", async (t) => {
+test("a gemini-only provider never receives a Chat request, but a Responses request is bridged", async (t) => {
   const { upstream, router } = await withRig(
     t,
     () => ok(),
@@ -118,11 +118,14 @@ test("a gemini-only provider never receives a Chat or Responses request", async 
     })
   );
 
-  for (const path of ["/v1/chat/completions", "/v1/responses"]) {
-    const res = await router.request(path, postJson({ model: "gemini-2.0-flash" }));
-    assert.equal(res.status, 503, `${path} should not be routable`);
-  }
+  const chat = await router.request("/v1/chat/completions", postJson({ model: "gemini-2.0-flash" }));
+  assert.equal(chat.status, 503, "/v1/chat/completions should not be routable");
   assert.equal(upstream.apiRequests.length, 0);
+
+  const responses = await router.request("/v1/responses", postJson({ model: "gemini-2.0-flash", input: "hi" }));
+  assert.equal(responses.status, 200);
+  assert.equal(upstream.apiRequests.length, 1);
+  assert.equal(upstream.apiRequests[0].url, "/v1beta/models/gemini-2.0-flash:generateContent");
 });
 
 test("AgentRouter serves anthropic, chat and responses with correct upstream paths", async (t) => {

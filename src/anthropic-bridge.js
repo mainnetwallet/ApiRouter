@@ -178,10 +178,14 @@ export function toOpenAIChatRequest(body, model, env = process.env) {
 // Anthropic protocol has no field for it, so keep it keyed by tool id.
 const signatures = new Map();
 const MAX_SIGNATURES = 2000;
-function rememberSignature(id, signature) {
+export function rememberSignature(id, signature) {
   if (!signature) return;
   signatures.set(id, signature);
   while (signatures.size > MAX_SIGNATURES) signatures.delete(signatures.keys().next().value);
+}
+
+export function signatureFor(id) {
+  return signatures.get(id);
 }
 
 export function toGeminiRequest(body, env = process.env) {

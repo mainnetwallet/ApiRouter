@@ -27,6 +27,15 @@ import {
   sseData,
   estimateInputTokens
 } from "./anthropic-bridge.js";
+import {
+  codexProtocol,
+  selectCodexTargets,
+  buildCodexRequest,
+  convertCodexJson,
+  streamToResponses,
+  customToolNames,
+  estimateResponsesInputTokens
+} from "./codex-bridge.js";
 import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage } from "./observability/sanitize.js";
@@ -204,12 +213,20 @@ async function proxy(req, res, protocol, pathname) {
 
   // Target selection is shared with the routing preview, so what the Router
   // page shows is the decision this function actually makes.
-  // Claude Code (Anthropic protocol) may fall back to ANY provider: non-Anthropic
-  // targets are reached through the translation bridge.
-  const bridged = protocol === "anthropic";
-  const selection = bridged
+  // Claude Code (Anthropic protocol) and Codex (Responses protocol) may fall
+  // back to ANY provider: targets that do not speak the client's protocol are
+  // reached through a translation bridge.
+  const bridgeKind = protocol === "anthropic" ? "anthropic" : protocol === "openai-responses" ? "codex" : null;
+  const bridged = bridgeKind !== null;
+  const nativeProtocol = bridgeKind === "codex" ? "openai-responses" : "anthropic";
+  const selection = bridgeKind === "anthropic"
     ? selectBridgeTargets(targets, requestedModel)
-    : selectRouteTargets(targets, protocol, requestedModel);
+    : bridgeKind === "codex"
+      ? selectCodexTargets(targets, requestedModel)
+      : selectRouteTargets(targets, protocol, requestedModel);
+  const codexCtx = bridgeKind === "codex"
+    ? { customTools: customToolNames(body), inputTokens: estimateResponsesInputTokens(body) }
+    : null;
   const routeTargets = selection.selected;
 
   if (selection.compatible.length === 0) {
@@ -231,11 +248,15 @@ async function proxy(req, res, protocol, pathname) {
     const result = await withFallback(
       routeTargets,
       async (target) => {
-        const upstreamProtocol = bridged ? bridgeProtocol(target) : protocol;
-        const translated = bridged && upstreamProtocol !== "anthropic";
-        const request = translated
-          ? buildBridgeRequest(target, upstreamProtocol, body, req.headers)
-          : buildUpstreamRequest(target, protocol, body, req.headers);
+        const upstreamProtocol = !bridged
+          ? protocol
+          : bridgeKind === "codex" ? codexProtocol(target) : bridgeProtocol(target);
+        const translated = bridged && upstreamProtocol !== nativeProtocol;
+        const request = !translated
+          ? buildUpstreamRequest(target, protocol, body, req.headers)
+          : bridgeKind === "codex"
+            ? buildCodexRequest(target, upstreamProtocol, body, req.headers)
+            : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), config.timeoutMs);
         const attemptStartedAt = Date.now();
@@ -303,7 +324,12 @@ async function proxy(req, res, protocol, pathname) {
         "x-multi-ai-session-id": sessionId
       };
       let converted = null;
-      if (!wantsStream) converted = convertJsonResponse(result.upstreamProtocol, await result.upstream.json(), clientModel);
+      if (!wantsStream) {
+        const upstreamJson = await result.upstream.json();
+        converted = bridgeKind === "codex"
+          ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, codexCtx)
+          : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
+      }
 
       recordRequest({
         id: sessionId,
@@ -320,7 +346,7 @@ async function proxy(req, res, protocol, pathname) {
         latencyMs: Date.now() - receivedAt,
         totalMs: Date.now() - receivedAt,
         tokens: converted ? (converted.usage.input_tokens + converted.usage.output_tokens) || null : null,
-        finishReason: converted?.stop_reason ?? null,
+        finishReason: converted?.stop_reason ?? converted?.incomplete_details?.reason ?? converted?.status ?? null,
         outcome: "success"
       });
 
@@ -328,7 +354,10 @@ async function proxy(req, res, protocol, pathname) {
 
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...meta });
       try {
-        const events = streamToAnthropic(result.upstreamProtocol, sseData(result.upstream.body), clientModel);
+        const upstreamEvents = sseData(result.upstream.body);
+        const events = bridgeKind === "codex"
+          ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, codexCtx)
+          : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
         await pipeline(Readable.from(events), res);
       } catch {
         res.destroy();
