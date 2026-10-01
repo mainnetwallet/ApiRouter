@@ -19,6 +19,7 @@ const RouterControl = lazy(() => import("./pages/RouterControl.jsx"));
 const Fallback = lazy(() => import("./pages/Fallback.jsx"));
 const Playground = lazy(() => import("./pages/Playground.jsx"));
 const Requests = lazy(() => import("./pages/Requests.jsx"));
+const LiveLogs = lazy(() => import("./pages/LiveLogs.jsx"));
 const Analytics = lazy(() => import("./pages/Analytics.jsx"));
 const Configuration = lazy(() => import("./pages/Configuration.jsx"));
 const SystemPage = lazy(() => import("./pages/SystemPage.jsx"));
@@ -46,6 +47,8 @@ export const ROUTES = [
 
   { path: "/requests", label: "Requests", icon: "list", group: "Observe", element: Requests,
     description: "Live request log with full routing lifecycle" },
+  { path: "/live-logs", label: "Live Logs", icon: "activity", group: "Observe", element: LiveLogs,
+    description: "Real-time attempt-by-attempt execution events" },
   { path: "/analytics", label: "Analytics", icon: "chart", group: "Observe", element: Analytics,
     description: "Traffic, latency, fallback and error breakdowns" },
 

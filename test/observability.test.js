@@ -150,6 +150,20 @@ test("RequestLog derives fallback counts and sanitizes stored messages", () => {
   assert.ok(!JSON.stringify(stored).includes(SECRET), "request log stored a credential");
 });
 
+test("RequestLog keeps a numeric attempt startedAt and drops anything else", () => {
+  const log = new RequestLog();
+  const stored = log.record(entry({
+    attempts: [
+      { provider: "groq", model: "m", keyIndex: 0, ok: false, status: 429, startedAt: 1700000000000, apiKey: SECRET },
+      { provider: "groq", model: "m", keyIndex: 1, ok: true, status: 200, startedAt: "not-a-number" }
+    ]
+  }));
+
+  assert.equal(stored.attempts[0].startedAt, 1700000000000);
+  assert.equal(stored.attempts[1].startedAt, null);
+  assert.ok(!JSON.stringify(stored).includes(SECRET), "request log stored a credential");
+});
+
 test("RequestLog never stores request or response bodies", () => {
   const log = new RequestLog();
   const stored = log.record(entry({

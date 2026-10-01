@@ -113,8 +113,8 @@ npm run test:ui     # frontend unit tests
 npm run test:all    # backend + frontend
 ```
 
-Eleven pages: Dashboard, Providers, Models, Health Monitor, Router, Fallback,
-Playground, Requests, Analytics, Configuration, System.
+Twelve pages: Dashboard, Providers, Models, Health Monitor, Router, Fallback,
+Playground, Requests, Live Logs, Analytics, Configuration, System.
 
 Real-time data uses polling with conditional `ETag` requests — the gateway has
 no push channel and no fake one is invented. Polling pauses while the tab is

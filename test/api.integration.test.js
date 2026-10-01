@@ -218,6 +218,34 @@ test("the fallback chain is recorded from real attempts", async (t) => {
   assert.equal(entry.outcome, "success");
 });
 
+test("each real attempt records its key index and a start time, never a key value", async (t) => {
+  let n = 0;
+  const { router } = await withRig(t, {
+    script: () => (++n === 1 ? { status: 429, body: { error: { message: "slow down" } } } : { status: 200, body: { ok: true } })
+  });
+
+  const before = Date.now();
+  const res = await router.request("/v1/chat/completions", postJson({ model: "model-a", messages: [] }));
+  assert.equal(res.status, 200);
+
+  const { res: logRes, body } = await getJson(router, "/api/requests");
+  const [first, second] = body.entries[0].attempts;
+
+  // Same model, two keys: two separate recorded attempts.
+  assert.equal(first.model, second.model);
+  assert.deepEqual([first.keyIndex, second.keyIndex], [0, 1]);
+  assert.equal(first.status, 429);
+  assert.equal(second.status, 200);
+
+  for (const attempt of [first, second]) {
+    assert.ok(Number.isFinite(attempt.startedAt));
+    assert.ok(attempt.startedAt >= before);
+  }
+  assert.ok(second.startedAt >= first.startedAt);
+
+  assertNoCredentialLeak(logRes, body, "/api/requests");
+});
+
 test("a fully failed request is logged with per-attempt detail", async (t) => {
   const { router } = await withRig(t, {
     script: () => ({ status: 503, body: { error: { message: "unavailable" } } })

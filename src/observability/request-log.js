@@ -57,6 +57,7 @@ export class RequestLog {
       // toward the fallback total the UI shows.
       ok: attempt?.ok === true,
       status: Number.isInteger(attempt?.status) ? attempt.status : null,
+      startedAt: Number.isFinite(attempt?.startedAt) ? attempt.startedAt : null,
       latencyMs: Number.isFinite(attempt?.latencyMs) ? attempt.latencyMs : null,
       errorMessage: sanitizeMessage(attempt?.errorMessage)
     }));

@@ -235,6 +235,9 @@ async function proxy(req, res, protocol, pathname) {
             protocol,
             ok,
             status: Number.isInteger(status) ? status : null,
+            // Wall-clock start, so the Live Logs view can place each real
+            // attempt on a timeline instead of guessing from request totals.
+            startedAt: attemptStartedAt,
             latencyMs: Date.now() - attemptStartedAt,
             errorMessage: sanitizeMessage(errorMessage)
           });
