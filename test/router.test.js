@@ -11,15 +11,16 @@ import { HealthRegistry, refreshAllHealth, healthRegistry } from "../src/health.
 import { fallbackGroups } from "../src/observability/route-select.js";
 import { describeRouting } from "../src/observability/router-preview.js";
 
-test("retryable statuses include quota/rate-limit/server failures", () => {
-  for (const code of [402, 408, 429, 500, 502, 503, 504]) {
+test("retryable statuses include auth, quota, rate-limit and server failures", () => {
+  for (const code of [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529]) {
     assert.equal(isRetryableStatus(code), true);
   }
 });
 
-test("401 and 403 are not retryable by default", () => {
-  assert.equal(isRetryableStatus(401), false);
-  assert.equal(isRetryableStatus(403), false);
+test("plain client errors are not retryable by default", () => {
+  assert.equal(isRetryableStatus(400), false);
+  assert.equal(isRetryableStatus(413), false);
+  assert.equal(isRetryableStatus(422), false);
 });
 
 test("fallback uses best health first and then next best target", async () => {
@@ -251,15 +252,15 @@ test("a non-retryable failure stops routing immediately", async () => {
       targets,
       async (target) => {
         tried.push(target.provider);
-        const e = new Error("unauthorized");
-        e.status = 401;
+        const e = new Error("bad request");
+        e.status = 400;
         throw e;
       },
       undefined,
       session,
       health
     ),
-    (error) => error.status === 401
+    (error) => error.status === 400
   );
 
   assert.deepEqual(tried, ["a"]);

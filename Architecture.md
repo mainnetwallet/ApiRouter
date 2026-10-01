@@ -157,7 +157,7 @@ The server starts the health monitor at startup and stops it cleanly on SIGINT/S
 Retryable status codes:
 
 ```text
-402, 408, 429, 500, 502, 503, 504
+401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529
 ```
 
 ## Sticky Sessions

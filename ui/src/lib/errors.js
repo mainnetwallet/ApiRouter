@@ -34,19 +34,20 @@ export const CATEGORY = Object.freeze({
 
 const HTTP_STATUS = {
   400: { category: CATEGORY.INVALID, label: "Bad request", retryable: false, hint: "The gateway rejected the request body as malformed." },
-  401: { category: CATEGORY.AUTH, label: "Authentication failed", retryable: false, hint: "The credential was missing or rejected. Check the API key for this provider." },
+  401: { category: CATEGORY.AUTH, label: "Authentication failed", retryable: true, hint: "The credential was missing or rejected. Check the API key for this provider." },
   402: { category: CATEGORY.QUOTA, label: "Quota exhausted", retryable: true, hint: "Payment is required. The provider will keep refusing until the plan or balance is restored." },
-  403: { category: CATEGORY.FORBIDDEN, label: "Forbidden", retryable: false, hint: "The credential is valid but not permitted to use this model or endpoint." },
-  404: { category: CATEGORY.MODEL, label: "Not found", retryable: false, hint: "The endpoint or model does not exist at this provider." },
+  403: { category: CATEGORY.FORBIDDEN, label: "Forbidden", retryable: true, hint: "The credential is valid but not permitted to use this model or endpoint." },
+  404: { category: CATEGORY.MODEL, label: "Not found", retryable: true, hint: "The endpoint or model does not exist at this provider." },
   408: { category: CATEGORY.TIMEOUT, label: "Request timeout", retryable: true, hint: "The provider did not respond in time. Raising REQUEST_TIMEOUT_MS may help." },
-  409: { category: CATEGORY.COOLDOWN_CLIENT, label: "Conflict", retryable: false, hint: "Another operation of the same kind is already in progress." },
+  409: { category: CATEGORY.COOLDOWN_CLIENT, label: "Conflict", retryable: true, hint: "Another operation of the same kind is already in progress." },
   413: { category: CATEGORY.INVALID, label: "Payload too large", retryable: false, hint: "The request body exceeded the gateway limit of 10 MB." },
   429: { category: CATEGORY.RATE_LIMIT, label: "Rate limited", retryable: true, hint: "The provider is throttling this key. The target enters cooldown and routing moves on." },
   500: { category: CATEGORY.PROVIDER, label: "Provider error", retryable: true, hint: "The provider failed internally. This is not a problem with the request." },
-  501: { category: CATEGORY.PROVIDER, label: "Not implemented", retryable: false, hint: "The provider does not implement this operation." },
+  501: { category: CATEGORY.PROVIDER, label: "Not implemented", retryable: true, hint: "The provider does not implement this operation." },
   502: { category: CATEGORY.GATEWAY, label: "All targets failed", retryable: true, hint: "Every eligible target failed. Check the fallback chain for the individual reasons." },
   503: { category: CATEGORY.UNAVAILABLE, label: "Unavailable", retryable: true, hint: "No target could serve the request, or the provider is temporarily down." },
-  504: { category: CATEGORY.TIMEOUT, label: "Gateway timeout", retryable: true, hint: "The upstream did not answer in time." }
+  504: { category: CATEGORY.TIMEOUT, label: "Gateway timeout", retryable: true, hint: "The upstream did not answer in time." },
+  529: { category: CATEGORY.UNAVAILABLE, label: "Overloaded", retryable: true, hint: "The provider is overloaded. Routing moves on to the next target." }
 };
 
 const DEFAULT_STATUS = {

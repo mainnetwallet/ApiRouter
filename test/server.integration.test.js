@@ -210,7 +210,7 @@ for (const status of [402, 408, 429, 500, 502, 503, 504]) {
   });
 }
 
-for (const status of [401, 403]) {
+for (const status of [400, 422]) {
   test(`HTTP ${status} is not retried and is returned to the client`, async (t) => {
     const { upstream, router } = await withRig(
       t,
@@ -610,7 +610,7 @@ test("GET /health and GET /v1/models report configured targets", async (t) => {
   const health = await (await router.request("/health")).json();
   assert.equal(health.ok, true);
   assert.equal(health.configuredTargets, 2);
-  assert.deepEqual(health.retryableStatus, [402, 408, 429, 500, 502, 503, 504]);
+  assert.deepEqual(health.retryableStatus, [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
 
   const models = await (await router.request("/v1/models")).json();
   assert.equal(models.object, "list");
@@ -635,4 +635,27 @@ test("starting with no configured providers serves health but no routes", async 
   const res = await router.request("/v1/chat/completions", postJson({ messages: [] }));
   assert.equal(res.status, 503);
   assert.equal((await res.json()).error.type, "no_route");
+});
+
+test("an unreachable provider (no HTTP status) falls back to the next target", async (t) => {
+  const upstream = await startMockUpstream(() => ok({ recovered: true }));
+  const router = await startRouter({
+    // Port 1 refuses connections, so fetch rejects without any HTTP status.
+    GROQ_API_KEYS: "k0",
+    GROQ_MODELS: "m",
+    GROQ_BASE_URL: "http://127.0.0.1:1",
+    CEREBRAS_API_KEYS: "k1",
+    CEREBRAS_MODELS: "m2",
+    CEREBRAS_BASE_URL: upstream.baseUrl
+  });
+  t.after(async () => {
+    await router.close();
+    await upstream.close();
+  });
+
+  const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [] }));
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { recovered: true });
+  assert.equal(upstream.apiRequests.length, 1);
 });

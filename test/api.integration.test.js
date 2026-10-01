@@ -78,7 +78,7 @@ test("GET /api/health reports summary, targets, ranking and the monitor", async 
   assert.equal(body.summary.total, 4);
   assert.equal(body.targets.length, 4);
   assert.equal(body.ranked.length, 4);
-  assert.deepEqual(body.retryableStatus, [402, 408, 429, 500, 502, 503, 504]);
+  assert.deepEqual(body.retryableStatus, [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
   assert.deepEqual(body.states.sort(), ["cooldown", "failed", "healthy", "unknown"]);
   assert.ok(body.monitor === null || typeof body.monitor === "object");
   assert.equal(body.ranked[0].rank, 1);
@@ -441,7 +441,7 @@ test("the existing gateway contract is unchanged by the admin API", async (t) =>
   const health = await (await router.request("/health")).json();
   assert.equal(health.ok, true);
   assert.equal(health.configuredTargets, 4);
-  assert.deepEqual(health.retryableStatus, [402, 408, 429, 500, 502, 503, 504]);
+  assert.deepEqual(health.retryableStatus, [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
   assert.ok(!("summary" in health), "/health must keep its original shape");
 
   const models = await (await router.request("/v1/models")).json();

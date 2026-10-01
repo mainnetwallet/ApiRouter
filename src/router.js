@@ -1,6 +1,6 @@
 import { HealthRegistry } from "./health.js";
 
-const DEFAULT_RETRY_STATUS_CODES = new Set([402, 408, 429, 500, 502, 503, 504]);
+const DEFAULT_RETRY_STATUS_CODES = new Set([401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
 
 // Sessions are keyed by a client-supplied header, so the store must be bounded:
 // an unbounded map would grow without limit on a long-running gateway.
