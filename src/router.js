@@ -61,7 +61,10 @@ export class RouteSession {
       throw err;
     }
 
-    if (this.targetId) {
+    // With a MODEL_PRIORITY the best available model always goes first, so the
+    // last successful (possibly lower-ranked) target must not stick: otherwise
+    // the top model would never be tried again after a temporary failure.
+    if (this.targetId && !(typeof health.hasModelPriority === "function" && health.hasModelPriority())) {
       const target = targets.find((item) => health.key(item) === this.targetId);
       if (target && health.isAvailable(target)) return target;
     }

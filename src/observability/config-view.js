@@ -121,6 +121,7 @@ export function describeEnvironment(config) {
       { name: "PORT", configured: true, kind: "number" },
       { name: "REQUEST_TIMEOUT_MS", configured: true, kind: "number" },
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
+      { name: "MODEL_PRIORITY", configured: (config.modelPriority || []).length > 0, kind: "list" },
       { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
     ],
     providers: providerVars

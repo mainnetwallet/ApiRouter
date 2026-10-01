@@ -32,10 +32,53 @@ export function healthState(state, now = Date.now()) {
   return state.status || HEALTH_STATES.UNKNOWN;
 }
 
+/**
+ * Parses MODEL_PRIORITY entries: `model` (any provider) or `provider:model`.
+ * Model ids may themselves contain ":" (e.g. OpenRouter's ":free"), so only a
+ * known provider id before the first ":" is treated as a provider prefix.
+ */
+export function parseModelPriority(entries, providerIds = KNOWN_PROVIDER_IDS) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((raw) => String(raw || "").trim())
+    .filter(Boolean)
+    .map((raw) => {
+      const colon = raw.indexOf(":");
+      const prefix = colon > 0 ? raw.slice(0, colon).toLowerCase() : "";
+      if (prefix && providerIds.includes(prefix)) {
+        return { provider: prefix, model: raw.slice(colon + 1).trim().toLowerCase() };
+      }
+      return { provider: null, model: raw.toLowerCase() };
+    })
+    .filter((entry) => entry.model);
+}
+
+const KNOWN_PROVIDER_IDS = [
+  "agentrouter", "gemini", "groq", "huggingface", "mistral", "openrouter",
+  "cerebras", "cloudflare", "sambanova", "cohere", "zai"
+];
+
 export class HealthRegistry {
-  constructor({ cooldownMs = DEFAULT_COOLDOWN_MS } = {}) {
+  constructor({ cooldownMs = DEFAULT_COOLDOWN_MS, modelPriority = [] } = {}) {
     this.cooldownMs = cooldownMs;
     this.states = new Map();
+    this.setModelPriority(modelPriority);
+  }
+
+  /** Best model first, across providers. An empty list keeps score-only ranking. */
+  setModelPriority(entries) {
+    this.modelPriority = parseModelPriority(entries);
+  }
+
+  hasModelPriority() {
+    return this.modelPriority.length > 0;
+  }
+
+  /** Position in MODEL_PRIORITY (lower is better); unlisted models sort last. */
+  priorityIndex(target) {
+    const model = String(target?.model || "").toLowerCase();
+    const index = this.modelPriority.findIndex((entry) =>
+      entry.model === model && (!entry.provider || entry.provider === target.provider));
+    return index < 0 ? Number.MAX_SAFE_INTEGER : index;
   }
 
   key(target) {
@@ -202,9 +245,21 @@ export class HealthRegistry {
     // preference and route a request to a model the client did not ask for.
     // Input order is itself deterministic (configuration order), so ranking
     // stays reproducible.
+    //
+    // With MODEL_PRIORITY set, the configured model quality order comes first
+    // and the health score only breaks ties (e.g. the same model on two keys).
+    // Targets in a cooldown are filtered out above, so a failing top model
+    // never blocks the next-best one.
+    const prioritised = this.hasModelPriority();
     return [...targets]
       .filter((target) => this.isAvailable(target, now))
-      .sort((a, b) => this.ensureTarget(b).score - this.ensureTarget(a).score);
+      .sort((a, b) => {
+        if (prioritised) {
+          const byModel = this.priorityIndex(a) - this.priorityIndex(b);
+          if (byModel !== 0) return byModel;
+        }
+        return this.ensureTarget(b).score - this.ensureTarget(a).score;
+      });
   }
 }
 

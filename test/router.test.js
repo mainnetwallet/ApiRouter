@@ -201,6 +201,60 @@ test("cloudflare pairs each api key with its own account id", () => {
   assert.equal(single.providers.cloudflare.baseUrl, url("legacy"));
 });
 
+test("MODEL_PRIORITY ranks the best model first across providers, then falls through", async () => {
+  const t = (provider, model, keyIndex = 0) => ({ provider, model, keyIndex });
+  // Config order is grouped by provider, which is what the chain used to follow.
+  const targets = [
+    t("agentrouter", "opus"),
+    t("gemini", "flash"),
+    t("groq", "oss"),
+    t("openrouter", "minimax/minimax-m3:free"),
+    t("cerebras", "coder"),
+    t("cerebras", "oss")
+  ];
+  const health = new HealthRegistry({
+    modelPriority: ["coder", "opus", "cerebras:oss", "openrouter:minimax/minimax-m3:free", "flash"]
+  });
+
+  const order = health.rank(targets).map((x) => `${x.provider}/${x.model}`);
+  assert.deepEqual(order, [
+    "cerebras/coder",            // best model first, even though cerebras is configured late
+    "agentrouter/opus",
+    "cerebras/oss",              // provider-pinned entry: groq's "oss" is not matched
+    "openrouter/minimax/minimax-m3:free", // ":free" in a model id is not a provider prefix
+    "gemini/flash",
+    "groq/oss"                   // unlisted models go last
+  ]);
+
+  // A cooled-down top model is skipped and the next best is used.
+  health.markFailure(targets[4], 503);
+  const tried = [];
+  await withFallback(targets, async (target) => { tried.push(`${target.provider}/${target.model}`); return "ok"; }, undefined, new RouteSession(), health);
+  assert.deepEqual(tried, ["agentrouter/opus"]);
+});
+
+test("with MODEL_PRIORITY the last successful target does not stay sticky", async () => {
+  const targets = [
+    { provider: "a", model: "best", keyIndex: 0 },
+    { provider: "b", model: "ok", keyIndex: 0 }
+  ];
+  const health = new HealthRegistry({ modelPriority: ["best", "ok"] });
+  const session = new RouteSession();
+  session.saveSuccess(targets[1], health); // a fallback answered last time
+  const first = [];
+  await withFallback(targets, async (target) => { first.push(target.model); return "ok"; }, undefined, session, health);
+  assert.deepEqual(first, ["best"]);
+});
+
+test("without MODEL_PRIORITY ranking is unchanged (score, then configured order)", () => {
+  const targets = [
+    { provider: "a", model: "x", keyIndex: 0 },
+    { provider: "b", model: "y", keyIndex: 0 }
+  ];
+  const health = new HealthRegistry();
+  assert.deepEqual(health.rank(targets).map((x) => x.model), ["x", "y"]);
+});
+
 test("provider is invalid when any required field is missing", () => {
   assert.equal(isProviderConfigured({
     apiKeys: ["k"], models: ["m"], baseUrl: "https://x.test"
