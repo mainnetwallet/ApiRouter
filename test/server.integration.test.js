@@ -107,7 +107,7 @@ test("a chat-only provider never receives a Responses request", async (t) => {
   assert.equal(upstream.apiRequests.length, 0);
 });
 
-test("a gemini-only provider never receives an Anthropic or Chat request", async (t) => {
+test("a gemini-only provider never receives a Chat or Responses request", async (t) => {
   const { upstream, router } = await withRig(
     t,
     () => ok(),
@@ -118,7 +118,7 @@ test("a gemini-only provider never receives an Anthropic or Chat request", async
     })
   );
 
-  for (const path of ["/v1/messages", "/v1/chat/completions", "/v1/responses"]) {
+  for (const path of ["/v1/chat/completions", "/v1/responses"]) {
     const res = await router.request(path, postJson({ model: "gemini-2.0-flash" }));
     assert.equal(res.status, 503, `${path} should not be routable`);
   }

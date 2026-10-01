@@ -18,6 +18,15 @@ import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectRouteTargets } from "./observability/route-select.js";
+import {
+  bridgeProtocol,
+  selectBridgeTargets,
+  buildBridgeRequest,
+  convertJsonResponse,
+  streamToAnthropic,
+  sseData,
+  estimateInputTokens
+} from "./anthropic-bridge.js";
 import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage } from "./observability/sanitize.js";
@@ -195,7 +204,12 @@ async function proxy(req, res, protocol, pathname) {
 
   // Target selection is shared with the routing preview, so what the Router
   // page shows is the decision this function actually makes.
-  const selection = selectRouteTargets(targets, protocol, requestedModel);
+  // Claude Code (Anthropic protocol) may fall back to ANY provider: non-Anthropic
+  // targets are reached through the translation bridge.
+  const bridged = protocol === "anthropic";
+  const selection = bridged
+    ? selectBridgeTargets(targets, requestedModel)
+    : selectRouteTargets(targets, protocol, requestedModel);
   const routeTargets = selection.selected;
 
   if (selection.compatible.length === 0) {
@@ -217,7 +231,11 @@ async function proxy(req, res, protocol, pathname) {
     const result = await withFallback(
       routeTargets,
       async (target) => {
-        const request = buildUpstreamRequest(target, protocol, body, req.headers);
+        const upstreamProtocol = bridged ? bridgeProtocol(target) : protocol;
+        const translated = bridged && upstreamProtocol !== "anthropic";
+        const request = translated
+          ? buildBridgeRequest(target, upstreamProtocol, body, req.headers)
+          : buildUpstreamRequest(target, protocol, body, req.headers);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), config.timeoutMs);
         const attemptStartedAt = Date.now();
@@ -232,7 +250,7 @@ async function proxy(req, res, protocol, pathname) {
             provider: target.provider,
             model: target.model,
             keyIndex: target.keyIndex,
-            protocol,
+            protocol: upstreamProtocol,
             ok,
             status: Number.isInteger(status) ? status : null,
             // Wall-clock start, so the Live Logs view can place each real
@@ -255,7 +273,7 @@ async function proxy(req, res, protocol, pathname) {
           // The successful attempt is recorded too — otherwise the log would
           // show a chain of failures with no terminal success.
           attempt(true, upstream.status, null);
-          return { upstream, target };
+          return { upstream, target, upstreamProtocol, translated };
         } catch (error) {
           if (isAbortError(error)) {
             const timeout = toTimeoutError("Upstream request timed out");
@@ -274,6 +292,50 @@ async function proxy(req, res, protocol, pathname) {
     );
 
     const sessionId = sessionInfo.id;
+
+    if (result.translated) {
+      const wantsStream = body.stream === true;
+      const clientModel = typeof body.model === "string" ? body.model : result.target.model;
+      const meta = {
+        "x-multi-ai-provider": result.target.provider,
+        "x-multi-ai-model": result.target.model,
+        "x-multi-ai-key-index": String(result.target.keyIndex),
+        "x-multi-ai-session-id": sessionId
+      };
+      let converted = null;
+      if (!wantsStream) converted = convertJsonResponse(result.upstreamProtocol, await result.upstream.json(), clientModel);
+
+      recordRequest({
+        id: sessionId,
+        receivedAt,
+        protocol,
+        requestedModel,
+        autoRouted: !selection.modelMatched,
+        streamed: wantsStream,
+        attempts,
+        finalProvider: result.target.provider,
+        finalModel: result.target.model,
+        finalKeyIndex: result.target.keyIndex,
+        httpStatus: 200,
+        latencyMs: Date.now() - receivedAt,
+        totalMs: Date.now() - receivedAt,
+        tokens: converted ? (converted.usage.input_tokens + converted.usage.output_tokens) || null : null,
+        finishReason: converted?.stop_reason ?? null,
+        outcome: "success"
+      });
+
+      if (converted) return json(res, 200, converted, meta);
+
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...meta });
+      try {
+        const events = streamToAnthropic(result.upstreamProtocol, sseData(result.upstream.body), clientModel);
+        await pipeline(Readable.from(events), res);
+      } catch {
+        res.destroy();
+      }
+      return undefined;
+    }
+
     const contentType = result.upstream.headers.get("content-type") || "application/json";
     const declaredLength = Number(result.upstream.headers.get("content-length"));
     let usage = { tokens: null, finishReason: null };
@@ -407,6 +469,16 @@ const server = http.createServer(async (req, res) => {
     const handled = await handleApi(req, res, pathname, url.searchParams);
     if (handled !== false) return undefined;
     return json(res, 404, { error: { message: "Not found", type: "not_found" } });
+  }
+
+  if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
+    if (!authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
+    try {
+      const body = await readJsonBody(req);
+      return json(res, 200, { input_tokens: estimateInputTokens(body) });
+    } catch (error) {
+      return json(res, error.status || 400, { error: { message: error.message, type: "invalid_request_error" } });
+    }
   }
 
   const protocol = req.method === "POST" ? clientProtocol(pathname) : null;
