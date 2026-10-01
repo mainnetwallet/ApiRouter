@@ -20,7 +20,7 @@ cd MultiAI-Router
 npm install
 Copy-Item .env.example .env
 notepad .env
-npm run ui:build     # build the control panel (optional — the API works without it)
+npm run ui:build     # build the control panel (optional — Router can build it automatically)
 npm start
 ```
 
@@ -30,7 +30,25 @@ Default server:
 http://127.0.0.1:8788
 ```
 
-Open `http://127.0.0.1:8788` for the control panel. If the panel has not been
+Open `http://127.0.0.1:8788` for the control panel.
+
+### Windows `Router` command
+
+Install the repository launcher once from PowerShell:
+
+```powershell
+.\scripts\install-router.ps1
+```
+
+Open a new PowerShell window. From then on, run:
+
+```powershell
+Router
+```
+
+The launcher changes to the repository directory, installs dependencies if needed,
+builds the control panel if `ui/dist/index.html` is missing, opens the control panel
+in the browser, and starts the gateway on `127.0.0.1:8788`. If the panel has not been
 built, that address serves a short page explaining how to build it — the
 gateway itself needs no build step and is unaffected.
 
