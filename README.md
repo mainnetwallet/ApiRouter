@@ -81,6 +81,18 @@ Retryable statuses:
 | POST | /v1/chat/completions |
 | POST | /v1beta/models/{model}:generateContent |
 
+Optional pin headers (same auth as the other gateway endpoints) call one exact
+target instead of letting the router choose — the Playground uses them:
+
+| Header | Meaning |
+|---|---|
+| `x-multi-ai-pin-provider` | Only this provider's targets are eligible. With a request `model`, only that model on that provider. |
+| `x-multi-ai-pin-key-index` | With a provider pin, only that 0-based key. Ignored without one. |
+
+A pinned request never falls back to another provider, key or model, and it
+ignores cooldown so a rate-limited key can still be tested. A pin that matches
+no configured target returns `404 no_route`.
+
 ### Control panel (read-only)
 
 Served under `/api`. Requires `MULTIAI_ROUTER_API_KEYS` when that is set; open

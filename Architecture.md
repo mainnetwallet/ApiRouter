@@ -160,6 +160,15 @@ Retryable status codes:
 401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529
 ```
 
+## Pinned Requests
+
+`x-multi-ai-pin-provider` (and optionally `x-multi-ai-pin-key-index`) narrow the
+candidate targets before selection (`pinTargets` in
+`src/observability/route-select.js`). Pinned requests are strict: no fallback to
+another provider, key or model, and cooldown is bypassed so a specific key can
+be tested. Outcomes still update the shared health registry. A pin matching no
+target returns `404 no_route`.
+
 ## Sticky Sessions
 
 The client may send:

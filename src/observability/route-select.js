@@ -25,6 +25,36 @@ export function selectRouteTargets(targets, protocol, requestedModel) {
   };
 }
 
+/**
+ * Strict target pinning, used by the Playground (and any client that sends the
+ * `x-multi-ai-pin-provider` / `x-multi-ai-pin-key-index` headers).
+ *
+ * A pin narrows the candidate list *before* selection, so the request can only
+ * reach the chosen provider, and only the chosen key when one is given. When a
+ * model is requested alongside a pin, only that provider's targets for that
+ * model qualify: a pin means "this exact target", never "this target, then
+ * anything else". With no model, every model of the pinned provider stays
+ * eligible and the usual health ranking orders them.
+ *
+ * An empty result means the pin names something that is not configured; the
+ * caller reports that instead of silently routing elsewhere.
+ */
+export function pinTargets(targets, pin = {}, requestedModel = "") {
+  const all = Array.isArray(targets) ? targets : [];
+  const provider = String(pin?.provider ?? "").trim().toLowerCase();
+  if (!provider) return { pinned: false, targets: all, provider: null, keyIndex: null };
+
+  const keyIndex = Number.isInteger(pin?.keyIndex) && pin.keyIndex >= 0 ? pin.keyIndex : null;
+  const model = typeof requestedModel === "string" ? requestedModel : "";
+
+  const narrowed = all.filter((target) =>
+    target.provider === provider
+    && (keyIndex === null || target.keyIndex === keyIndex)
+    && (!model || target.model === model));
+
+  return { pinned: true, targets: narrowed, provider, keyIndex, model: model || null };
+}
+
 export function selectTargetsForProtocol(targets, protocol, requestedModel) {
   if (protocol === "anthropic") return selectBridgeTargets(targets, requestedModel);
   if (protocol === "openai-responses") return selectCodexTargets(targets, requestedModel);

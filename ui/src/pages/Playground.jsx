@@ -7,7 +7,9 @@ import { Icon } from "../components/ui/Icon.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
 import { getModels } from "../api/models.js";
-import { sendPlaygroundRequest, buildRequestBody, parseMaxTokens } from "../api/playground.js";
+import {
+  sendPlaygroundRequest, buildRequestBody, buildPinHeaders, parseMaxTokens, PROTOCOL_ENDPOINTS
+} from "../api/playground.js";
 import { formatLatency, formatTokens, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 import { sanitizeText } from "../lib/sanitize.js";
 
@@ -20,10 +22,14 @@ import { sanitizeText } from "../lib/sanitize.js";
  * router is never bypassed, and the playground exercises the same code path a
  * real client does, including cooldown and fallback.
  *
- * The "provider" control narrows the model list. It does not pin a provider:
- * the gateway chooses the target, and the response headers report which one it
- * chose. Showing that distinction is the point — the panel should not imply a
- * control the backend does not offer.
+ * Choosing a provider, model or key switches Auto Route off and pins the
+ * request: the provider (and key, when picked) travel as pin headers and the
+ * gateway calls exactly that target. A model with no provider is still routed
+ * by the gateway, which prefers that model and may fall back. The response
+ * headers report which target actually answered.
+ *
+ * Every protocol can reach every configured model — the gateway translates —
+ * so the lists are not narrowed by protocol.
  */
 export default function Playground() {
   const catalog = useApi(getModels, { intervalMs: 30_000 });
@@ -31,14 +37,17 @@ export default function Playground() {
 
   const models = catalog.data?.models ?? [];
 
+  // Every configured target is reachable from every client protocol through the
+  // gateway's bridges, so the protocol list is fixed rather than derived.
   const protocols = useMemo(
-    () => [...new Set(models.flatMap((model) => model.protocols))].sort(),
-    [models]
+    () => (models.length > 0 ? Object.keys(PROTOCOL_ENDPOINTS) : []),
+    [models.length]
   );
 
   const [protocol, setProtocol] = useState("");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
+  const [keyIndex, setKeyIndex] = useState("");
   const [autoRoute, setAutoRoute] = useState(true);
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState("");
@@ -47,16 +56,65 @@ export default function Playground() {
 
   const activeProtocol = protocol || protocols[0] || "";
 
-  const providerOptions = useMemo(() => {
-    const relevant = models.filter((entry) => entry.protocols.includes(activeProtocol));
-    return [...new Set(relevant.map((entry) => entry.provider))].sort();
-  }, [models, activeProtocol]);
+  const providerOptions = useMemo(
+    () => [...new Set(models.map((entry) => entry.provider))].sort(),
+    [models]
+  );
 
   const modelOptions = useMemo(() => {
-    const relevant = models.filter((entry) => entry.protocols.includes(activeProtocol));
-    const scoped = provider ? relevant.filter((entry) => entry.provider === provider) : relevant;
+    const scoped = provider ? models.filter((entry) => entry.provider === provider) : models;
     return [...new Set(scoped.map((entry) => entry.model))].sort();
-  }, [models, activeProtocol, provider]);
+  }, [models, provider]);
+
+  // With a provider chosen the model is always concrete: the first of that
+  // provider's models until the operator picks another.
+  const selectedModel = model && modelOptions.includes(model)
+    ? model
+    : provider ? modelOptions[0] ?? "" : "";
+
+  // Keys of the chosen provider that serve the chosen model, with their health.
+  const keyOptions = useMemo(() => {
+    if (!provider) return [];
+    const byIndex = new Map();
+    for (const entry of models) {
+      if (entry.provider !== provider) continue;
+      if (selectedModel && entry.model !== selectedModel) continue;
+      if (!Number.isInteger(entry.keyIndex) || byIndex.has(entry.keyIndex)) continue;
+      byIndex.set(entry.keyIndex, entry.status);
+    }
+    return [...byIndex.entries()].sort((a, b) => a[0] - b[0]).map(([index, status]) => ({ index, status }));
+  }, [models, provider, selectedModel]);
+
+  const pinnedKey = keyIndex !== "" && keyOptions.some((option) => option.index === Number(keyIndex))
+    ? Number(keyIndex)
+    : null;
+
+  const pickProvider = (value) => {
+    setProvider(value);
+    setModel("");
+    setKeyIndex("");
+    if (value) setAutoRoute(false);
+  };
+
+  const pickModel = (value) => {
+    setModel(value);
+    setKeyIndex("");
+    if (value) setAutoRoute(false);
+  };
+
+  const pickKey = (value) => {
+    setKeyIndex(value);
+    if (value !== "") setAutoRoute(false);
+  };
+
+  const toggleAutoRoute = (checked) => {
+    setAutoRoute(checked);
+    if (checked) {
+      setProvider("");
+      setModel("");
+      setKeyIndex("");
+    }
+  };
 
   const [messages, setMessages] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -86,7 +144,7 @@ export default function Playground() {
     try {
       const body = buildRequestBody({
         protocol: activeProtocol,
-        model,
+        model: selectedModel,
         autoRoute,
         prompt: text,
         system: systemPrompt.trim() || null,
@@ -98,6 +156,7 @@ export default function Playground() {
       const result = await sendPlaygroundRequest({
         protocol: activeProtocol,
         body,
+        headers: buildPinHeaders({ autoRoute, provider, keyIndex: pinnedKey }),
         signal: controller.signal,
         onDelta: (delta) => {
           setMessages((current) =>
@@ -123,7 +182,9 @@ export default function Playground() {
         latencyMs: Date.now() - startedAt,
         tokens: result.tokens ?? null,
         finishReason: result.finishReason ?? null,
-        requestedModel: autoRoute ? null : model,
+        requestedModel: autoRoute ? null : selectedModel || null,
+        pinnedProvider: !autoRoute && provider ? provider : null,
+        pinnedKey: !autoRoute && provider ? pinnedKey : null,
         autoRouted: autoRoute
       });
     } catch (error) {
@@ -145,7 +206,7 @@ export default function Playground() {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [prompt, activeProtocol, model, autoRoute, systemPrompt, temperature, maxTokens, toast]);
+  }, [prompt, activeProtocol, selectedModel, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, toast]);
 
   const cancel = () => abortRef.current?.abort();
 
@@ -200,7 +261,7 @@ export default function Playground() {
           <div className="panel__body">
             <div className="stack">
               <label className="checkbox">
-                <input type="checkbox" checked={autoRoute} onChange={(event) => setAutoRoute(event.target.checked)} />
+                <input type="checkbox" checked={autoRoute} onChange={(event) => toggleAutoRoute(event.target.checked)} />
                 Auto Route — let the gateway pick the target
               </label>
 
@@ -210,25 +271,27 @@ export default function Playground() {
                   id="pg-protocol"
                   className="select"
                   value={activeProtocol}
-                  onChange={(event) => { setProtocol(event.target.value); setModel(""); setProvider(""); }}
+                  onChange={(event) => setProtocol(event.target.value)}
                 >
                   {protocols.map((value) => <option key={value} value={value}>{protocolLabel(value)}</option>)}
                 </select>
               </div>
 
               <div className="field">
-                <label className="field__label" htmlFor="pg-provider">Provider filter</label>
+                <label className="field__label" htmlFor="pg-provider">Provider</label>
                 <select
                   id="pg-provider"
                   className="select"
                   value={provider}
-                  onChange={(event) => { setProvider(event.target.value); setModel(""); }}
+                  onChange={(event) => pickProvider(event.target.value)}
                 >
                   <option value="">Any provider</option>
                   {providerOptions.map((value) => <option key={value} value={value}>{providerLabel(value)}</option>)}
                 </select>
                 <span className="field__hint">
-                  Narrows the model list only. The router still chooses the target.
+                  {provider
+                    ? `Only ${providerLabel(provider)} is called — no fallback to other providers.`
+                    : "Pick a provider to call it directly."}
                 </span>
               </div>
 
@@ -237,19 +300,44 @@ export default function Playground() {
                 <select
                   id="pg-model"
                   className="select"
-                  value={model}
-                  disabled={autoRoute}
-                  onChange={(event) => setModel(event.target.value)}
+                  value={selectedModel}
+                  onChange={(event) => pickModel(event.target.value)}
                 >
-                  <option value="">First available</option>
+                  {provider ? null : <option value="">First available</option>}
                   {modelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
                 </select>
-                {autoRoute ? (
-                  <span className="field__hint">
-                    Auto Route is on — no model is sent, so the gateway widens to every compatible target.
-                  </span>
-                ) : null}
+                <span className="field__hint">
+                  {provider
+                    ? `Models served by ${providerLabel(provider)}.`
+                    : autoRoute
+                      ? "Auto Route is on — no model is sent. Pick one to switch it off."
+                      : "The gateway prefers this model on any provider and may fall back."}
+                </span>
               </div>
+
+              {provider && keyOptions.length > 1 ? (
+                <div className="field">
+                  <label className="field__label" htmlFor="pg-key">API key</label>
+                  <select
+                    id="pg-key"
+                    className="select"
+                    value={pinnedKey ?? ""}
+                    onChange={(event) => pickKey(event.target.value)}
+                  >
+                    <option value="">Any key (gateway picks)</option>
+                    {keyOptions.map((option) => (
+                      <option key={option.index} value={option.index}>
+                        {`Key ${option.index + 1}${option.status ? ` — ${option.status}` : ""}`}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="field__hint">
+                    {pinnedKey === null
+                      ? `${providerLabel(provider)} keys are tried in health order.`
+                      : `Only key ${pinnedKey + 1} is used, even if it is cooling down.`}
+                  </span>
+                </div>
+              ) : null}
 
               <div className="row" style={{ gap: "var(--sp-3)" }}>
                 <div className="field grow">
@@ -379,7 +467,11 @@ export default function Playground() {
                     </button>
                   ) : null}
                   <span className="tiny dim grow right">
-                    {autoRoute ? "auto route" : model ? `pinned: ${model}` : "first available target"}
+                    {autoRoute
+                      ? "auto route"
+                      : provider
+                        ? `pinned: ${providerLabel(provider)}${pinnedKey !== null ? ` · key ${pinnedKey + 1}` : ""} · ${selectedModel}`
+                        : selectedModel ? `prefers: ${selectedModel}` : "first available target"}
                   </span>
                 </div>
               </div>
@@ -435,7 +527,9 @@ export default function Playground() {
                   <dd className="dl__desc">
                     {meta.autoRouted
                       ? "auto — the gateway selected the target"
-                      : `pinned to ${meta.requestedModel ?? EMPTY}`}
+                      : meta.pinnedProvider
+                        ? `pinned to ${providerLabel(meta.pinnedProvider)}${Number.isInteger(meta.pinnedKey) ? ` · key ${meta.pinnedKey + 1}` : ""} · ${meta.requestedModel ?? EMPTY}`
+                        : `prefers ${meta.requestedModel ?? "first available"} — the gateway chose the provider`}
                   </dd>
 
                   {meta.error ? (

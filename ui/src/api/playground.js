@@ -8,8 +8,9 @@ import { sanitizeText } from "../lib/sanitize.js";
  * provider directly and never to an internal shortcut. That is deliberate:
  * "never bypass the backend router" means the playground exercises exactly the
  * path a real client would, including protocol detection, health ranking,
- * cooldown and fallback. Switching off Auto Route only pins the model; the
- * gateway still chooses the key and still applies fallback.
+ * cooldown and fallback. With Auto Route on, nothing is pinned and the gateway
+ * chooses. With it off, the chosen provider (and key, when one is picked) are
+ * sent as pin headers and the gateway calls exactly that target.
  */
 
 export const PROTOCOL_ENDPOINTS = Object.freeze({
@@ -18,6 +19,17 @@ export const PROTOCOL_ENDPOINTS = Object.freeze({
   anthropic: "/v1/messages",
   gemini: "/v1beta/models"
 });
+
+/**
+ * Pin headers understood by the gateway. A pin needs a provider; a key index
+ * is meaningless on its own, so it is only sent alongside one.
+ */
+export function buildPinHeaders({ autoRoute, provider, keyIndex } = {}) {
+  if (autoRoute || !provider) return {};
+  const headers = { "x-multi-ai-pin-provider": provider };
+  if (Number.isInteger(keyIndex) && keyIndex >= 0) headers["x-multi-ai-pin-key-index"] = String(keyIndex);
+  return headers;
+}
 
 export function endpointFor(protocol, model) {
   if (protocol === "gemini") {
@@ -194,11 +206,12 @@ export function extractText(protocol, parsed) {
 export async function sendPlaygroundRequest({
   protocol,
   body,
+  headers,
   signal,
   onDelta,
   onMeta
 }) {
-  const response = await apiStream(endpointFor(protocol, body.model), { body, signal });
+  const response = await apiStream(endpointFor(protocol, body.model), { body, signal, headers });
 
   const routed = {
     provider: response.headers.get("x-multi-ai-provider"),

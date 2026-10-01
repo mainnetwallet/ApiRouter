@@ -17,7 +17,7 @@ import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId, is
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
-import { selectTargetsForProtocol, fallbackGroups } from "./observability/route-select.js";
+import { selectTargetsForProtocol, fallbackGroups, pinTargets } from "./observability/route-select.js";
 import {
   bridgeProtocol,
   buildBridgeRequest,
@@ -200,6 +200,32 @@ function recordRequest(fields) {
   }
 }
 
+/**
+ * Optional pin headers. Returns `{ provider, keyIndex }`, or `{ error }` for a
+ * malformed key index so a typo is reported rather than ignored.
+ */
+function readPin(req) {
+  const provider = String(req.headers["x-multi-ai-pin-provider"] || "").trim();
+  const rawKey = String(req.headers["x-multi-ai-pin-key-index"] ?? "").trim();
+  if (!provider) return { provider: "", keyIndex: null };
+  if (rawKey === "") return { provider, keyIndex: null };
+  const keyIndex = Number(rawKey);
+  if (!Number.isInteger(keyIndex) || keyIndex < 0) {
+    return { error: "x-multi-ai-pin-key-index must be a non-negative integer" };
+  }
+  return { provider, keyIndex };
+}
+
+/**
+ * Health view for pinned requests. A pinned request names one specific target
+ * on purpose (the Playground testing a key), so a cooldown must not make it
+ * unreachable. Outcomes are still recorded in the shared registry, so a pinned
+ * failure still cools the target for ordinary traffic.
+ */
+const pinnedHealth = Object.create(healthRegistry);
+pinnedHealth.rank = (group) => [...group];
+pinnedHealth.isAvailable = () => true;
+
 async function proxy(req, res, protocol, pathname) {
   const receivedAt = Date.now();
   const attempts = [];
@@ -266,7 +292,27 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "gemini" ? geminiProtocol(target)
     : bridgeProtocol(target);
 
-  const selection = selectTargetsForProtocol(targets, protocol, requestedModel);
+  const pin = readPin(req);
+  if (pin.error) {
+    recordRequest({
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 400,
+      outcome: "failed", errorType: "invalid_request_error", errorMessage: pin.error, attempts
+    });
+    return json(res, 400, { error: { message: pin.error, type: "invalid_request_error" } }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
+  const pinned = pinTargets(targets, pin, requestedModel);
+  if (pinned.pinned && pinned.targets.length === 0) {
+    const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;
+    const message = `No configured target matches the pinned selection (${sanitizeMessage(where)})`;
+    recordRequest({
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 404,
+      outcome: "failed", errorType: "no_route", errorMessage: message, attempts
+    });
+    return json(res, 404, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
+  const selection = selectTargetsForProtocol(pinned.targets, protocol, requestedModel);
   const bridgeCtx = bridgeKind === "codex"
     ? { customTools: customToolNames(body), inputTokens: estimateResponsesInputTokens(body) }
     : bridgeKind === "chat"
@@ -381,7 +427,7 @@ async function proxy(req, res, protocol, pathname) {
       },
       config.retryableStatus,
       sessionInfo.state.session,
-      healthRegistry,
+      pinned.pinned ? pinnedHealth : healthRegistry,
       { groups: routeGroups }
     );
 

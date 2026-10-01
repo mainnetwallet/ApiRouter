@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  ANTHROPIC_UNLIMITED_MAX_TOKENS, buildRequestBody, endpointFor, extractDelta, extractStreamMeta, extractText,
+  ANTHROPIC_UNLIMITED_MAX_TOKENS, buildPinHeaders, buildRequestBody, endpointFor, extractDelta, extractStreamMeta, extractText,
   parseMaxTokens
 } from "../playground.js";
 
@@ -145,5 +145,20 @@ describe("max tokens", () => {
   it("gives Anthropic a high value because its API requires the field", () => {
     const body = buildRequestBody({ protocol: "anthropic", model: "m", autoRoute: false, prompt: "hi", maxTokens: null });
     expect(body.max_tokens).toBe(ANTHROPIC_UNLIMITED_MAX_TOKENS);
+  });
+});
+
+describe("playground pinning", () => {
+  it("sends no pin headers under Auto Route or without a provider", () => {
+    expect(buildPinHeaders({ autoRoute: true, provider: "groq", keyIndex: 1 })).toEqual({});
+    expect(buildPinHeaders({ autoRoute: false, provider: "", keyIndex: 1 })).toEqual({});
+    expect(buildPinHeaders()).toEqual({});
+  });
+
+  it("pins the provider, and the key only when one is chosen", () => {
+    expect(buildPinHeaders({ autoRoute: false, provider: "groq", keyIndex: null }))
+      .toEqual({ "x-multi-ai-pin-provider": "groq" });
+    expect(buildPinHeaders({ autoRoute: false, provider: "groq", keyIndex: 0 }))
+      .toEqual({ "x-multi-ai-pin-provider": "groq", "x-multi-ai-pin-key-index": "0" });
   });
 });
