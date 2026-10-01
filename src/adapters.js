@@ -20,7 +20,7 @@ function applyConfiguredClientHeaders(headers, target) {
   if (configured["user-agent"]) headers["user-agent"] = configured["user-agent"];
 }
 
-export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {}) {
+export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {}, { stream = false } = {}) {
   const headers = {
     "content-type": "application/json",
     accept: incomingHeaders.accept || "application/json"
@@ -48,7 +48,14 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
   } else if (protocol === "gemini") {
-    url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + ":generateContent");
+    // The client picks streaming by calling :streamGenerateContent, so the
+    // method name — not a body field — decides which one to ask the provider for.
+    const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
+    // A configured base URL may already carry the API version — `health-checks.js`
+    // accepts either form — so it is stripped before the model path is appended.
+    // Otherwise the request goes to `/v1beta/v1beta/models/...`.
+    const root = base.replace(/\/v\d+(?:alpha|beta)?\d*$/i, "");
+    url = joinUrl(root, "v1beta/models/" + encodeURIComponent(target.model) + method);
     headers["x-goog-api-key"] = target.apiKey;
   } else {
     throw new Error("Unsupported upstream protocol: " + protocol);
@@ -85,6 +92,12 @@ export function clientProtocol(pathname) {
   if (pathname === "/v1/messages") return "anthropic";
   if (pathname === "/v1/responses") return "openai-responses";
   if (pathname === "/v1/chat/completions") return "openai-chat";
-  if (/^\/v1beta\/models\/[^/]+:generateContent$/.test(pathname)) return "gemini";
+  // Gemini clients choose streaming with the method name, so both are routes.
+  if (/^\/v1beta\/models\/[^/]+:(?:stream)?[Gg]enerateContent$/.test(pathname)) return "gemini";
   return null;
+}
+
+/** True when a Gemini client asked for the streaming method. */
+export function isGeminiStream(pathname) {
+  return /:streamGenerateContent$/.test(pathname);
 }
