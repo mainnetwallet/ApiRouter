@@ -38,10 +38,11 @@ Requests are health-ranked, an exact match for the requested model is tried
 first, and a retryable failure moves the request to the next reachable target.
 
 Falling back is no longer limited to targets that speak the client's own
-protocol. Claude Code (`/v1/messages`) and Codex (`/v1/responses`) can fall
-back to **any** configured provider — chat-only or Gemini — through a
-translation bridge, and a chat client can fall back to a Gemini provider the
-same way. See [CLIENTS.md](CLIENTS.md) for the protocol-by-provider matrix and
-the content a bridged request drops.
+protocol. Every client protocol the gateway accepts can fall back to **any**
+configured provider — Claude Code (`/v1/messages`), Codex (`/v1/responses`) and
+Gemini clients all reach chat-only and Gemini providers through a translation
+bridge, and a chat client reaches a Gemini provider the same way. See
+[CLIENTS.md](CLIENTS.md) for the protocol-by-provider matrix and the content a
+bridged request drops.
 
 For exact client configuration, use the client's own documentation.

@@ -13,7 +13,7 @@ import {
 } from "./health.js";
 import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
 import { RouteSession, SessionStore, withFallback } from "./router.js";
-import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId } from "./adapters.js";
+import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId, isGeminiStream } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
@@ -41,6 +41,12 @@ import {
   streamToChat,
   estimateChatInputTokens
 } from "./chat-bridge.js";
+import {
+  geminiProtocol,
+  buildGeminiBridgeRequest,
+  chatJsonToGemini,
+  streamToGemini
+} from "./gemini-bridge.js";
 import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage } from "./observability/sanitize.js";
@@ -222,9 +228,13 @@ async function proxy(req, res, protocol, pathname) {
   const sessionInfo = getSession(req, protocol);
 
   const geminiPathModel = protocol === "gemini"
-    ? pathname.match(/^\/v1beta\/models\/([^:]+):generateContent$/)?.[1] || ""
+    ? pathname.match(/^\/v1beta\/models\/([^:]+):(?:stream)?[Gg]enerateContent$/)?.[1] || ""
     : "";
   const requestedModel = typeof body.model === "string" ? body.model : geminiPathModel;
+
+  // A Gemini client selects streaming with the method name rather than a body
+  // field, so both spellings have to be considered here.
+  const wantsStream = body.stream === true || (protocol === "gemini" && isGeminiStream(pathname));
 
   // Target selection is shared with the routing preview, so what the Router
   // page shows is the decision this function actually makes.
@@ -235,15 +245,18 @@ async function proxy(req, res, protocol, pathname) {
     protocol === "anthropic" ? "anthropic"
     : protocol === "openai-responses" ? "codex"
     : protocol === "openai-chat" ? "chat"
+    : protocol === "gemini" ? "gemini"
     : null;
   const bridged = bridgeKind !== null;
   const nativeProtocol =
     bridgeKind === "codex" ? "openai-responses"
     : bridgeKind === "chat" ? "openai-chat"
+    : bridgeKind === "gemini" ? "gemini"
     : "anthropic";
   const upstreamProtocolFor = (target) =>
     bridgeKind === "codex" ? codexProtocol(target)
     : bridgeKind === "chat" ? chatProtocol(target)
+    : bridgeKind === "gemini" ? geminiProtocol(target)
     : bridgeProtocol(target);
 
   const selection = selectTargetsForProtocol(targets, protocol, requestedModel);
@@ -278,12 +291,14 @@ async function proxy(req, res, protocol, pathname) {
           : protocol;
         const translated = bridged && upstreamProtocol !== nativeProtocol;
         const request = !translated
-          ? buildUpstreamRequest(target, protocol, body, req.headers)
+          ? buildUpstreamRequest(target, protocol, body, req.headers, { stream: wantsStream })
           : bridgeKind === "codex"
             ? buildCodexRequest(target, upstreamProtocol, body, req.headers)
             : bridgeKind === "chat"
               ? buildChatRequest(target, upstreamProtocol, body, req.headers)
-              : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
+              : bridgeKind === "gemini"
+                ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream })
+                : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), config.timeoutMs);
         const attemptStartedAt = Date.now();
@@ -342,7 +357,6 @@ async function proxy(req, res, protocol, pathname) {
     const sessionId = sessionInfo.id;
 
     if (result.translated) {
-      const wantsStream = body.stream === true;
       const clientModel = typeof body.model === "string" ? body.model : result.target.model;
       const meta = {
         "x-multi-ai-provider": result.target.provider,
@@ -357,7 +371,9 @@ async function proxy(req, res, protocol, pathname) {
           ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
           : bridgeKind === "chat"
             ? convertChatJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
-            : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
+            : bridgeKind === "gemini"
+              ? chatJsonToGemini(upstreamJson)
+              : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
       }
 
       recordRequest({
@@ -388,7 +404,9 @@ async function proxy(req, res, protocol, pathname) {
           ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
           : bridgeKind === "chat"
             ? streamToChat(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
-            : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
+            : bridgeKind === "gemini"
+              ? streamToGemini(upstreamEvents)
+              : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
         await pipeline(Readable.from(events), res);
       } catch {
         res.destroy();

@@ -351,3 +351,39 @@ test("session store is empty until a session is used", () => {
 function targetId(target) {
   return `${target.provider}:${target.model}:key-${target.keyIndex}`;
 }
+
+// ---------------------------------------------------------------------------
+// Known gap: exact-model preference is not guaranteed at runtime
+// ---------------------------------------------------------------------------
+
+/**
+ * `selectGeminiTargets` (like the other bridges' selectors) returns the exact
+ * model match first, and `describeRouting` reports that order. `withFallback`
+ * does not preserve it: it re-ranks by health score, and a sticky session can
+ * promote an older target ahead of it. A target that failed once and has since
+ * left cooldown sits at score 25 while an untouched target sits at 50, so the
+ * request is served by the wrong model even though the exact match is available.
+ *
+ * Marked `todo` because this is a routing-policy decision, not a defect in the
+ * bridge: fixing it means either ranking exact matches ahead of score or
+ * dropping the "exact match is tried first" promise. Either way it changes
+ * behaviour for every client protocol, so it needs a product call.
+ */
+test("an available exact model match is tried first even when a fallback scores higher", { todo: true }, async () => {
+  const exact = { provider: "p1", model: "model-A", keyIndex: 0, protocols: ["openai-chat"] };
+  const other = { provider: "p2", model: "model-B", keyIndex: 0, protocols: ["openai-chat"] };
+
+  const health = new HealthRegistry();
+  health.markFailure(exact, 500, { cooldownMs: -1 }); // failed once; cooldown has elapsed
+
+  const attempted = [];
+  await withFallback(
+    [exact, other],
+    async (target) => { attempted.push(target.model); return {}; },
+    new Set([500]),
+    new RouteSession(),
+    health
+  );
+
+  assert.equal(attempted[0], "model-A");
+});
