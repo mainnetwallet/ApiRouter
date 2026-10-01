@@ -438,4 +438,4 @@ process.once("SIGTERM", () => {
   server.close(() => process.exit(0));
 });
 
-server.listen(config.port, () => console.log("MultiAI Router listening on http://127.0.0.1:" + config.port));
+server.listen(config.port, () => {\n  console.log("MultiAI Router listening on http://localhost:" + config.port);\n  console.log("Control Panel UI: http://localhost:" + config.port + "/");\n});
