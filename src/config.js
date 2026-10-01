@@ -88,8 +88,6 @@ export function loadConfig(env = process.env) {
   return {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
     port: Number(env.PORT || 8788),
-    // Fallback order by model quality, best first (see MODEL_PRIORITY in .env.example).
-    modelPriority: split(env.MODEL_PRIORITY),
     timeoutMs: Number(env.REQUEST_TIMEOUT_MS || 120000),
     // Streaming requests should get response headers within seconds. If a
     // provider hangs, give up on it quickly and fall back instead of waiting

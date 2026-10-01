@@ -77,8 +77,6 @@ export function fallbackGroups(selection) {
 export function planFallbackOrder(ranked, health, stickyTargetId = null) {
   if (ranked.length === 0) return [];
   if (!stickyTargetId) return ranked;
-  // Mirrors RouteSession: with a MODEL_PRIORITY there is no sticky preference.
-  if (typeof health.hasModelPriority === "function" && health.hasModelPriority()) return ranked;
   const preferredIndex = ranked.findIndex((target) => health.key(target) === stickyTargetId);
   if (preferredIndex <= 0) return ranked;
   const preferred = ranked[preferredIndex];

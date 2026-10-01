@@ -52,7 +52,6 @@ import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage } from "./observability/sanitize.js";
 
 const config = loadConfig();
-healthRegistry.setModelPriority(config.modelPriority);
 const targets = buildTargets(config.providers);
 const sessions = new SessionStore();
 
