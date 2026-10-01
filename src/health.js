@@ -195,16 +195,16 @@ export class HealthRegistry {
   }
 
   rank(targets, now = Date.now()) {
+    // Sorted by score alone. The sort is stable, so targets with equal scores
+    // keep the order the caller passed in, and callers order their candidates
+    // deliberately: the bridges put an exact model match ahead of fallbacks.
+    // Re-sorting ties by provider/model name would silently discard that
+    // preference and route a request to a model the client did not ask for.
+    // Input order is itself deterministic (configuration order), so ranking
+    // stays reproducible.
     return [...targets]
       .filter((target) => this.isAvailable(target, now))
-      .sort((a, b) => {
-        const aState = this.ensureTarget(a);
-        const bState = this.ensureTarget(b);
-        return (bState.score - aState.score)
-          || String(a.provider).localeCompare(String(b.provider))
-          || String(a.model).localeCompare(String(b.model))
-          || Number(a.keyIndex) - Number(b.keyIndex);
-      });
+      .sort((a, b) => this.ensureTarget(b).score - this.ensureTarget(a).score);
   }
 }
 
