@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildRequestBody, endpointFor, extractDelta, extractStreamMeta, extractText
+  ANTHROPIC_UNLIMITED_MAX_TOKENS, buildRequestBody, endpointFor, extractDelta, extractStreamMeta, extractText,
+  parseMaxTokens
 } from "../playground.js";
 
 /**
@@ -116,5 +117,33 @@ describe("playground stream parsing", () => {
     expect(extractText("openai-responses", { output_text: "r" })).toBe("r");
     expect(extractText("openai-chat", { choices: [{ message: { content: "c" } }] })).toBe("c");
     expect(extractText("openai-chat", null)).toBe("");
+  });
+});
+
+describe("max tokens", () => {
+  it("treats a blank, zero or invalid field as no limit", () => {
+    for (const value of ["", "   ", "0", "-5", "abc", null, undefined]) {
+      expect(parseMaxTokens(value)).toBeNull();
+    }
+    expect(parseMaxTokens("2048")).toBe(2048);
+    expect(parseMaxTokens(" 500000 ")).toBe(500000);
+  });
+
+  it("does not send a token cap when there is no limit", () => {
+    const common = { model: "m", autoRoute: false, prompt: "hi", maxTokens: null };
+
+    expect(buildRequestBody({ ...common, protocol: "openai-chat" })).not.toHaveProperty("max_tokens");
+    expect(buildRequestBody({ ...common, protocol: "openai-responses" })).not.toHaveProperty("max_output_tokens");
+    expect(buildRequestBody({ ...common, protocol: "gemini" })).not.toHaveProperty("generationConfig");
+  });
+
+  it("still sends an explicit limit, with no upper cap", () => {
+    const body = buildRequestBody({ protocol: "openai-chat", model: "m", autoRoute: false, prompt: "hi", maxTokens: 500000 });
+    expect(body.max_tokens).toBe(500000);
+  });
+
+  it("gives Anthropic a high value because its API requires the field", () => {
+    const body = buildRequestBody({ protocol: "anthropic", model: "m", autoRoute: false, prompt: "hi", maxTokens: null });
+    expect(body.max_tokens).toBe(ANTHROPIC_UNLIMITED_MAX_TOKENS);
   });
 });

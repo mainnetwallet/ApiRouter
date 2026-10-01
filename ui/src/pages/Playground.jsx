@@ -7,7 +7,7 @@ import { Icon } from "../components/ui/Icon.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
 import { getModels } from "../api/models.js";
-import { sendPlaygroundRequest, buildRequestBody } from "../api/playground.js";
+import { sendPlaygroundRequest, buildRequestBody, parseMaxTokens } from "../api/playground.js";
 import { formatLatency, formatTokens, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 import { sanitizeText } from "../lib/sanitize.js";
 
@@ -41,7 +41,7 @@ export default function Playground() {
   const [model, setModel] = useState("");
   const [autoRoute, setAutoRoute] = useState(true);
   const [temperature, setTemperature] = useState(0.7);
-  const [maxTokens, setMaxTokens] = useState(1024);
+  const [maxTokens, setMaxTokens] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [prompt, setPrompt] = useState("");
 
@@ -91,7 +91,7 @@ export default function Playground() {
         prompt: text,
         system: systemPrompt.trim() || null,
         temperature: Number(temperature),
-        maxTokens: Number(maxTokens),
+        maxTokens: parseMaxTokens(maxTokens),
         stream: true
       });
 
@@ -274,7 +274,7 @@ export default function Playground() {
                     className="input mono"
                     type="number"
                     min="1"
-                    max="32000"
+                    placeholder="No limit"
                     value={maxTokens}
                     onChange={(event) => setMaxTokens(event.target.value)}
                   />

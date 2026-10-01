@@ -32,6 +32,17 @@ export function endpointFor(protocol, model) {
  * Auto Route omits `model`, which is what makes the gateway widen to every
  * protocol-compatible target instead of pinning one.
  */
+/** Sent only for Anthropic-protocol requests, whose API makes `max_tokens` mandatory. */
+export const ANTHROPIC_UNLIMITED_MAX_TOKENS = 64000;
+
+/** Parse the Max tokens field: blank, zero or garbage all mean "no limit". */
+export function parseMaxTokens(value) {
+  const text = String(value ?? "").trim();
+  if (text === "") return null;
+  const number = Number(text);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
+}
+
 export function buildRequestBody({
   protocol,
   model,
@@ -44,11 +55,16 @@ export function buildRequestBody({
 }) {
   const text = String(prompt ?? "");
   const includeModel = !autoRoute && Boolean(model);
+  // Blank means "no limit": the field is simply not sent, so the provider's own
+  // default applies. (`Number("")` is 0, which must never reach the wire.)
+  const limited = Number.isFinite(maxTokens) && maxTokens > 0;
 
   if (protocol === "anthropic") {
     return {
       ...(includeModel ? { model } : {}),
-      max_tokens: maxTokens,
+      // Anthropic's API requires this field, so "no limit" still sends a value:
+      // a high one, rather than the old 1024 cap.
+      max_tokens: limited ? maxTokens : ANTHROPIC_UNLIMITED_MAX_TOKENS,
       ...(system ? { system } : {}),
       ...(Number.isFinite(temperature) ? { temperature } : {}),
       messages: [{ role: "user", content: text }],
@@ -62,7 +78,7 @@ export function buildRequestBody({
       input: text,
       ...(system ? { instructions: system } : {}),
       ...(Number.isFinite(temperature) ? { temperature } : {}),
-      ...(Number.isFinite(maxTokens) ? { max_output_tokens: maxTokens } : {}),
+      ...(limited ? { max_output_tokens: maxTokens } : {}),
       stream
     };
   }
@@ -70,7 +86,7 @@ export function buildRequestBody({
   if (protocol === "gemini") {
     const generationConfig = {};
     if (Number.isFinite(temperature)) generationConfig.temperature = temperature;
-    if (Number.isFinite(maxTokens)) generationConfig.maxOutputTokens = maxTokens;
+    if (limited) generationConfig.maxOutputTokens = maxTokens;
 
     return {
       contents: [{ role: "user", parts: [{ text }] }],
@@ -86,7 +102,7 @@ export function buildRequestBody({
       { role: "user", content: text }
     ],
     ...(Number.isFinite(temperature) ? { temperature } : {}),
-    ...(Number.isFinite(maxTokens) ? { max_tokens: maxTokens } : {}),
+    ...(limited ? { max_tokens: maxTokens } : {}),
     stream
   };
 }
