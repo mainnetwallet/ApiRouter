@@ -170,3 +170,85 @@ test("tool calls still arrive when the upstream never sends a finish reason", as
   assert.equal(parts.length, 1);
   assert.equal(parts[0].functionCall.name, "lookup");
 });
+
+// ---------------------------------------------------------------------------
+// toolConfig.functionCallingConfig translation
+//
+// Gemini can say "call one of exactly these N functions". OpenAI-compatible
+// APIs cannot express that in `tool_choice` alone, so the bridge preserves the
+// restriction by narrowing the declarations it forwards and saying `required`.
+// ---------------------------------------------------------------------------
+
+const toolBody = (functionCallingConfig, names = ["lookup", "search", "delete"]) => ({
+  contents: [{ role: "user", parts: [{ text: "hi" }] }],
+  tools: [{
+    functionDeclarations: names.map((name) => ({
+      name,
+      description: `${name} it`,
+      parameters: { type: "object", properties: { q: { type: "string" } } }
+    }))
+  }],
+  ...(functionCallingConfig ? { toolConfig: { functionCallingConfig } } : {})
+});
+
+test("mode NONE disables tool use", () => {
+  const out = toChatFromGemini(toolBody({ mode: "NONE" }), "m");
+  assert.equal(out.tool_choice, "none");
+});
+
+test("mode ANY with a single allowed function asks for that function by name", () => {
+  const out = toChatFromGemini(toolBody({ mode: "ANY", allowedFunctionNames: ["lookup"] }), "m");
+  assert.deepEqual(out.tool_choice, { type: "function", function: { name: "lookup" } });
+  // The other declarations stay available; the choice alone carries the restriction.
+  assert.equal(out.tools.length, 3);
+});
+
+test("mode ANY with several allowed functions is preserved, not degraded", () => {
+  const out = toChatFromGemini(
+    toolBody({ mode: "ANY", allowedFunctionNames: ["lookup", "search"] }),
+    "m"
+  );
+
+  assert.equal(out.tool_choice, "required");
+  // Only the allowed declarations are forwarded, so `required` can only select
+  // among them: the upstream cannot emit a call to `delete`.
+  assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup", "search"]);
+});
+
+test("mode ANY with an empty allowed list falls back to required with every tool", () => {
+  const out = toChatFromGemini(toolBody({ mode: "ANY", allowedFunctionNames: [] }), "m");
+  assert.equal(out.tool_choice, "required");
+  assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup", "search", "delete"]);
+});
+
+test("mode ANY naming a function with no declaration falls back to required", () => {
+  // The restriction cannot be represented when the name has no schema to send,
+  // so the bridge keeps the "must call a tool" half and drops the name list.
+  const out = toChatFromGemini(
+    toolBody({ mode: "ANY", allowedFunctionNames: ["lookup", "not-declared"] }),
+    "m"
+  );
+  assert.equal(out.tool_choice, "required");
+  assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup", "search", "delete"]);
+});
+
+test("mode ANY naming every declared function is equivalent to required", () => {
+  const out = toChatFromGemini(
+    toolBody({ mode: "ANY", allowedFunctionNames: ["lookup", "search", "delete"] }),
+    "m"
+  );
+  assert.equal(out.tool_choice, "required");
+  assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup", "search", "delete"]);
+});
+
+test("mode AUTO with allowed names hides the excluded declarations", () => {
+  const out = toChatFromGemini(toolBody({ mode: "AUTO", allowedFunctionNames: ["lookup"] }), "m");
+  assert.equal(out.tool_choice, undefined);
+  assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup"]);
+});
+
+test("no toolConfig leaves the declarations and the choice untouched", () => {
+  const out = toChatFromGemini(toolBody(null), "m");
+  assert.equal(out.tool_choice, undefined);
+  assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup", "search", "delete"]);
+});
