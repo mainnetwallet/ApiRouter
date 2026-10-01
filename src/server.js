@@ -17,10 +17,9 @@ import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId } f
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
-import { selectRouteTargets } from "./observability/route-select.js";
+import { selectTargetsForProtocol } from "./observability/route-select.js";
 import {
   bridgeProtocol,
-  selectBridgeTargets,
   buildBridgeRequest,
   convertJsonResponse,
   streamToAnthropic,
@@ -29,13 +28,19 @@ import {
 } from "./anthropic-bridge.js";
 import {
   codexProtocol,
-  selectCodexTargets,
   buildCodexRequest,
   convertCodexJson,
   streamToResponses,
   customToolNames,
   estimateResponsesInputTokens
 } from "./codex-bridge.js";
+import {
+  chatProtocol,
+  buildChatRequest,
+  convertChatJson,
+  streamToChat,
+  estimateChatInputTokens
+} from "./chat-bridge.js";
 import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage } from "./observability/sanitize.js";
@@ -163,6 +168,16 @@ function extractUsage(parsed) {
   };
 }
 
+/** Total tokens of a converted response, across all three client shapes. */
+function convertedTokens(converted) {
+  const usage = converted?.usage;
+  if (!usage) return null;
+  if (Number.isFinite(usage.total_tokens)) return usage.total_tokens;
+  const input = Number(usage.input_tokens ?? usage.prompt_tokens) || 0;
+  const output = Number(usage.output_tokens ?? usage.completion_tokens) || 0;
+  return input + output || null;
+}
+
 /** Records a routed request. Never allowed to break the request it describes. */
 function recordRequest(fields) {
   try {
@@ -213,20 +228,30 @@ async function proxy(req, res, protocol, pathname) {
 
   // Target selection is shared with the routing preview, so what the Router
   // page shows is the decision this function actually makes.
-  // Claude Code (Anthropic protocol) and Codex (Responses protocol) may fall
-  // back to ANY provider: targets that do not speak the client's protocol are
-  // reached through a translation bridge.
-  const bridgeKind = protocol === "anthropic" ? "anthropic" : protocol === "openai-responses" ? "codex" : null;
-  const bridged = bridgeKind !== null;
-  const nativeProtocol = bridgeKind === "codex" ? "openai-responses" : "anthropic";
-  const selection = bridgeKind === "anthropic"
-    ? selectBridgeTargets(targets, requestedModel)
-    : bridgeKind === "codex"
-      ? selectCodexTargets(targets, requestedModel)
-      : selectRouteTargets(targets, protocol, requestedModel);
-  const codexCtx = bridgeKind === "codex"
-    ? { customTools: customToolNames(body), inputTokens: estimateResponsesInputTokens(body) }
+  // Claude Code (Anthropic protocol), Codex (Responses protocol) and OpenAI
+  // chat clients may fall back to ANY reachable provider: targets that do not
+  // speak the client's protocol are reached through a translation bridge.
+  const bridgeKind =
+    protocol === "anthropic" ? "anthropic"
+    : protocol === "openai-responses" ? "codex"
+    : protocol === "openai-chat" ? "chat"
     : null;
+  const bridged = bridgeKind !== null;
+  const nativeProtocol =
+    bridgeKind === "codex" ? "openai-responses"
+    : bridgeKind === "chat" ? "openai-chat"
+    : "anthropic";
+  const upstreamProtocolFor = (target) =>
+    bridgeKind === "codex" ? codexProtocol(target)
+    : bridgeKind === "chat" ? chatProtocol(target)
+    : bridgeProtocol(target);
+
+  const selection = selectTargetsForProtocol(targets, protocol, requestedModel);
+  const bridgeCtx = bridgeKind === "codex"
+    ? { customTools: customToolNames(body), inputTokens: estimateResponsesInputTokens(body) }
+    : bridgeKind === "chat"
+      ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true }
+      : null;
   const routeTargets = selection.selected;
 
   if (selection.compatible.length === 0) {
@@ -248,15 +273,17 @@ async function proxy(req, res, protocol, pathname) {
     const result = await withFallback(
       routeTargets,
       async (target) => {
-        const upstreamProtocol = !bridged
-          ? protocol
-          : bridgeKind === "codex" ? codexProtocol(target) : bridgeProtocol(target);
+        const upstreamProtocol = bridged
+          ? upstreamProtocolFor(target)
+          : protocol;
         const translated = bridged && upstreamProtocol !== nativeProtocol;
         const request = !translated
           ? buildUpstreamRequest(target, protocol, body, req.headers)
           : bridgeKind === "codex"
             ? buildCodexRequest(target, upstreamProtocol, body, req.headers)
-            : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
+            : bridgeKind === "chat"
+              ? buildChatRequest(target, upstreamProtocol, body, req.headers)
+              : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), config.timeoutMs);
         const attemptStartedAt = Date.now();
@@ -327,8 +354,10 @@ async function proxy(req, res, protocol, pathname) {
       if (!wantsStream) {
         const upstreamJson = await result.upstream.json();
         converted = bridgeKind === "codex"
-          ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, codexCtx)
-          : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
+          ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
+          : bridgeKind === "chat"
+            ? convertChatJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
+            : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
       }
 
       recordRequest({
@@ -345,8 +374,8 @@ async function proxy(req, res, protocol, pathname) {
         httpStatus: 200,
         latencyMs: Date.now() - receivedAt,
         totalMs: Date.now() - receivedAt,
-        tokens: converted ? (converted.usage.input_tokens + converted.usage.output_tokens) || null : null,
-        finishReason: converted?.stop_reason ?? converted?.incomplete_details?.reason ?? converted?.status ?? null,
+        tokens: converted ? convertedTokens(converted) : null,
+        finishReason: converted?.stop_reason ?? converted?.incomplete_details?.reason ?? converted?.choices?.[0]?.finish_reason ?? converted?.status ?? null,
         outcome: "success"
       });
 
@@ -356,8 +385,10 @@ async function proxy(req, res, protocol, pathname) {
       try {
         const upstreamEvents = sseData(result.upstream.body);
         const events = bridgeKind === "codex"
-          ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, codexCtx)
-          : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
+          ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
+          : bridgeKind === "chat"
+            ? streamToChat(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
+            : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
         await pipeline(Readable.from(events), res);
       } catch {
         res.destroy();

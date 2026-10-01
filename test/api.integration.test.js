@@ -259,7 +259,9 @@ test("a fully failed request is logged with per-attempt detail", async (t) => {
 
   assert.equal(entry.outcome, "failed");
   assert.equal(entry.httpStatus, 502);
-  assert.equal(entry.attempts.length, 2);
+  // The exact model match is tried first, then routing widens to the other
+  // configured model — two keys each.
+  assert.equal(entry.attempts.length, 4);
   assert.ok(entry.attempts.every((attempt) => attempt.ok === false));
   assert.equal(entry.attempts[0].errorMessage.includes(PROVIDER_KEY), false);
 });
@@ -299,10 +301,13 @@ test("/api/requests paginates without repeating or skipping entries", async (t) 
 });
 
 test("/api/requests filters by outcome and provider", async (t) => {
-  // Every upstream call fails, so both requests end as failures. (With the
-  // default two keys a single failure would fall back and succeed.)
+  // A non-retryable status fails the request without cooling the target down,
+  // so both requests stay independently attributable to their provider. A
+  // retryable failure would exhaust every target on the first request — the
+  // exact model match first, then the widened fallbacks — and leave the second
+  // with no live target and therefore no provider to record.
   const { router } = await withRig(t, {
-    script: () => ({ status: 500, body: { error: { message: "boom" } } })
+    script: () => ({ status: 400, body: { error: { message: "boom" } } })
   });
 
   await router.request("/v1/chat/completions", postJson({ model: "model-a", messages: [] }));
@@ -322,7 +327,12 @@ test("/api/requests filters by outcome and provider", async (t) => {
   assert.equal(gemini.body.entries.length, 0);
 
   const byModel = await getJson(router, "/api/requests?limit=10");
-  assert.deepEqual(byModel.body.entries.map((entry) => entry.finalModel).sort(), ["model-a", "model-b"]);
+  assert.equal(byModel.body.entries.length, 2);
+  // Each request records the model the client asked for.
+  assert.deepEqual(
+    byModel.body.entries.map((entry) => entry.requestedModel).sort(),
+    ["model-a", "model-b"]
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -368,8 +378,12 @@ test("GET /api/router/preview rejects a missing or unsupported protocol", async 
   const unsupported = await getJson(router, "/api/router/preview?protocol=gemini");
   assert.equal(unsupported.res.status, 400);
   assert.match(unsupported.body.error.message, /not served/);
-  // The valid values are returned so the UI can offer them.
-  assert.deepEqual(unsupported.body.error.details.supported, ["openai-chat"]);
+  // A chat-only provider can serve all three bridged client protocols, so the
+  // valid values the UI is offered include the bridged ones.
+  assert.deepEqual(
+    unsupported.body.error.details.supported,
+    ["anthropic", "openai-chat", "openai-responses"]
+  );
 });
 
 // ---------------------------------------------------------------------------

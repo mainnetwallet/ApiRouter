@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describeHealth, rankTargets, HEALTH_STATES } from "./health.js";
 import { describeConfig, describeEnvironment } from "./observability/config-view.js";
 import { describeRouting } from "./observability/router-preview.js";
+import { servableProtocols } from "./observability/route-select.js";
 import { describeSystem } from "./observability/system-info.js";
 import {
   breakdown,
@@ -186,7 +187,10 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       return { error: "a protocol query parameter is required" };
     }
 
-    const supported = new Set(targets.flatMap((target) => target.protocols ?? []));
+    // A client protocol is servable if any target can be reached for it —
+    // natively, or through a bridge (so a chat client is servable by a
+    // Gemini-only configuration).
+    const supported = servableProtocols(targets);
     if (!supported.has(protocol)) {
       return {
         error: `protocol "${protocol}" is not served by any configured target`,

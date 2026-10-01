@@ -7,7 +7,7 @@ import {
   REDACTION_PLACEHOLDER
 } from "../src/observability/sanitize.js";
 import { RequestLog } from "../src/observability/request-log.js";
-import { selectRouteTargets, planFallbackOrder } from "../src/observability/route-select.js";
+import { selectRouteTargets, selectTargetsForProtocol, planFallbackOrder } from "../src/observability/route-select.js";
 import { describeConfig, describeEnvironment } from "../src/observability/config-view.js";
 import { describeRouting } from "../src/observability/router-preview.js";
 import { HealthRegistry } from "../src/health.js";
@@ -488,24 +488,59 @@ test("describeRouting reports the same primary target the router ranks first", (
     target("gemini", "g", ["gemini"], 0)
   ];
 
-  // Make model-b strictly better so ranking is unambiguous.
+  // Push model-b down the ranking so the primary target is unambiguous.
   health.markFailure(targets[1], 500);
 
   const preview = describeRouting({
     targets, health, protocol: "openai-chat", model: "", now: Date.now()
   });
 
-  // The router ranks only protocol-compatible targets, so the comparison must
-  // use the same subset — otherwise gemini (score 50, sorts first by name)
-  // would appear to be the router's choice.
-  const compatible = selectRouteTargets(targets, "openai-chat", "").selected;
+  // The router selects the same candidate set the preview shows. For a chat
+  // client that set includes the Gemini target, which the Chat bridge reaches,
+  // so none of the configured targets are excluded.
+  const compatible = selectTargetsForProtocol(targets, "openai-chat", "").selected;
   const ranked = health.rank(compatible);
   assert.equal(preview.selected.id, health.key(ranked[0]));
   assert.equal(preview.selected.provider, ranked[0].provider);
   assert.equal(preview.counts.totalTargets, 3);
-  assert.equal(preview.counts.compatible, 2);
+  assert.equal(preview.counts.compatible, 3);
+  assert.equal(preview.counts.excluded, 0);
+});
+
+test("describeRouting excludes a target no bridge can reach", () => {
+  const health = new HealthRegistry();
+  // An Anthropic-only target is not reachable for a chat client: there is no
+  // chat-completions translation for the Anthropic protocol.
+  const targets = [
+    target("groq", "q", ["openai-chat"], 0),
+    target("legacy", "c", ["anthropic"], 0)
+  ];
+
+  const preview = describeRouting({
+    targets, health, protocol: "openai-chat", model: "", now: Date.now()
+  });
+
+  assert.equal(preview.counts.compatible, 1);
   assert.equal(preview.counts.excluded, 1);
-  assert.equal(preview.excluded[0].provider, "gemini");
+  assert.equal(preview.excluded[0].provider, "legacy");
+  assert.match(preview.excluded[0].reason, /openai-chat/);
+});
+
+test("describeRouting treats a bridged protocol's reachable set as compatible", () => {
+  const health = new HealthRegistry();
+  const targets = [
+    target("gemini", "g", ["gemini"], 0),
+    target("groq", "q", ["openai-chat"], 0)
+  ];
+
+  // Codex and Claude Code can reach every configured target through their
+  // bridges, so the preview must not shrink to the natively-supported subset.
+  for (const protocol of ["anthropic", "openai-responses", "openai-chat"]) {
+    const preview = describeRouting({ targets, health, protocol, model: "" });
+    assert.equal(preview.counts.compatible, 2, `${protocol} should reach both targets`);
+    assert.equal(preview.counts.excluded, 0, `${protocol} should exclude nothing`);
+    assert.equal(preview.stages.find((stage) => stage.key === "compatible").label, "Reachable targets");
+  }
 });
 
 test("describeRouting exposes the decision as ordered stages", () => {

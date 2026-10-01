@@ -107,10 +107,10 @@ test("a chat-only provider is reached by a Responses request through the Codex b
   assert.equal(upstream.apiRequests[0].url, "/v1/chat/completions");
 });
 
-test("a gemini-only provider never receives a Chat request, but a Responses request is bridged", async (t) => {
+test("a gemini-only provider is reached by a chat request through the Chat bridge", async (t) => {
   const { upstream, router } = await withRig(
     t,
-    () => ok(),
+    () => ok({ candidates: [{ content: { parts: [{ text: "gem" }] }, finishReason: "STOP" }] }),
     (u) => ({
       GEMINI_API_KEYS: "gemini-key",
       GEMINI_MODELS: "gemini-2.0-flash",
@@ -118,14 +118,26 @@ test("a gemini-only provider never receives a Chat request, but a Responses requ
     })
   );
 
-  const chat = await router.request("/v1/chat/completions", postJson({ model: "gemini-2.0-flash" }));
-  assert.equal(chat.status, 503, "/v1/chat/completions should not be routable");
-  assert.equal(upstream.apiRequests.length, 0);
+  const chat = await router.request(
+    "/v1/chat/completions",
+    postJson({ model: "gemini-2.0-flash", messages: [{ role: "user", content: "hi" }] })
+  );
+  assert.equal(chat.status, 200);
+  const chatBody = await chat.json();
+  assert.equal(chatBody.object, "chat.completion");
+  assert.equal(chatBody.choices[0].message.content, "gem");
+  assert.equal(chatBody.choices[0].finish_reason, "stop");
+  assert.equal(chat.headers.get("x-multi-ai-provider"), "gemini");
 
-  const responses = await router.request("/v1/responses", postJson({ model: "gemini-2.0-flash", input: "hi" }));
-  assert.equal(responses.status, 200);
   assert.equal(upstream.apiRequests.length, 1);
   assert.equal(upstream.apiRequests[0].url, "/v1beta/models/gemini-2.0-flash:generateContent");
+  assert.equal(upstream.apiRequests[0].headers["x-goog-api-key"], "gemini-key");
+
+  // The same target still serves a Responses client through the Codex bridge.
+  const responses = await router.request("/v1/responses", postJson({ model: "gemini-2.0-flash", input: "hi" }));
+  assert.equal(responses.status, 200);
+  assert.equal(upstream.apiRequests.length, 2);
+  assert.equal(upstream.apiRequests[1].url, "/v1beta/models/gemini-2.0-flash:generateContent");
 });
 
 test("AgentRouter serves anthropic, chat and responses with correct upstream paths", async (t) => {
