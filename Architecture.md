@@ -201,25 +201,85 @@ npm test
 ```text
 src/
 ├── server.js              HTTP gateway
+├── api.js                 read-only control-panel API (/api/*)
+├── static-files.js        static handler for the built control panel
 ├── config.js              environment + target construction
 ├── router.js              fallback + sticky routing
 ├── health.js              health + ranking + cooldown
 ├── health-checks.js       provider-aware health probes
 ├── adapters.js            protocol + upstream request adapter
-└── providers/
-    └── catalog.js         provider catalog
+├── providers/
+│   └── catalog.js         provider catalog
+└── observability/
+    ├── request-log.js     bounded in-memory request log
+    ├── metrics.js         pure aggregation over health + requests
+    ├── config-view.js     safe configuration projection
+    ├── router-preview.js  faithful rendering of the routing decision
+    ├── route-select.js    shared target-selection rule
+    ├── monitor-state.js   health-cycle observation
+    ├── system-info.js     runtime facts
+    └── sanitize.js        credential scrubbing
+
+ui/                        React + Vite control panel (built into ui/dist)
 ```
+
+## Control Panel
+
+The gateway is self-describing. `/api/*` exposes the state a browser needs, and
+the panel is served from the same origin — no separate service, no CORS shim.
+
+The API layer is strictly read-only apart from `POST /api/health/refresh`, which
+does nothing the 15-minute timer would not do anyway. It cannot alter routing,
+health, provider configuration or the proxy path.
+
+### Representing the routing decision
+
+The panel must not invent routing logic, so there is exactly one copy of it.
+`selectRouteTargets` (`src/observability/route-select.js`) is called by both
+`proxy()` and `/api/router/preview`, and ranking is delegated to
+`healthRegistry.rank`. The Router page therefore renders the decision the
+gateway will actually make, and cannot drift from it: any divergence is a
+compile-time-visible change to a shared function, not two implementations.
+
+### Request log
+
+`proxy()` records one entry per request — the protocol, the requested model,
+every upstream attempt in order, the final target, latency, tokens and outcome.
+It is bounded (500 entries, oldest evicted) because an unbounded log would
+eventually take the process down.
+
+The stored shape is an allow-list. Request bodies, prompts, response bodies and
+headers are never copied in, so they cannot leak later even if an upstream error
+contained them. Error text is additionally passed through `sanitizeMessage`.
+
+Because the attempt list is recorded by the same closure `withFallback` calls,
+the fallback chain the UI shows is observed rather than reconstructed.
+
+### Real-time
+
+Polling, with conditional requests. The gateway has no SSE or WebSocket
+channel, and the panel does not simulate one. `/api/*` returns an `ETag` over a
+stable projection of the payload (volatile fields such as `generatedAt` are
+excluded from the hash), so an unchanged poll returns `304` and the client
+returns the previous object by identity — which lets React skip the re-render
+entirely.
+
+Health and system status live in separate React contexts so a health tick
+re-renders only the components that display health.
 
 ## Architecture Notes
 
 The core implementation is separated by responsibility:
 
 - `src/server.js` — HTTP gateway, endpoints, authentication, sessions and proxy execution.
+- `src/api.js` — the read-only control-panel API and its safe projections.
+- `src/static-files.js` — static serving for `ui/dist`, with traversal protection.
 - `src/config.js` — environment parsing and routing-target construction.
 - `src/router.js` — health-ranked fallback and sticky routing.
 - `src/health.js` — target health, scoring, cooldown and health-refresh infrastructure.
 - `src/health-checks.js` — provider-aware, quota-free health probes and status classification.
 - `src/adapters.js` — client protocol detection and upstream request construction.
 - `src/providers/catalog.js` — provider catalog.
+- `src/observability/` — request log, metrics, safe config view, routing preview and sanitization.
 
 The architecture document describes the runtime design; implementation details remain in the source files.

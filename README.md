@@ -20,6 +20,7 @@ cd MultiAI-Router
 npm install
 Copy-Item .env.example .env
 notepad .env
+npm run ui:build     # build the control panel (optional — the API works without it)
 npm start
 ```
 
@@ -28,6 +29,10 @@ Default server:
 ```text
 http://127.0.0.1:8788
 ```
+
+Open `http://127.0.0.1:8788` for the control panel. If the panel has not been
+built, that address serves a short page explaining how to build it — the
+gateway itself needs no build step and is unaffected.
 
 ## Configuration
 
@@ -47,6 +52,8 @@ Retryable statuses:
 
 ## Endpoints
 
+### Gateway (public)
+
 | Method | Endpoint |
 |---|---|
 | GET | /health |
@@ -55,6 +62,45 @@ Retryable statuses:
 | POST | /v1/responses |
 | POST | /v1/chat/completions |
 | POST | /v1beta/models/{model}:generateContent |
+
+### Control panel (read-only)
+
+Served under `/api`. Requires `MULTIAI_ROUTER_API_KEYS` when that is set; open
+otherwise. None of these can change routing, health or provider behaviour.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | /api/health | Health with provider rollups and monitor state |
+| POST | /api/health/refresh | Run one health cycle now |
+| GET | /api/providers | Provider rollup joined with safe config |
+| GET | /api/models | Model catalogue with health and usage |
+| GET | /api/requests | Request log (`limit`, `cursor`, `outcome`, `provider`, `protocol`, `status`) |
+| GET | /api/requests/:id | One request's full lifecycle |
+| GET | /api/router/preview | The routing decision for a protocol/model |
+| GET | /api/analytics | Series and breakdowns (`range=5m\|15m\|1h\|6h\|24h\|7d`) |
+| GET | /api/config | Effective configuration, secrets as counts only |
+| GET | /api/system | Runtime, uptime and health-monitor scheduling |
+
+`/api/config` reports key **counts** and env var **names**; it has no code path
+that reads key material, so credentials cannot leak through it.
+
+## Control Panel
+
+A React + Vite single-page app in `ui/`, served by the gateway itself.
+
+```powershell
+npm run ui:dev      # dev server on :5173, proxying /api and /v1 to :8788
+npm run ui:build    # production build into ui/dist
+npm run test:ui     # frontend unit tests
+npm run test:all    # backend + frontend
+```
+
+Eleven pages: Dashboard, Providers, Models, Health Monitor, Router, Fallback,
+Playground, Requests, Analytics, Configuration, System.
+
+Real-time data uses polling with conditional `ETag` requests — the gateway has
+no push channel and no fake one is invented. Polling pauses while the tab is
+hidden and backs off when the gateway is failing.
 
 ## Health
 
@@ -81,9 +127,25 @@ counts and `cooldownUntil`. It never returns API keys or upstream bodies.
 ## Test
 
 ```powershell
-npm test
+npm test           # backend: 191 tests
+npm run test:ui    # frontend: 47 tests
+npm run test:all   # both
 ```
 
 ## Security
 
 Keep real API keys in `.env`. Never commit credentials.
+
+The control panel never receives provider credentials. `/api/config` reports a
+key *count* per provider and the *names* of the environment variables to edit;
+it renders as `Configured` / `Not configured` and never as a value.
+
+The one secret the browser holds is the gateway's own client token
+(`MULTIAI_ROUTER_API_KEYS`), entered in the panel's connection dialog. It is
+stored in `sessionStorage` — never `localStorage`, never a URL, never a log —
+and shown masked, with no reveal or copy control.
+
+Every error message that crosses into the UI is scrubbed of credential-shaped
+text on the server (`src/observability/sanitize.js`) and again in the browser
+(`ui/src/lib/sanitize.js`), so a provider error cannot echo a key into a table,
+a toast or the console.

@@ -1,0 +1,144 @@
+/**
+ * Design tokens.
+ *
+ * Dark-first because this is an operations console that runs next to a terminal.
+ * A light theme is provided by overriding the same custom properties, so every
+ * component is written once against a single set of names.
+ *
+ * The palette is deliberately flat: no gradients, no shadows beyond a single
+ * elevation step for overlays. Status is the only place saturated colour is
+ * allowed, so a red row always means "failed" and never "brand accent".
+ */
+
+:root {
+  /* Surfaces, darkest to lightest. */
+  --bg-base: #0b0f14;
+  --bg-surface: #111720;
+  --bg-raised: #161d28;
+  --bg-overlay: #1b2330;
+  --bg-hover: #1e2735;
+  --bg-active: #232e3e;
+  --bg-input: #0d131b;
+
+  --border: #232d3b;
+  --border-strong: #33404f;
+  --border-subtle: #1a2230;
+
+  --text: #dce3ec;
+  --text-muted: #93a1b3;
+  --text-dim: #6b7a8d;
+  --text-inverse: #0b0f14;
+
+  --accent: #4c9aff;
+  --accent-hover: #6aabff;
+  --accent-dim: rgba(76, 154, 255, 0.14);
+  --accent-border: rgba(76, 154, 255, 0.4);
+
+  /* Status. Each has a text colour legible on the matching tinted surface. */
+  --ok: #46b87a;
+  --ok-bg: rgba(70, 184, 122, 0.13);
+  --ok-border: rgba(70, 184, 122, 0.35);
+
+  --warn: #d9a343;
+  --warn-bg: rgba(217, 163, 67, 0.13);
+  --warn-border: rgba(217, 163, 67, 0.35);
+
+  --danger: #e5604d;
+  --danger-bg: rgba(229, 96, 77, 0.13);
+  --danger-border: rgba(229, 96, 77, 0.35);
+
+  --info: #4c9aff;
+  --info-bg: rgba(76, 154, 255, 0.13);
+  --info-border: rgba(76, 154, 255, 0.35);
+
+  --neutral: #7d8b9e;
+  --neutral-bg: rgba(125, 139, 158, 0.13);
+  --neutral-border: rgba(125, 139, 158, 0.3);
+
+  /* Spacing, 4px base. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* Deliberately small: infrastructure tools read as dense, not pillowy. */
+  --radius-sm: 3px;
+  --radius: 4px;
+  --radius-lg: 6px;
+
+  --shadow-overlay: 0 8px 28px rgba(0, 0, 0, 0.55);
+
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 19px;
+  --fs-2xl: 24px;
+
+  --leading: 1.5;
+
+  --sidebar-width: 216px;
+  --sidebar-collapsed: 52px;
+  --header-height: 52px;
+
+  --z-drawer: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+
+  --transition: 120ms ease;
+}
+
+[data-theme="light"] {
+  --bg-base: #f4f6f9;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-overlay: #ffffff;
+  --bg-hover: #eef1f5;
+  --bg-active: #e4e9f0;
+  --bg-input: #ffffff;
+
+  --border: #d8dee7;
+  --border-strong: #bcc5d1;
+  --border-subtle: #e6eaf0;
+
+  --text: #16202c;
+  --text-muted: #536070;
+  --text-dim: #78859699;
+  --text-inverse: #ffffff;
+
+  --accent: #1f6feb;
+  --accent-hover: #1a5fd0;
+  --accent-dim: rgba(31, 111, 235, 0.1);
+  --accent-border: rgba(31, 111, 235, 0.35);
+
+  --ok: #1a7f4b;
+  --ok-bg: rgba(26, 127, 75, 0.1);
+  --ok-border: rgba(26, 127, 75, 0.3);
+
+  --warn: #97671a;
+  --warn-bg: rgba(151, 103, 26, 0.1);
+  --warn-border: rgba(151, 103, 26, 0.3);
+
+  --danger: #c03325;
+  --danger-bg: rgba(192, 51, 37, 0.1);
+  --danger-border: rgba(192, 51, 37, 0.3);
+
+  --info: #1f6feb;
+  --info-bg: rgba(31, 111, 235, 0.1);
+  --info-border: rgba(31, 111, 235, 0.3);
+
+  --neutral: #5b6878;
+  --neutral-bg: rgba(91, 104, 120, 0.1);
+  --neutral-border: rgba(91, 104, 120, 0.28);
+
+  --shadow-overlay: 0 8px 28px rgba(15, 23, 35, 0.16);
+}

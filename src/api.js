@@ -1,0 +1,365 @@
+import { createHash } from "node:crypto";
+import { describeHealth, rankTargets, HEALTH_STATES } from "./health.js";
+import { describeConfig, describeEnvironment } from "./observability/config-view.js";
+import { describeRouting } from "./observability/router-preview.js";
+import { describeSystem } from "./observability/system-info.js";
+import {
+  breakdown,
+  classifyFailure,
+  errorDistribution,
+  modelCatalogue,
+  providerRollup,
+  resolveRange,
+  series,
+  summarizeHealth,
+  summarizeRequests
+} from "./observability/metrics.js";
+
+/**
+ * Read-only JSON API backing the control panel.
+ *
+ * Kept in its own module so `src/server.js` gains one mount point rather than
+ * a second routing table. Every handler is a pure read over state that already
+ * exists (`health.js`, `config.js`, the request log) — nothing here can change
+ * routing, health or provider behaviour.
+ *
+ * Auth mirrors the proxy path exactly: the same `authorized(req)` predicate, so
+ * enabling client auth protects the admin surface too.
+ */
+
+const JSON_TYPE = "application/json; charset=utf-8";
+
+/**
+ * Stable weak ETag so polling clients can use `If-None-Match`.
+ *
+ * `generatedAt` is excluded from the hash: it changes on every request, so
+ * including it would make every conditional poll a miss and defeat the point.
+ * Everything that actually describes gateway state stays in the hash.
+ */
+function stableKey(body) {
+  if (body && typeof body === "object" && !Array.isArray(body) && "generatedAt" in body) {
+    const { generatedAt, ...rest } = body;
+    return JSON.stringify(rest);
+  }
+  return JSON.stringify(body);
+}
+
+function etagOf(body) {
+  return `W/"${createHash("sha1").update(stableKey(body)).digest("hex").slice(0, 20)}"`;
+}
+
+function sendJson(req, res, status, body, extraHeaders = {}) {
+  const payload = JSON.stringify(body);
+
+  const headers = {
+    "content-type": JSON_TYPE,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    ...extraHeaders
+  };
+
+  // Only 200s are cacheable; an error must never be pinned by an ETag.
+  if (status === 200) {
+    const etag = etagOf(body);
+    headers.etag = etag;
+    if (req.headers["if-none-match"] === etag) {
+      return sendJsonRaw(res, 304, headers, "");
+    }
+  }
+
+  return sendJsonRaw(res, status, headers, payload);
+}
+
+function sendJsonRaw(res, status, headers, payload) {
+  res.writeHead(status, { ...headers, "content-length": Buffer.byteLength(payload) });
+  res.end(payload);
+}
+
+function fail(req, res, status, message, type, details = null) {
+  const error = { message, type };
+  // Optional machine-readable context, so the UI can offer the valid values
+  // rather than only reporting that something was wrong.
+  if (details) error.details = details;
+  return sendJson(req, res, status, { error });
+}
+
+// ---------------------------------------------------------------------------
+
+export function createApi({ config, targets, health, requestLog, monitor, refreshHealth }) {
+  const describeAll = (now = Date.now()) => health.describe(targets, now);
+
+  // --- /api/health -------------------------------------------------------
+  function healthPayload(now = Date.now()) {
+    const entries = describeAll(now);
+    const ranked = rankTargets(targets, now);
+
+    return {
+      ok: true,
+      generatedAt: new Date(now).toISOString(),
+      service: "multi-ai-router",
+      summary: summarizeHealth(entries),
+      providers: providerRollup(entries),
+      targets: entries,
+      ranked: ranked.map((target, index) => ({
+        rank: index + 1,
+        id: health.key(target),
+        provider: target.provider,
+        model: target.model,
+        keyIndex: target.keyIndex,
+        protocols: [...(target.protocols ?? [])]
+      })),
+      monitor: monitor ? monitor.snapshot(now) : null,
+      retryableStatus: [...config.retryableStatus].sort((a, b) => a - b),
+      states: Object.values(HEALTH_STATES)
+    };
+  }
+
+  // --- /api/providers ----------------------------------------------------
+  function providersPayload(now = Date.now()) {
+    const entries = describeAll(now);
+    const rollup = providerRollup(entries);
+    const configView = describeConfig(config, targets);
+    const byId = new Map(configView.providers.map((provider) => [provider.id, provider]));
+
+    const providers = configView.providers.map((provider) => {
+      const healthRow = rollup.find((row) => row.provider === provider.id);
+      return {
+        ...provider,
+        health: healthRow ?? {
+          targets: 0,
+          healthy: 0,
+          cooldown: 0,
+          failed: 0,
+          unknown: 0,
+          successes: 0,
+          failures: 0,
+          successRate: null,
+          latencyMs: null,
+          lastUpdatedAt: null,
+          status: "unknown",
+          models: provider.models,
+          modelCount: provider.modelCount,
+          protocols: provider.protocols,
+          totalObservations: 0
+        },
+        // Per-target detail is what the provider drawer renders.
+        targets: entries.filter((entry) => entry.provider === provider.id)
+      };
+    });
+
+    // A provider can appear in health without appearing in config only if the
+    // catalog and config disagree; surface that rather than silently dropping it.
+    const orphans = rollup.filter((row) => !byId.has(row.provider));
+
+    return {
+      generatedAt: new Date(now).toISOString(),
+      summary: {
+        ...configView.summary,
+        health: summarizeHealth(entries)
+      },
+      providers,
+      unconfiguredHealth: orphans
+    };
+  }
+
+  // --- /api/models -------------------------------------------------------
+  function modelsPayload(now = Date.now()) {
+    const entries = describeAll(now);
+    const catalogue = modelCatalogue(entries, [...requestLog.entries.values()]);
+
+    return {
+      generatedAt: new Date(now).toISOString(),
+      models: catalogue,
+      filters: {
+        providers: [...new Set(catalogue.map((model) => model.provider))].sort(),
+        protocols: [...new Set(catalogue.flatMap((model) => model.protocols))].sort(),
+        statuses: Object.values(HEALTH_STATES)
+      },
+      summary: summarizeHealth(entries)
+    };
+  }
+
+  // --- /api/router/preview -----------------------------------------------
+  function routerPreviewPayload(searchParams, now = Date.now()) {
+    const protocol = (searchParams.get("protocol") || "").trim();
+    if (!protocol) {
+      return { error: "a protocol query parameter is required" };
+    }
+
+    const supported = new Set(targets.flatMap((target) => target.protocols ?? []));
+    if (!supported.has(protocol)) {
+      return {
+        error: `protocol "${protocol}" is not served by any configured target`,
+        supported: [...supported].sort()
+      };
+    }
+
+    return {
+      generatedAt: new Date(now).toISOString(),
+      protocols: [...supported].sort(),
+      ...describeRouting({
+        targets,
+        config,
+        health,
+        protocol,
+        model: (searchParams.get("model") || "").trim(),
+        stickyTargetId: (searchParams.get("session") || "").trim() || null,
+        now
+      })
+    };
+  }
+
+  // --- /api/analytics ----------------------------------------------------
+  function analyticsPayload(searchParams, now = Date.now()) {
+    const { label, rangeMs } = resolveRange(searchParams.get("range") || "1h", now);
+    const buckets = Math.max(2, Math.min(Number(searchParams.get("buckets")) || 30, 120));
+
+    const start = now - rangeMs;
+    const entries = [...requestLog.entries.values()].filter((entry) => entry.receivedAt >= start);
+
+    return {
+      generatedAt: new Date(now).toISOString(),
+      range: { label, rangeMs, from: new Date(start).toISOString(), to: new Date(now).toISOString() },
+      bucketMs: Math.floor(rangeMs / buckets),
+      availableRanges: ["5m", "15m", "1h", "6h", "24h", "7d"],
+
+      // Explicit: these figures come from live in-memory traffic only.
+      source: "in-memory request log",
+      sampleSize: entries.length,
+      // Metrics that need a data source the gateway does not have yet are
+      // reported as unavailable rather than as zero.
+      unavailable: entries.length === 0 ? ["all metrics (no requests recorded in this range)"] : [],
+
+      summary: summarizeRequests(entries),
+      series: series(entries, { rangeMs, buckets, now }),
+      breakdowns: {
+        provider: breakdown(entries, (entry) => entry.finalProvider),
+        model: breakdown(entries, (entry) => entry.finalModel),
+        protocol: breakdown(entries, (entry) => entry.protocol),
+        outcome: breakdown(entries, (entry) => entry.outcome),
+        errors: errorDistribution(entries),
+        fallback: breakdown(
+          entries.filter((entry) => (entry.fallbackCount ?? 0) > 0),
+          (entry) => `${entry.finalProvider ?? "unknown"} / ${entry.finalModel ?? "unknown"}`
+        )
+      },
+      recentFailures: entries
+        .filter((entry) => entry.outcome === "failed")
+        .slice(-10)
+        .reverse()
+        .map((entry) => ({
+          id: entry.id,
+          seq: entry.seq,
+          receivedAt: entry.receivedAt,
+          provider: entry.finalProvider,
+          model: entry.finalModel,
+          protocol: entry.protocol,
+          httpStatus: entry.httpStatus,
+          category: classifyFailure(entry),
+          message: entry.errorMessage
+        })),
+      recentFallbacks: entries
+        .filter((entry) => (entry.fallbackCount ?? 0) > 0)
+        .slice(-10)
+        .reverse()
+        .map((entry) => ({
+          id: entry.id,
+          seq: entry.seq,
+          receivedAt: entry.receivedAt,
+          fallbackCount: entry.fallbackCount,
+          outcome: entry.outcome,
+          finalProvider: entry.finalProvider,
+          finalModel: entry.finalModel,
+          attempts: entry.attempts
+        }))
+    };
+  }
+
+  // --- dispatcher --------------------------------------------------------
+  return async function handleApi(req, res, pathname, searchParams) {
+    const now = Date.now();
+
+    if (pathname === "/api/health" && req.method === "GET") {
+      return sendJson(req, res, 200, healthPayload(now));
+    }
+
+    if (pathname === "/api/health/refresh" && req.method === "POST") {
+      if (!monitor || typeof refreshHealth !== "function") {
+        return fail(req, res, 503, "Health refresh is not available", "unavailable");
+      }
+      const result = await monitor.runManualCycle(refreshHealth);
+      if (!result.started) {
+        return sendJson(req, res, 409, { error: { message: result.reason, type: "conflict" }, ...result });
+      }
+      return sendJson(req, res, 200, { ok: true, cycle: result, health: healthPayload(Date.now()) });
+    }
+
+    if (pathname === "/api/providers" && req.method === "GET") {
+      return sendJson(req, res, 200, providersPayload(now));
+    }
+
+    if (pathname === "/api/models" && req.method === "GET") {
+      return sendJson(req, res, 200, modelsPayload(now));
+    }
+
+    if (pathname === "/api/router/preview" && req.method === "GET") {
+      const payload = routerPreviewPayload(searchParams, now);
+      if (payload.error) {
+        return fail(req, res, 400, payload.error, "invalid_request",
+          payload.supported ? { supported: payload.supported } : null);
+      }
+      return sendJson(req, res, 200, payload);
+    }
+
+    if (pathname === "/api/analytics" && req.method === "GET") {
+      return sendJson(req, res, 200, analyticsPayload(searchParams, now));
+    }
+
+    if (pathname === "/api/config" && req.method === "GET") {
+      return sendJson(req, res, 200, {
+        generatedAt: new Date(now).toISOString(),
+        ...describeConfig(config, targets),
+        environment: describeEnvironment(config)
+      });
+    }
+
+    if (pathname === "/api/system" && req.method === "GET") {
+      return sendJson(req, res, 200, describeSystem({
+        config,
+        targets,
+        monitor: monitor ? monitor.snapshot(now) : null,
+        now
+      }));
+    }
+
+    if (pathname === "/api/requests" && req.method === "GET") {
+      return sendJson(req, res, 200, {
+        generatedAt: new Date(now).toISOString(),
+        ...requestLog.list({
+          limit: searchParams.get("limit"),
+          cursor: searchParams.get("cursor"),
+          status: searchParams.get("status"),
+          provider: searchParams.get("provider"),
+          protocol: searchParams.get("protocol"),
+          outcome: searchParams.get("outcome")
+        })
+      });
+    }
+
+    if (pathname.startsWith("/api/requests/") && req.method === "GET") {
+      const id = decodeURIComponent(pathname.slice("/api/requests/".length));
+      // Accept either the client-visible request id or the internal sequence.
+      const entry = requestLog.findById(id) ?? requestLog.get(id);
+      if (!entry) return fail(req, res, 404, "Request not found", "not_found");
+      return sendJson(req, res, 200, { request: entry });
+    }
+
+    if (pathname.startsWith("/api/")) {
+      // An unknown admin path is a JSON 404 — never the SPA shell, so a typo
+      // in a fetch call surfaces as an error instead of HTML.
+      return fail(req, res, 404, "Not found", "not_found");
+    }
+
+    return false;
+  };
+}
