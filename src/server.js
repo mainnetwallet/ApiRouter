@@ -41,6 +41,12 @@ import {
   streamToChat,
   estimateChatInputTokens
 } from "./chat-bridge.js";
+import {
+  geminiProtocol,
+  buildGeminiBridgeRequest,
+  chatJsonToGemini,
+  streamToGemini
+} from "./gemini-bridge.js";
 import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage } from "./observability/sanitize.js";
@@ -235,15 +241,18 @@ async function proxy(req, res, protocol, pathname) {
     protocol === "anthropic" ? "anthropic"
     : protocol === "openai-responses" ? "codex"
     : protocol === "openai-chat" ? "chat"
+    : protocol === "gemini" ? "gemini"
     : null;
   const bridged = bridgeKind !== null;
   const nativeProtocol =
     bridgeKind === "codex" ? "openai-responses"
     : bridgeKind === "chat" ? "openai-chat"
+    : bridgeKind === "gemini" ? "gemini"
     : "anthropic";
   const upstreamProtocolFor = (target) =>
     bridgeKind === "codex" ? codexProtocol(target)
     : bridgeKind === "chat" ? chatProtocol(target)
+    : bridgeKind === "gemini" ? geminiProtocol(target)
     : bridgeProtocol(target);
 
   const selection = selectTargetsForProtocol(targets, protocol, requestedModel);
@@ -283,7 +292,9 @@ async function proxy(req, res, protocol, pathname) {
             ? buildCodexRequest(target, upstreamProtocol, body, req.headers)
             : bridgeKind === "chat"
               ? buildChatRequest(target, upstreamProtocol, body, req.headers)
-              : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
+              : bridgeKind === "gemini"
+                ? buildGeminiBridgeRequest(target, body, requestedModel, req.headers)
+                : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), config.timeoutMs);
         const attemptStartedAt = Date.now();
@@ -357,7 +368,9 @@ async function proxy(req, res, protocol, pathname) {
           ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
           : bridgeKind === "chat"
             ? convertChatJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
-            : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
+            : bridgeKind === "gemini"
+              ? chatJsonToGemini(upstreamJson, clientModel)
+              : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
       }
 
       recordRequest({
@@ -388,7 +401,9 @@ async function proxy(req, res, protocol, pathname) {
           ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
           : bridgeKind === "chat"
             ? streamToChat(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
-            : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
+            : bridgeKind === "gemini"
+              ? streamToGemini(upstreamEvents, clientModel)
+              : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
         await pipeline(Readable.from(events), res);
       } catch {
         res.destroy();
