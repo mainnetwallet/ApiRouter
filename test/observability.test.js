@@ -283,7 +283,6 @@ const sampleConfig = () => loadConfig({
   GEMINI_BASE_URL: "https://gemini.test/",
   AGENTROUTER_ORIGINATOR: "codex_cli_rs",
   MULTIAI_ROUTER_API_KEYS: "router-token",
-  REQUEST_TIMEOUT_MS: "9000",
   PORT: "9999",
   RETRY_STATUS_CODES: "429,503"
 });
@@ -317,7 +316,6 @@ test("describeConfig reports key counts and safe values", () => {
   assert.deepEqual(groq.protocols, ["openai-chat"]);
 
   assert.equal(view.server.port, 9999);
-  assert.equal(view.server.requestTimeoutMs, 9000);
   assert.equal(view.server.clientAuthRequired, true);
   assert.equal(view.server.clientKeyCount, 1);
   assert.deepEqual(view.routing.retryableStatus, [429, 503]);

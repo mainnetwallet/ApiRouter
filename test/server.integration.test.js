@@ -307,27 +307,6 @@ test("all targets failing produces 502 with per-target failure detail", async (t
   assert.equal(upstream.apiRequests.length, 2);
 });
 
-test("upstream timeout is treated as a retryable 408 failure", async (t) => {
-  const { upstream, router } = await withRig(
-    t,
-    () => ({ hang: true }),
-    (u) => ({
-      GROQ_API_KEYS: "k0,k1",
-      GROQ_MODELS: "m",
-      GROQ_BASE_URL: u.baseUrl,
-      REQUEST_TIMEOUT_MS: "400"
-    })
-  );
-
-  const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [] }));
-
-  assert.equal(res.status, 502);
-  const payload = await res.json();
-  assert.equal(payload.error.failures.length, 2);
-  assert.equal(payload.error.failures[0].status, 408);
-  assert.equal(payload.error.failures[0].message, "Upstream request timed out");
-});
-
 // ---------------------------------------------------------------------------
 // Sticky sessions
 // ---------------------------------------------------------------------------

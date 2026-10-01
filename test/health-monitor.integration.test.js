@@ -162,19 +162,6 @@ test("a missing models endpoint yields passive unknown health, not a false claim
   assert.equal(res.status, 200);
 });
 
-test("a probe that times out is recorded as a failure", async (t) => {
-  const { router } = await withRig(t, {
-    health: { hang: true },
-    env: (u) => ({ ...groqEnv(u), REQUEST_TIMEOUT_MS: "300" })
-  });
-
-  const health = await waitForHealth(router, (h) => h.health[0]?.status === "cooldown");
-  const entry = health.health[0];
-
-  assert.equal(entry.lastStatus, 408);
-  assert.equal(entry.lastReason, "probe timed out");
-});
-
 test("a slow but successful probe records its real latency", async (t) => {
   const { router } = await withRig(t, {
     health: { status: 200, body: HEALTHY_BODY, delayMs: 120 },

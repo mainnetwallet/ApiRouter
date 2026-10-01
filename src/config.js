@@ -50,7 +50,6 @@ export function loadConfig(env = process.env) {
   return {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
     port: Number(env.PORT || 8788),
-    timeoutMs: Number(env.REQUEST_TIMEOUT_MS || 120000),
     retryableStatus: new Set(retryableValues),
     providers
   };

@@ -132,9 +132,6 @@ export default function Configuration() {
                   <dt className="dl__term"><code>PORT</code></dt>
                   <dd className="dl__desc mono">{data.server.port}</dd>
 
-                  <dt className="dl__term"><code>REQUEST_TIMEOUT_MS</code></dt>
-                  <dd className="dl__desc mono">{data.server.requestTimeoutMs} ms</dd>
-
                   <dt className="dl__term"><code>MULTIAI_ROUTER_API_KEYS</code></dt>
                   <dd className="dl__desc">
                     {data.server.clientAuthRequired

@@ -73,7 +73,6 @@ export function describeConfig(config, targets = []) {
   return {
     server: {
       port: config.port,
-      requestTimeoutMs: config.timeoutMs,
       // Whether the gateway demands a client token. Never the token itself.
       clientAuthRequired: config.routerApiKeys.length > 0,
       clientKeyCount: config.routerApiKeys.length
@@ -114,7 +113,6 @@ export function describeEnvironment(config) {
   return {
     server: [
       { name: "PORT", configured: true, kind: "number" },
-      { name: "REQUEST_TIMEOUT_MS", configured: true, kind: "number" },
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
       { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
     ],

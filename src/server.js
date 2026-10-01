@@ -11,7 +11,7 @@ import {
   startHealthMonitor,
   refreshAllHealth
 } from "./health.js";
-import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
+import { probeTargetHealth } from "./health-checks.js";
 import { RouteSession, SessionStore, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId, isGeminiStream } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
@@ -73,31 +73,12 @@ const staticFiles = createStaticHandler({
  */
 const MAX_INSPECT_BYTES = 1024 * 1024;
 
-function isAbortError(error) {
-  return error?.name === "AbortError" || error?.name === "TimeoutError";
-}
-
 /**
- * `fetch` rejects with a DOMException whose `message`/`name` are getter-only,
- * so an aborted request must be converted into a fresh Error. Assigning to
- * `error.message` directly throws a TypeError and destroys the 408 status,
- * which silently disables retry/fallback for timed-out upstreams.
- */
-function toTimeoutError(message) {
-  const error = new Error(message);
-  error.name = "TimeoutError";
-  error.status = 408;
-  return error;
-}
-
-/**
- * Health probes are provider-aware (see src/health-checks.js) and capped well
- * below the request timeout so a single slow provider cannot stall a cycle.
+ * Health probes are provider-aware (see src/health-checks.js) and bounded by
+ * their own short timeout so a single slow provider cannot stall a cycle.
  */
 const checkTargetHealth = (target) =>
-  probeTargetHealth(target, {
-    timeoutMs: Math.min(config.timeoutMs, PROBE_TIMEOUT_MS)
-  });
+  probeTargetHealth(target);
 
 /**
  * The monitor reports cycle timing without `src/health.js` changing: the
@@ -302,8 +283,6 @@ async function proxy(req, res, protocol, pathname) {
               : bridgeKind === "gemini"
                 ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream })
                 : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), config.timeoutMs);
         const attemptStartedAt = Date.now();
 
         // Records one real upstream attempt, in the order `withFallback` makes
@@ -328,7 +307,7 @@ async function proxy(req, res, protocol, pathname) {
         };
 
         try {
-          const upstream = await fetch(request.url, { ...request.options, signal: controller.signal });
+          const upstream = await fetch(request.url, request.options);
           if (!upstream.ok) {
             const text = await upstream.text();
             const error = new Error(text.slice(0, 2000) || ("Upstream HTTP " + upstream.status));
@@ -341,16 +320,11 @@ async function proxy(req, res, protocol, pathname) {
           attempt(true, upstream.status, null);
           return { upstream, target, upstreamProtocol, translated };
         } catch (error) {
-          if (isAbortError(error)) {
-            const timeout = toTimeoutError("Upstream request timed out");
-            attempt(false, timeout.status, timeout.message);
-            throw timeout;
-          }
           // A transport-level rejection (DNS, TLS, socket) records here; an
           // HTTP error status was already recorded above.
           if (!recorded) attempt(false, Number(error?.status) || null, error?.message);
           throw error;
-        } finally { clearTimeout(timer); }
+        }
       },
       config.retryableStatus,
       sessionInfo.state.session,

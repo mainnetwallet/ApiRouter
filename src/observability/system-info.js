@@ -57,7 +57,6 @@ export function describeSystem({ config, targets = [], monitor = null, startedAt
     // which observes the real cycles rather than guessing at them.
     healthMonitor: monitor,
 
-    requestTimeoutMs: config?.timeoutMs ?? null,
     clientAuthRequired: (config?.routerApiKeys?.length ?? 0) > 0,
     telemetry: {
       // Stated plainly so the UI never implies persistence it does not have.

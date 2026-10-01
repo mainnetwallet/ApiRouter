@@ -135,9 +135,6 @@ export default function SystemPage() {
               <dt className="dl__term">Started at</dt>
               <dd className="dl__desc">{formatDateTime(system.startedAt)}</dd>
 
-              <dt className="dl__term">Request timeout</dt>
-              <dd className="dl__desc mono">{formatDuration(system.requestTimeoutMs)}</dd>
-
               <dt className="dl__term">Client auth</dt>
               <dd className="dl__desc">
                 {system.clientAuthRequired

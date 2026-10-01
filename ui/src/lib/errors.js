@@ -38,7 +38,7 @@ const HTTP_STATUS = {
   402: { category: CATEGORY.QUOTA, label: "Quota exhausted", retryable: true, hint: "Payment is required. The provider will keep refusing until the plan or balance is restored." },
   403: { category: CATEGORY.FORBIDDEN, label: "Forbidden", retryable: false, hint: "The credential is valid but not permitted to use this model or endpoint." },
   404: { category: CATEGORY.MODEL, label: "Not found", retryable: false, hint: "The endpoint or model does not exist at this provider." },
-  408: { category: CATEGORY.TIMEOUT, label: "Request timeout", retryable: true, hint: "The provider did not respond in time. Raising REQUEST_TIMEOUT_MS may help." },
+  408: { category: CATEGORY.TIMEOUT, label: "Request timeout", retryable: true, hint: "The provider reported a timeout. The router will try the next target." },
   409: { category: CATEGORY.COOLDOWN_CLIENT, label: "Conflict", retryable: false, hint: "Another operation of the same kind is already in progress." },
   413: { category: CATEGORY.INVALID, label: "Payload too large", retryable: false, hint: "The request body exceeded the gateway limit of 10 MB." },
   429: { category: CATEGORY.RATE_LIMIT, label: "Rate limited", retryable: true, hint: "The provider is throttling this key. The target enters cooldown and routing moves on." },
