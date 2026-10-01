@@ -387,6 +387,41 @@ test("an upstream 413 (provider size/TPM limit) falls back to the next target", 
   assert.equal(upstream.apiRequests.length, 2);
 });
 
+test("an upstream 400 that rejects the model id falls back to the next target", async (t) => {
+  let calls = 0;
+  const { upstream, router } = await withRig(
+    t,
+    () => (++calls === 1
+      ? { status: 400, body: { error: { message: "nvidia/nemotron-3-ultra:free is not a valid model ID", code: 400 } } }
+      : { status: 200, body: { id: "x", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] } }),
+    (u) => ({
+      GROQ_API_KEYS: "k0,k1",
+      GROQ_MODELS: "m",
+      GROQ_BASE_URL: u.baseUrl
+    })
+  );
+
+  const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [] }));
+  assert.equal(res.status, 200);
+  assert.equal(upstream.apiRequests.length, 2);
+});
+
+test("an ordinary upstream 400 is still not retried", async (t) => {
+  const { upstream, router } = await withRig(
+    t,
+    () => ({ status: 400, body: { error: { message: "messages: field required" } } }),
+    (u) => ({
+      GROQ_API_KEYS: "k0,k1",
+      GROQ_MODELS: "m",
+      GROQ_BASE_URL: u.baseUrl
+    })
+  );
+
+  const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [] }));
+  assert.equal(res.status, 400);
+  assert.equal(upstream.apiRequests.length, 1);
+});
+
 // ---------------------------------------------------------------------------
 // Sticky sessions
 // ---------------------------------------------------------------------------

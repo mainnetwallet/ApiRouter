@@ -83,6 +83,13 @@ function isAbortError(error) {
  * `error.message` directly throws a TypeError and destroys the 408 status,
  * which silently disables retry/fallback for timed-out upstreams.
  */
+/** True when an upstream 400 body says the model id itself was rejected. */
+export function isModelRejection(message) {
+  const text = String(message || "");
+  return /model/i.test(text)
+    && /(not (a )?valid|invalid|not found|does not exist|doesn't exist|unknown|unsupported|not supported|no such|unavailable)/i.test(text);
+}
+
 function toTimeoutError(message) {
   const error = new Error(message);
   error.name = "TimeoutError";
@@ -344,6 +351,10 @@ async function proxy(req, res, protocol, pathname) {
             // may well accept it, so fall back instead of failing the request.
             // (The router's own body-limit 413 is raised before routing starts.)
             if (upstream.status === 413) error.retryable = true;
+            // A 400 that complains about the model (bad/unknown/unsupported model
+            // id) is a problem with this provider's configuration, not with the
+            // client's request, so another provider can still answer it.
+            if (upstream.status === 400 && isModelRejection(error.message)) error.retryable = true;
             attempt(false, upstream.status, error.message);
             throw error;
           }
