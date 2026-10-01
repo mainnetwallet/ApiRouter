@@ -211,7 +211,7 @@ async function proxy(req, res, protocol, pathname) {
   }
 
   let body;
-  try { body = await readJsonBody(req); }
+  try { body = await readJsonBody(req, config.maxBodyBytes); }
   catch (error) {
     recordRequest({
       receivedAt,

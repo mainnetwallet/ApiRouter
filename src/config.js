@@ -54,6 +54,10 @@ export function loadConfig(env = process.env) {
     // Streaming requests should get response headers within seconds. If a
     // provider hangs, give up on it quickly and fall back instead of waiting
     // for the full REQUEST_TIMEOUT_MS.
+    // Largest client request body the router accepts. Claude Code resends the
+    // whole conversation (including pasted images) each turn, so 10 MB is easily
+    // exceeded; 32 MB matches Anthropic's own limit.
+    maxBodyBytes: Math.max(1, Number(env.MAX_REQUEST_BODY_MB || 32)) * 1024 * 1024,
     connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
     retryableStatus: new Set(retryableValues),
     providers

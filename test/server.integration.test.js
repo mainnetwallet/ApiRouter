@@ -351,6 +351,23 @@ test("a hung streaming upstream fails over after STREAM_CONNECT_TIMEOUT_MS, not 
   assert.ok(Date.now() - startedAt < 5000, "should give up well before REQUEST_TIMEOUT_MS");
 });
 
+test("MAX_REQUEST_BODY_MB controls the largest accepted request body", async (t) => {
+  const { router } = await withRig(
+    t,
+    () => ({ status: 200, body: { ok: true } }),
+    (u) => ({
+      GROQ_API_KEYS: "k0",
+      GROQ_MODELS: "m",
+      GROQ_BASE_URL: u.baseUrl,
+      MAX_REQUEST_BODY_MB: "1"
+    })
+  );
+
+  const big = "x".repeat(2 * 1024 * 1024);
+  const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [{ role: "user", content: big }] }));
+  assert.equal(res.status, 413);
+});
+
 // ---------------------------------------------------------------------------
 // Sticky sessions
 // ---------------------------------------------------------------------------
@@ -494,7 +511,8 @@ test("an oversized body is rejected with 413", async (t) => {
     (u) => ({
       GROQ_API_KEYS: "k",
       GROQ_MODELS: "m",
-      GROQ_BASE_URL: u.baseUrl
+      GROQ_BASE_URL: u.baseUrl,
+      MAX_REQUEST_BODY_MB: "10"
     })
   );
 
