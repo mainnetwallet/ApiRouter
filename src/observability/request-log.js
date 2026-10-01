@@ -52,6 +52,27 @@ export class RequestLog {
     this.entries = new Map();
     this.pendingEntries = new Map();
     this.sequence = 0;
+    this.listeners = new Set();
+  }
+
+  /**
+   * Be told the moment a request starts, moves, or finishes, so a live view can
+   * be pushed to instead of polled. The listener gets `{ type, entry }` where
+   * `type` is "pending" (a running request, as `pending()` lists it) or "entry"
+   * (a completed one, as `list()` returns it). It is called synchronously, so it
+   * must serialize `entry` before returning rather than hold on to it: pending
+   * entries are updated in place. A throwing listener never affects the request.
+   * Returns the function that unsubscribes.
+   */
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  #emit(type, entry) {
+    for (const listener of this.listeners) {
+      try { listener({ type, entry }); } catch { /* observability only */ }
+    }
   }
 
   #prunePending(now = Date.now()) {
@@ -85,6 +106,7 @@ export class RequestLog {
       inflight: null
     });
     this.#prunePending();
+    this.#emit("pending", this.pendingEntries.get(startSeq));
     return startSeq;
   }
 
@@ -111,6 +133,7 @@ export class RequestLog {
         }
         : null;
     }
+    this.#emit("pending", pending);
   }
 
   /** Requests currently in flight, oldest first. */
@@ -174,6 +197,7 @@ export class RequestLog {
 
     this.entries.set(this.#keyOf(stored), stored);
     this.#trim();
+    this.#emit("entry", stored);
     return stored;
   }
 

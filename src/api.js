@@ -86,7 +86,64 @@ function fail(req, res, status, message, type, details = null) {
 
 // ---------------------------------------------------------------------------
 
+/** Live-stream clients allowed at once; each one is an open socket. */
+const MAX_LIVE_STREAMS = 50;
+const STREAM_HEARTBEAT_MS = 15_000;
+
 export function createApi({ config, targets, health, requestLog, monitor, refreshHealth }) {
+  const liveStreams = new Set();
+
+  /**
+   * Server-sent events for Live Logs: the current state first (`snapshot`, the
+   * same payload as `GET /api/requests`), then one event per change, written in
+   * the same tick the request log changes, so a box appears with no polling
+   * delay. Same auth as every other /api route (the caller has already passed it).
+   */
+  function openRequestStream(req, res, searchParams) {
+    if (liveStreams.size >= MAX_LIVE_STREAMS) {
+      return fail(req, res, 503, "Too many live streams", "unavailable");
+    }
+
+    res.socket?.setNoDelay?.(true);
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store, no-transform",
+      "x-accel-buffering": "no",
+      "x-content-type-options": "nosniff"
+    });
+
+    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+    let closed = false;
+    let unsubscribe = () => {};
+    let heartbeat = null;
+    const handle = { close };
+    function close() {
+      if (closed) return;
+      closed = true;
+      unsubscribe();
+      clearInterval(heartbeat);
+      liveStreams.delete(handle);
+      if (!res.writableEnded) res.end();
+    }
+    liveStreams.add(handle);
+    req.on("close", close);
+    res.on("close", close);
+    res.on("error", close);
+
+    // Subscribe before reading the snapshot, in the same tick, so no change can
+    // fall between the two.
+    unsubscribe = requestLog.subscribe(({ type, entry }) => send(type, entry));
+    send("snapshot", {
+      generatedAt: new Date().toISOString(),
+      ...requestLog.list({ limit: searchParams.get("limit") }),
+      pending: requestLog.pending()
+    });
+    heartbeat = setInterval(() => res.write(": ping\n\n"), STREAM_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    return undefined;
+  }
+
   const describeAll = (now = Date.now()) => health.describe(targets, now);
 
   // --- /api/health -------------------------------------------------------
@@ -280,7 +337,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
   }
 
   // --- dispatcher --------------------------------------------------------
-  return async function handleApi(req, res, pathname, searchParams) {
+  async function handleApi(req, res, pathname, searchParams) {
     const now = Date.now();
 
     if (pathname === "/api/health" && req.method === "GET") {
@@ -353,6 +410,11 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       });
     }
 
+    // Before the `/api/requests/<id>` lookup below, which would take it for an id.
+    if (pathname === "/api/requests/stream" && req.method === "GET") {
+      return openRequestStream(req, res, searchParams);
+    }
+
     if (pathname.startsWith("/api/requests/") && req.method === "GET") {
       const id = decodeURIComponent(pathname.slice("/api/requests/".length));
       // Accept either the client-visible request id or the internal sequence.
@@ -368,5 +430,10 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     }
 
     return false;
-  };
+  }
+
+  // Open live streams never end on their own, so shutdown has to close them or
+  // `server.close()` would wait on them forever.
+  handleApi.closeStreams = () => { for (const stream of [...liveStreams]) stream.close(); };
+  return handleApi;
 }

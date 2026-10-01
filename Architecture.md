@@ -271,13 +271,24 @@ records each attempt as it goes on the wire and finishes; `record()` retires it
 into the completed log. Pending entries live in their own map, so metrics, the
 model catalogue and the Requests page never see an unfinished request. They are
 exposed as `pending` on `GET /api/requests`, and both forms share a `startSeq`,
-which lets Live Logs show one row per call and update it in place. A request
+which lets Live Logs show one card per call and update it in place, with one
+box per attempt (`CALLING` / `FAILED` / `SUCCESS`) and a `FALLBACK` line between
+a failed box and the next. A request
 that never reports back is dropped after 10 minutes and the set is capped.
 
 ### Real-time
 
-Polling, with conditional requests. The gateway has no SSE or WebSocket
-channel, and the panel does not simulate one. `/api/*` returns an `ETag` over a
+Most pages poll, with conditional requests. Live Logs is the exception: it is
+pushed to over server-sent events (`GET /api/requests/stream`). `RequestLog`
+has `subscribe()`, called synchronously on `begin()`, `progress()` and
+`record()`; the endpoint sends a `snapshot` (same payload as `GET
+/api/requests`) and then one `pending` / `entry` event per change, in the same
+tick the change happens. The panel reads it with `fetch` rather than
+`EventSource` because it authenticates with a Bearer header. A dropped stream
+reconnects with backoff and starts over with a fresh snapshot, polling runs
+only while the stream is not open, and a stale snapshot can never move a call
+backwards (`mergeRows`). Open streams are capped and closed on shutdown. For
+polled pages, `/api/*` returns an `ETag` over a
 stable projection of the payload (volatile fields such as `generatedAt` are
 excluded from the hash), so an unchanged poll returns `304` and the client
 returns the previous object by identity — which lets React skip the re-render

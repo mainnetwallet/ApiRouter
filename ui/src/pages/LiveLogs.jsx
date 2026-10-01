@@ -11,9 +11,11 @@ import { LiveLogList } from "../components/domain/LiveLogList.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
 import { getRequests } from "../api/requests.js";
-import { filterRows, ingestPayload, isLive, isNearBottom, mergeRows } from "../lib/liveLogs.js";
+import { openRequestStream } from "../api/liveStream.js";
+import { filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows } from "../lib/liveLogs.js";
 import { providerLabel } from "../lib/format.js";
 
+/** Only a fallback: while the live stream is open nothing is polled. */
 const POLL_MS = 1_000;
 /** How often the elapsed time of a running call ticks on screen. */
 const TICK_MS = 250;
@@ -22,16 +24,16 @@ const PAGE_LIMIT = 200;
 /**
  * Live execution log.
  *
- * One row per API call. Reuses the existing request log (`GET /api/requests`)
- * and the panel's polling hook — the gateway has no push channel, so this polls
- * rather than pretending otherwise. The payload lists calls that are still
- * running as well as finished ones, so a row appears the moment a call starts
- * and changes state as it moves on (see `lib/liveLogs.js`); nothing is
- * predicted or reconstructed.
+ * One card per API call. The gateway pushes every change over a server-sent
+ * event stream (`GET /api/requests/stream`), so a box appears in the same
+ * instant the router starts, retries or finishes an attempt. Each (re)connect
+ * begins with a snapshot, so nothing is missed. If the stream cannot be opened
+ * the page falls back to polling `GET /api/requests` until it can. Nothing is
+ * predicted or reconstructed (see `lib/liveLogs.js`).
  *
- * Pause stops polling and freezes the view; resuming catches up. Clear empties
- * the view and remembers the high-water mark, so cleared calls do not reappear
- * on the next poll.
+ * Pause closes the stream and freezes the view; resuming catches up from a
+ * fresh snapshot. Clear empties the view and remembers the high-water mark, so
+ * cleared calls do not reappear.
  */
 export default function LiveLogs() {
   const [rows, setRows] = useState([]);
@@ -50,16 +52,20 @@ export default function LiveLogs() {
   const [now, setNow] = useState(() => Date.now());
   const scroller = useRef(null);
 
+  const [streamState, setStreamState] = useState("connecting");
+  const [lastEventAt, setLastEventAt] = useState(null);
+  const streaming = streamState === "open";
+
+  // Polling is only the fallback for a stream that is not open.
   const log = useApi(({ signal }) => getRequests({ limit: PAGE_LIMIT }, { signal }), {
     intervalMs: POLL_MS,
-    enabled: !paused
+    enabled: !paused && !streaming
   });
 
-  // Every poll upserts its rows by call, so a running row is replaced by its
-  // next state rather than duplicated.
-  useEffect(() => {
-    if (!log.data) return;
-    const { rows: fresh, maxSeq: next, restarted } = ingestPayload(log.data, {
+  // A full payload (poll or stream snapshot): upsert by call, and start over if
+  // the gateway restarted.
+  const applyPayload = useCallback((payload) => {
+    const { rows: fresh, maxSeq: next, restarted } = ingestPayload(payload, {
       floor: floor.current,
       maxSeq: maxSeq.current
     });
@@ -70,7 +76,34 @@ export default function LiveLogs() {
     } else if (fresh.length > 0) {
       setRows((current) => mergeRows(current, fresh));
     }
-  }, [log.data]);
+  }, []);
+
+  useEffect(() => {
+    if (log.data) applyPayload(log.data);
+  }, [log.data, applyPayload]);
+
+  // The live stream. A running row is replaced by its next state the moment the
+  // gateway reports it, rather than duplicated.
+  useEffect(() => {
+    if (paused) return undefined;
+    return openRequestStream({
+      limit: PAGE_LIMIT,
+      onState: setStreamState,
+      onEvent: (event) => {
+        setLastEventAt(Date.now());
+        if (event.event === "snapshot") {
+          applyPayload(event.data);
+        } else if (event.event === "pending" || event.event === "entry") {
+          const { rows: fresh, maxSeq: next } = ingestEvent(event, {
+            floor: floor.current,
+            maxSeq: maxSeq.current
+          });
+          maxSeq.current = next;
+          if (fresh.length > 0) setRows((current) => mergeRows(current, fresh));
+        }
+      }
+    });
+  }, [paused, applyPayload]);
 
   const filters = useMemo(() => ({
     provider, status, search: debouncedSearch, requestId: debouncedRequestId
@@ -116,14 +149,14 @@ export default function LiveLogs() {
   };
 
   const filtering = Boolean(provider || status || debouncedSearch.trim() || debouncedRequestId.trim());
-  const initialLoading = log.loading && !log.data && rows.length === 0;
-  const disconnected = Boolean(log.error) && !paused;
+  const initialLoading = log.loading && !log.data && !streaming && rows.length === 0;
+  const disconnected = Boolean(log.error) && !streaming && !paused;
 
   const state = paused
     ? { tone: "warn", label: "Paused" }
     : disconnected
       ? { tone: "danger", label: "Disconnected" }
-      : log.data
+      : streaming || log.data
         ? { tone: "ok", label: "Live" }
         : { tone: "neutral", label: "Connecting" };
 
@@ -132,9 +165,9 @@ export default function LiveLogs() {
       <PageHeader
         title="Live Logs"
         description="One row per API call, updating live as the router works through it"
-        lastUpdatedAt={log.lastUpdatedAt}
-        refreshing={log.refreshing}
-        paused={log.paused}
+        lastUpdatedAt={streaming ? lastEventAt : log.lastUpdatedAt}
+        refreshing={streaming ? false : log.refreshing}
+        paused={paused}
         actions={
           <>
             <StatusBadge tone={state.tone} pulse={state.label === "Live"} title="Connection state">

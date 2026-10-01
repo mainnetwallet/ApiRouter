@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  STATE, buildRow, filterRows, ingestPayload, isLive, isNearBottom, mergeRows
+  STATE, STEP, buildRow, filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows
 } from "../liveLogs.js";
-import { LiveLogList, LiveLogRow, describeOutcome, formatClock } from "../../components/domain/LiveLogList.jsx";
+import { createSseParser } from "../../api/liveStream.js";
+import { LiveLogList, LiveLogRow, describeOutcome, describeStepOutcome, formatClock } from "../../components/domain/LiveLogList.jsx";
 
 const SECRET = "sk-super-secret-provider-key-1234567890";
 const T0 = Date.UTC(2026, 9, 1, 14, 2, 11);
@@ -50,35 +51,63 @@ function running(overrides = {}) {
 
 const wire = { provider: "huggingface", model: "Qwen/Qwen2.5-Coder-32B-Instruct", keyIndex: 0, startedAt: T0 + 5 };
 const render = (rows, now = T0 + 2500) => renderToStaticMarkup(<LiveLogList rows={rows} now={now} />);
-const li = (html) => (html.match(/<li /g) ?? []).length;
+const cards = (html) => (html.match(/livelog__card /g) ?? []).length;
+const boxes = (html) => (html.match(/data-step-state=/g) ?? []).length;
 
-describe("one row per API call", () => {
-  it("a finished call with a fallback is still a single row", () => {
+describe("one card per API call, one box per model tried", () => {
+  it("a finished call with a fallback is one card with two boxes", () => {
     const row = buildRow(finished());
     expect(row.state).toBe(STATE.SUCCESS);
-    expect(li(render([row]))).toBe(1);
+    const html = render([row]);
+    expect(cards(html)).toBe(1);
+    expect(boxes(html)).toBe(2);
   });
 
-  it("the headline is the target that answered; the failed attempt rides along", () => {
+  it("each attempt is a box: the failed one first, then the one that answered", () => {
     const row = buildRow(finished());
     expect(row).toMatchObject({ provider: "gemini", keyIndex: 1, status: 200, durationMs: 1820 });
-    expect(row.chain).toHaveLength(1);
-    expect(row.chain[0]).toMatchObject({ keyIndex: 0, status: 429, reason: "rate limited" });
+    expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.SUCCESS]);
+    expect(row.steps[0]).toMatchObject({ keyIndex: 0, status: 429, reason: "rate limited" });
 
     const html = render([row]);
+    expect(html).toContain("Gemini · gemini-3.7-flash · key 0");
     expect(html).toContain("Gemini · gemini-3.7-flash · key 1");
-    expect(html).toContain("↳ Gemini · gemini-3.7-flash · key 0 · 429 · rate limited");
+    expect(html).toContain("429 · 410 ms");
+    expect(html).toContain("200 · 612 ms");
     expect(html).toContain("200 · 1.82 s");
     expect(html).toContain("abc12345");
   });
 
-  it("a plain success has no fallback lines", () => {
-    const row = buildRow(finished({ attempts: [{ provider: "gemini", model: "m", keyIndex: 1, ok: true, status: 200, latencyMs: 90 }] }));
-    expect(row.chain).toEqual([]);
-    expect(render([row])).not.toContain("↳");
+  it("a FALLBACK line sits between a failed box and the next box, and only there", () => {
+    const html = render([buildRow(finished())]);
+    expect(html).toContain("FALLBACK · 429 · rate limited");
+    expect((html.match(/FALLBACK/g) ?? [])).toHaveLength(1);
+    expect(html.indexOf("data-step-state=\"FAILED\"")).toBeLessThan(html.indexOf("FALLBACK"));
+    expect(html.indexOf("FALLBACK")).toBeLessThan(html.indexOf("data-step-state=\"SUCCESS\""));
   });
 
-  it("a failed call shows every failed attempt and the reason", () => {
+  it("a plain success is a single box and no fallback line", () => {
+    const row = buildRow(finished({ attempts: [{ provider: "gemini", model: "m", keyIndex: 1, ok: true, status: 200, latencyMs: 90 }] }));
+    expect(row.steps).toHaveLength(1);
+    const html = render([row]);
+    expect(html).not.toContain("FALLBACK");
+    expect(boxes(html)).toBe(1);
+  });
+
+  it("different models each get their own box", () => {
+    const row = buildRow(finished({
+      attempts: [
+        { provider: "groq", model: "model-a", keyIndex: 0, ok: false, status: 503, latencyMs: 80 },
+        { provider: "cerebras", model: "model-b", keyIndex: 0, ok: true, status: 200, latencyMs: 120 }
+      ]
+    }));
+    const html = render([row]);
+    expect(html).toContain("model-a");
+    expect(html).toContain("model-b");
+    expect(boxes(html)).toBe(2);
+  });
+
+  it("a failed call shows every failed box and the reason", () => {
     const row = buildRow(finished({
       outcome: "failed",
       httpStatus: 502,
@@ -90,16 +119,18 @@ describe("one row per API call", () => {
       ]
     }));
     expect(row.state).toBe(STATE.FAILED);
-    expect(row.chain).toHaveLength(2);
+    expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.FAILED]);
     const html = render([row]);
     expect(html).toContain("FAILED");
     expect(html).toContain("All routing targets failed");
     expect(html).toContain("502");
+    expect(html).not.toContain("SUCCESS");
   });
 
   it("represents a request that never reached a provider", () => {
     const row = buildRow({ seq: 3, id: "r3", receivedAt: T0, httpStatus: 401, outcome: "failed", errorMessage: "client authentication failed", attempts: [] });
     expect(row).toMatchObject({ state: STATE.FAILED, status: 401, reason: "client authentication failed", key: 3 });
+    expect(row.steps).toEqual([]);
   });
 });
 
@@ -112,12 +143,16 @@ describe("a row moves through the call", () => {
     expect(html).toContain("ROUTING");
     expect(html).toContain("livelog__type--live");
     expect(html).toContain("anthropic · Qwen/Qwen2.5-Coder-32B-Instruct");
+    expect(row.steps.map((step) => step.state)).toEqual([STEP.ROUTING]);
   });
 
   it("RUNNING: the first attempt is on the wire", () => {
     const row = buildRow(running({ inflight: wire }));
     expect(row.state).toBe(STATE.RUNNING);
-    expect(render([row])).toContain("Hugging Face · Qwen/Qwen2.5-Coder-32B-Instruct · key 0");
+    expect(row.steps.map((step) => step.state)).toEqual([STEP.CALLING]);
+    const html = render([row]);
+    expect(html).toContain("CALLING");
+    expect(html).toContain("Hugging Face · Qwen/Qwen2.5-Coder-32B-Instruct · key 0");
   });
 
   it("RETRYING: a failure happened and the next target is on the wire", () => {
@@ -130,8 +165,29 @@ describe("a row moves through the call", () => {
     expect(row.keyIndex).toBe(1);
     const html = render([row]);
     expect(html).toContain("RETRYING");
-    expect(html).toContain("key 1");
-    expect(html).toContain("↳ Hugging Face · m · key 0 · 429 · rate limited");
+    expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.CALLING]);
+    expect(html).toContain("FALLBACK · 429 · rate limited");
+    expect(html).toContain("Hugging Face · m · key 0");
+    expect(html).toContain("Hugging Face · m · key 1");
+  });
+
+  it("after a failure with nothing on the wire yet, the next box is a ROUTING placeholder", () => {
+    const row = buildRow(running({
+      attempts: [{ provider: "groq", model: "m", keyIndex: 0, ok: false, status: 500, latencyMs: 40 }],
+      attemptCount: 1
+    }));
+    expect(row.state).toBe(STATE.RETRYING);
+    expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.ROUTING]);
+    expect(render([row])).toContain("Choosing next target");
+  });
+
+  it("a call whose last attempt succeeded but is still finishing is RUNNING, not RETRYING", () => {
+    const row = buildRow(running({
+      attempts: [{ provider: "groq", model: "m", keyIndex: 0, ok: true, status: 200, latencyMs: 40 }],
+      attemptCount: 1
+    }));
+    expect(row.state).toBe(STATE.RUNNING);
+    expect(row.steps.map((step) => step.state)).toEqual([STEP.SUCCESS]);
   });
 
   it("the same call keeps one key from start to finish, so it updates in place", () => {
@@ -153,6 +209,13 @@ describe("a row moves through the call", () => {
     expect(describeOutcome(row, T0 + 1500)).toBe("1.50 s");
     expect(describeOutcome(row, T0 + 4200)).toBe("4.20 s");
     expect(describeOutcome(buildRow(finished()), T0 + 99_000)).toBe("200 · 1.82 s");
+  });
+
+  it("a CALLING box ticks from its own start; finished boxes are fixed", () => {
+    const [calling] = buildRow(running({ inflight: wire })).steps;
+    expect(describeStepOutcome(calling, wire.startedAt + 1500)).toBe("1.50 s");
+    const [failed] = buildRow(finished()).steps;
+    expect(describeStepOutcome(failed, T0 + 99_000)).toBe("429 · 410 ms");
   });
 });
 
@@ -190,7 +253,7 @@ describe("rendering safety", () => {
     const html = renderToStaticMarkup(
       <LiveLogRow row={{
         key: 1, state: STATE.FAILED, provider: "groq", keyIndex: 2, reason: `boom ${SECRET}`,
-        chain: [{ provider: "groq", keyIndex: 2, status: 500, detail: `x ${SECRET}`, reason: `y ${SECRET}` }]
+        steps: [{ state: STEP.FAILED, provider: "groq", keyIndex: 2, status: 500, detail: `x ${SECRET}`, reason: `y ${SECRET}` }]
       }} />
     );
     expect(html).not.toContain(SECRET);
@@ -258,5 +321,77 @@ describe("auto-scroll", () => {
     expect(isNearBottom({ scrollTop: 480, scrollHeight: 1000, clientHeight: 500 })).toBe(true);
     expect(isNearBottom({ scrollTop: 100, scrollHeight: 1000, clientHeight: 500 })).toBe(false);
     expect(isNearBottom({})).toBe(true);
+  });
+});
+
+describe("pushed events", () => {
+  it("an event becomes a row; an old running call is not mistaken for a gateway restart", () => {
+    const { rows, maxSeq } = ingestEvent({ event: "pending", data: running({ startSeq: 3, inflight: wire }) }, { maxSeq: 40 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe(STATE.RUNNING);
+    expect(maxSeq).toBe(40);
+  });
+
+  it("ignores malformed events and respects the cleared floor", () => {
+    expect(ingestEvent({ event: "pending", data: null }).rows).toEqual([]);
+    expect(ingestEvent({ event: "entry", data: finished({ startSeq: 2, seq: 3 }) }, { floor: 3 }).rows).toEqual([]);
+  });
+
+  it("each pushed step updates the same card: ROUTING -> CALLING -> fallback -> SUCCESS", () => {
+    const events = [
+      running({ startSeq: 7 }),
+      running({ startSeq: 7, inflight: wire }),
+      running({ startSeq: 7, attempts: [{ provider: "huggingface", model: "m", keyIndex: 0, ok: false, status: 429, latencyMs: 90 }], inflight: null }),
+      running({ startSeq: 7, attempts: [{ provider: "huggingface", model: "m", keyIndex: 0, ok: false, status: 429, latencyMs: 90 }], inflight: { ...wire, keyIndex: 1 } })
+    ];
+    let current = [];
+    const seen = [];
+    for (const data of events) {
+      current = mergeRows(current, ingestEvent({ event: "pending", data }).rows);
+      seen.push(current[0].steps.map((step) => step.state).join(","));
+    }
+    current = mergeRows(current, ingestEvent({ event: "entry", data: finished({ startSeq: 7, seq: 9 }) }).rows);
+    seen.push(current[0].steps.map((step) => step.state).join(","));
+
+    expect(current).toHaveLength(1);
+    expect(seen).toEqual([
+      "ROUTING", "CALLING", "FAILED,ROUTING", "FAILED,CALLING", "FAILED,SUCCESS"
+    ]);
+  });
+
+  it("a stale snapshot never turns a finished call back into a running one", () => {
+    const done = buildRow(finished({ startSeq: 5, seq: 6 }));
+    const stale = buildRow(running({ startSeq: 5, inflight: wire }));
+    expect(mergeRows([done], [stale])[0].state).toBe(STATE.SUCCESS);
+  });
+
+  it("a stale snapshot never moves a running call backwards", () => {
+    const calling = buildRow(running({ startSeq: 5, inflight: wire }));
+    const older = buildRow(running({ startSeq: 5 }));
+    expect(mergeRows([calling], [older])[0].state).toBe(STATE.RUNNING);
+
+    const retrying = buildRow(running({ startSeq: 5, attempts: [{ provider: "g", model: "m", keyIndex: 0, ok: false, status: 500, latencyMs: 1 }], inflight: wire }));
+    expect(mergeRows([retrying], [calling])[0].steps).toHaveLength(2);
+  });
+});
+
+describe("SSE parser", () => {
+  const collect = (chunks) => {
+    const out = [];
+    const parser = createSseParser((e) => out.push(e));
+    for (const chunk of chunks) parser.feed(chunk);
+    return out;
+  };
+
+  it("parses events split across chunks and ignores heartbeats", () => {
+    const out = collect([
+      ": ping\n\nevent: pending\nda", 'ta: {"a":1}\n', '\nevent: entry\ndata: {"b":2}\n\n'
+    ]);
+    expect(out).toEqual([{ event: "pending", data: { a: 1 } }, { event: "entry", data: { b: 2 } }]);
+  });
+
+  it("handles CRLF and skips malformed data without throwing", () => {
+    const out = collect(['event: snapshot\r\ndata: {"ok":true}\r\n\r\n', "event: x\ndata: {oops\n\n", 'event: y\ndata: {"n":1}\n\n']);
+    expect(out.map((e) => e.event)).toEqual(["snapshot", "y"]);
   });
 });

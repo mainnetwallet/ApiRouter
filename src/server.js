@@ -691,11 +691,13 @@ const stopHealthMonitor = startHealthMonitor(targets, trackedCheckTargetHealth, 
 process.once("SIGINT", () => {
   monitor.stop();
   stopHealthMonitor();
+  handleApi.closeStreams();
   server.close(() => process.exit(0));
 });
 process.once("SIGTERM", () => {
   monitor.stop();
   stopHealthMonitor();
+  handleApi.closeStreams();
   server.close(() => process.exit(0));
 });
 

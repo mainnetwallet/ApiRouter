@@ -875,22 +875,57 @@
 
 .livelog__list { list-style: none; margin: 0; padding: 0; }
 
-.livelog__row {
+.livelog__card {
+  margin: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-panel, transparent);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+.livelog__card--info { border-left-color: var(--info); }
+.livelog__card--danger { border-left-color: var(--danger); }
+.livelog__card--warn { border-left-color: var(--warn); }
+.livelog__card--ok { border-left-color: var(--ok); }
+
+.livelog__card-head {
   display: grid;
   grid-template-columns: 62px 104px minmax(0, 1fr) auto 64px;
   gap: var(--sp-2);
   align-items: baseline;
-  padding: 3px var(--sp-3);
-  border-bottom: 1px solid var(--border-subtle);
-  border-left: 2px solid transparent;
-  font-size: var(--fs-xs);
-  line-height: 1.45;
+  padding: var(--sp-2) var(--sp-3);
 }
-.livelog__row:hover { background: var(--bg-hover); }
-.livelog__row--info { border-left-color: var(--info); }
-.livelog__row--danger { border-left-color: var(--danger); }
-.livelog__row--warn { border-left-color: var(--warn); }
-.livelog__row--ok { border-left-color: var(--ok); }
+.livelog__lone, .livelog__reason { padding: 0 var(--sp-3) var(--sp-2); }
+
+.livelog__steps { display: flex; flex-direction: column; padding: 0 var(--sp-3) var(--sp-3); }
+.livelog__stepwrap { display: flex; flex-direction: column; }
+
+/* One box per model the router tried. */
+.livelog__step {
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--border-subtle);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-input);
+  padding: var(--sp-2) var(--sp-3);
+}
+.livelog__step--info { border-left-color: var(--info); }
+.livelog__step--danger { border-left-color: var(--danger); }
+.livelog__step--ok { border-left-color: var(--ok); }
+.livelog__step-head {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  gap: var(--sp-2);
+  align-items: baseline;
+}
+
+/* The line between a failed box and the model the router fell back to. */
+.livelog__fallback {
+  padding: var(--sp-1, 2px) 0 var(--sp-1, 2px) var(--sp-3);
+  color: var(--warn);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
 
 .livelog__time { color: var(--text-dim); }
 
@@ -928,7 +963,7 @@
 }
 
 .livelog__detail--failed { color: var(--warn); }
-.livelog__row--live .livelog__outcome { color: var(--info); }
+.livelog__card--live > .livelog__card-head .livelog__outcome, .livelog__step--calling .livelog__outcome { color: var(--info); }
 
 .livelog__outcome { color: var(--text-muted); white-space: nowrap; text-align: right; }
 
@@ -955,17 +990,21 @@ button.livelog__rid:hover { color: var(--accent); text-decoration: underline; }
 
 @media (max-width: 760px) {
   .livelog__scroll { height: 62vh; }
-  .livelog__row {
+  .livelog__card-head {
     grid-template-columns: 56px minmax(0, 1fr) auto;
     grid-template-areas:
       "time type outcome"
-      "main main main"
+      "sub sub sub"
       "rid rid rid";
     row-gap: 0;
   }
-  .livelog__time { grid-area: time; }
-  .livelog__type { grid-area: type; }
-  .livelog__outcome { grid-area: outcome; }
-  .livelog__main { grid-area: main; }
-  .livelog__rid { grid-area: rid; text-align: left; }
+  .livelog__card-head .livelog__time { grid-area: time; }
+  .livelog__card-head .livelog__type { grid-area: type; }
+  .livelog__card-head .livelog__outcome { grid-area: outcome; }
+  .livelog__card-head .livelog__sub { grid-area: sub; }
+  .livelog__card-head .livelog__rid { grid-area: rid; text-align: left; }
+  .livelog__step-head { grid-template-columns: 76px minmax(0, 1fr) auto; }
 }
+
+/* A failed box keeps its full error text, wrapped, instead of one clipped line. */
+.livelog__step .livelog__detail { white-space: normal; overflow-wrap: anywhere; }

@@ -105,6 +105,7 @@ otherwise. None of these can change routing, health or provider behaviour.
 | GET | /api/providers | Provider rollup joined with safe config |
 | GET | /api/models | Model catalogue with health and usage |
 | GET | /api/requests | Request log (`limit`, `cursor`, `outcome`, `provider`, `protocol`, `status`), plus `pending`: calls still running |
+| GET | /api/requests/stream | Server-sent events for Live Logs: a `snapshot`, then a `pending` / `entry` event per change |
 | GET | /api/requests/:id | One request's full lifecycle |
 | GET | /api/router/preview | The routing decision for a protocol/model |
 | GET | /api/analytics | Series and breakdowns (`range=5m\|15m\|1h\|6h\|24h\|7d`) |
@@ -128,10 +129,14 @@ npm run test:all    # backend + frontend
 Twelve pages: Dashboard, Providers, Models, Health Monitor, Router, Fallback,
 Playground, Requests, Live Logs, Analytics, Configuration, System.
 
-Live Logs shows one row per API call and updates it in place while the call
-runs: `ROUTING` → `RUNNING` (the attempt on the wire, with a live timer) →
-`RETRYING` (a target failed, the next one is on the wire) → `SUCCESS` / `FAILED`.
-Attempts that failed along the way stay under the row as `↳` lines.
+Live Logs shows one card per API call and updates it in place while the call
+runs. The card header carries the call as a whole (`ROUTING` → `RUNNING` →
+`RETRYING` → `SUCCESS` / `FAILED`). Inside it, every model the router tries gets
+its own box: `CALLING` (on the wire, with a live timer), `FAILED` (status and
+reason) or `SUCCESS`. When a box fails, a `FALLBACK` line follows and the next
+model's box appears below it. Every change is pushed over a server-sent event
+stream, so boxes appear with no polling delay; the page polls only while that
+stream is not connected.
 
 To see the Live Logs page populated without real provider keys, run
 `npm run ui:build` then `npm run demo:live-logs`. It starts the router against
