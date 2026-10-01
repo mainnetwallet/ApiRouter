@@ -32,7 +32,10 @@ export const ROUTES = [
   { path: "/models", label: "Models", icon: "box", group: "Configure", element: Models,
     description: "Model catalogue with health, protocol and usage" },
 
-  { path: "/health", label: "Health Monitor", icon: "activity", group: "Operate", element: HealthMonitor,
+  // Deliberately NOT "/health": the gateway answers GET /health with the raw
+  // JSON contract, and `RESERVED_PREFIXES` in src/server.js shadows the SPA for
+  // that path. A panel route there would be unreachable in a browser.
+  { path: "/health-monitor", label: "Health Monitor", icon: "activity", group: "Operate", element: HealthMonitor,
     description: "Every routing target, its score and cooldown state" },
   { path: "/router", label: "Router", icon: "route", group: "Operate", element: RouterControl,
     description: "How the gateway resolves a request to a target" },

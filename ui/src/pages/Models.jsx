@@ -6,16 +6,18 @@ import { SearchInput } from "../components/ui/SearchInput.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
+import { MetricCard } from "../components/ui/MetricCard.jsx";
 import { Drawer } from "../components/ui/Overlays.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
-import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
+import { MetricSkeleton, TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
 import { getModels } from "../api/models.js";
-import { matchesSearch, nextSort, sortRows } from "../lib/table.js";
+import { filterChoices, filterTargets, findTarget, isRoutable, normalizeModelPayload } from "../lib/targets.js";
+import { sortRows } from "../lib/table.js";
 import {
-  formatDateTime, formatLatency, formatNumber, formatPercent,
+  formatDateTime, formatNumber, formatPercent,
   protocolLabel, providerLabel, EMPTY
 } from "../lib/format.js";
 
@@ -26,6 +28,9 @@ import {
  * that is the unit the gateway tracks, cools down and ranks. Collapsing keys
  * into a single model row would hide exactly the failure mode this page exists
  * to reveal: one key exhausted while its siblings are fine.
+ *
+ * All data comes from `GET /api/models`. The raw `/v1/models` discovery
+ * endpoint is a client-facing contract and is deliberately not consumed here.
  */
 export default function Models() {
   const models = useApi(getModels, { intervalMs: 15_000 });
@@ -39,29 +44,24 @@ export default function Models() {
 
   const debouncedSearch = useDebouncedValue(search, 220);
 
-  const rows = useMemo(() => models.data?.models ?? [], [models.data]);
-  const filters = models.data?.filters ?? { providers: [], protocols: [], statuses: [] };
+  // Narrowed once, so a partial or malformed response cannot reach the table.
+  const view = useMemo(() => normalizeModelPayload(models.data), [models.data]);
+  const { rows, summary } = view;
 
-  const filtered = useMemo(() => {
-    let result = rows;
+  // The endpoint advertises its own filter vocabulary; the fallback recount
+  // lives in the view model so both pages share one implementation.
+  const choices = useMemo(() => filterChoices(view), [view]);
 
-    if (provider) result = result.filter((row) => row.provider === provider);
-    if (protocol) result = result.filter((row) => row.protocols.includes(protocol));
-    if (status) result = result.filter((row) => row.status === status);
-
-    result = result.filter((row) => matchesSearch(row, debouncedSearch, [
-      (item) => item.model,
-      (item) => item.provider,
-      (item) => item.lastReason ?? ""
-    ]));
-
-    return sortRows(result, COLUMN_ACCESSORS, sort);
-  }, [rows, provider, protocol, status, debouncedSearch, sort]);
-
-  const selected = useMemo(
-    () => rows.find((row) => row.id === selectedId) ?? null,
-    [rows, selectedId]
+  const filtered = useMemo(
+    () => sortRows(
+      filterTargets(rows, { provider, protocol, status, search: debouncedSearch }),
+      COLUMN_ACCESSORS,
+      sort
+    ),
+    [rows, provider, protocol, status, debouncedSearch, sort]
   );
+
+  const selected = useMemo(() => findTarget(rows, selectedId), [rows, selectedId]);
 
   const activeFilterCount = [provider, protocol, status, debouncedSearch].filter(Boolean).length;
 
@@ -69,6 +69,7 @@ export default function Models() {
     return (
       <div className="page">
         <PageHeader title="Models" description="Model catalogue with health, protocol and usage" />
+        <MetricSkeleton count={5} />
         <div className="panel"><div className="panel__body"><TableSkeleton rows={10} label="Loading models" /></div></div>
       </div>
     );
@@ -91,7 +92,44 @@ export default function Models() {
 
       {models.error ? <ErrorState error={models.error} onRetry={models.reload} compact /> : null}
 
-      <div className="panel">
+      <section className="section">
+        <div className="metrics">
+          <MetricCard
+            label="Total models"
+            value={formatNumber(summary.total)}
+            icon="box"
+            hint="provider + model + key targets"
+          />
+          <MetricCard
+            label="Healthy"
+            value={formatNumber(summary.healthy)}
+            tone={summary.healthy > 0 ? "ok" : null}
+            icon="check"
+          />
+          <MetricCard
+            label="Failed"
+            value={formatNumber(summary.failed)}
+            tone={summary.failed > 0 ? "danger" : null}
+            icon="alert"
+          />
+          <MetricCard
+            label="Providers"
+            value={formatNumber(summary.providers)}
+            icon="server"
+            hint="serving at least one model"
+          />
+          <MetricCard
+            label="Available targets"
+            value={formatNumber(summary.available)}
+            tone={summary.total > 0 && summary.available === 0 ? "danger" : null}
+            icon="route"
+            hint="not cooling down"
+            title="Targets the router can currently route to"
+          />
+        </div>
+      </section>
+
+      <div className="panel section">
         <FilterBar
           actions={
             <span className="tiny dim nowrap">
@@ -111,14 +149,14 @@ export default function Models() {
             />
           </div>
 
-          <FilterSelect label="Provider" value={provider} onChange={setProvider} options={filters.providers} />
+          <FilterSelect label="Provider" value={provider} onChange={setProvider} options={choices.providers} />
           <FilterSelect
             label="Protocol"
             value={protocol}
             onChange={setProtocol}
-            options={filters.protocols.map((value) => ({ value, label: protocolLabel(value) }))}
+            options={choices.protocols.map((value) => ({ value, label: protocolLabel(value) }))}
           />
-          <FilterSelect label="Health" value={status} onChange={setStatus} options={filters.statuses} />
+          <FilterSelect label="Health" value={status} onChange={setStatus} options={choices.statuses} />
         </FilterBar>
 
         <DataTable
@@ -253,6 +291,8 @@ function shortTime(value) {
 }
 
 function ModelDrawer({ model, onClose }) {
+  const routable = model ? isRoutable(model) : false;
+
   return (
     <Drawer
       open={Boolean(model)}
@@ -264,7 +304,9 @@ function ModelDrawer({ model, onClose }) {
         <div className="stack" style={{ gap: "var(--sp-4)" }}>
           <div className="row row--wrap">
             <HealthBadge status={model.status} />
-            <StatusBadge tone="neutral" dot={false}>{model.protocols.map(protocolLabel).join(", ")}</StatusBadge>
+            <StatusBadge tone="neutral" dot={false}>
+              {model.protocols.map(protocolLabel).join(", ") || "no protocol"}
+            </StatusBadge>
           </div>
 
           <dl className="dl">
@@ -287,7 +329,9 @@ function ModelDrawer({ model, onClose }) {
             <dd className="dl__desc"><HealthBadge status={model.status} /></dd>
 
             <dt className="dl__term">Score</dt>
-            <dd className="dl__desc mono">{Math.round(model.score)} / 100</dd>
+            <dd className="dl__desc mono">
+              {Number.isFinite(model.score) ? `${Math.round(model.score)} / 100` : EMPTY}
+            </dd>
 
             <dt className="dl__term">Latency</dt>
             <dd className="dl__desc"><LatencyBadge ms={model.latencyMs} /></dd>
@@ -307,11 +351,21 @@ function ModelDrawer({ model, onClose }) {
             <dt className="dl__term">Last reason</dt>
             <dd className="dl__desc">{model.lastReason || <span className="dim">none recorded</span>}</dd>
 
-            <dt className="dl__term">Cooldown until</dt>
+            <dt className="dl__term">Routing availability</dt>
             <dd className="dl__desc">
-              {model.cooldownUntil > Date.now()
-                ? formatDateTime(model.cooldownUntil)
-                : <span className="dim">not cooling down</span>}
+              {routable ? (
+                <span className="row" style={{ gap: 6 }}>
+                  <StatusBadge tone="ok">routable</StatusBadge>
+                  <span className="tiny dim">the router may select this target</span>
+                </span>
+              ) : (
+                <span className="row" style={{ gap: 6 }}>
+                  <StatusBadge tone="warn">cooling down</StatusBadge>
+                  <span className="tiny dim">
+                    excluded from routing until {formatDateTime(model.cooldownUntil)}
+                  </span>
+                </span>
+              )}
             </dd>
 
             <dt className="dl__term">Updated</dt>

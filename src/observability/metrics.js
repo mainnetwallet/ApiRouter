@@ -31,6 +31,7 @@ export function percentile(values, p) {
 
 export function summarizeHealth(healthEntries = []) {
   const counts = { total: 0, healthy: 0, cooldown: 0, failed: 0, unknown: 0 };
+  const latencies = [];
 
   for (const entry of healthEntries) {
     counts.total += 1;
@@ -39,9 +40,20 @@ export function summarizeHealth(healthEntries = []) {
     else if (status === "cooldown") counts.cooldown += 1;
     else if (status === "failed") counts.failed += 1;
     else counts.unknown += 1;
+
+    if (Number.isFinite(entry?.latencyMs)) latencies.push(entry.latencyMs);
   }
 
-  return counts;
+  return {
+    ...counts,
+    // Targets the router can currently route to. `describe()` derives `cooldown`
+    // from `cooldownUntil` at read time, so "not cooling down" is exactly the
+    // predicate `rankTargets`/`isAvailable` uses — the two can never disagree.
+    available: counts.total - counts.cooldown,
+    // Averaged only over targets that actually reported a latency. Dividing by
+    // `total` would let an unprobed target read as an instant one.
+    averageLatencyMs: average(latencies)
+  };
 }
 
 /**
