@@ -24,7 +24,7 @@ export function Sidebar({ path, open = false, onClose }) {
   }, [summary]);
 
   const badgeFor = (route) => {
-    if (route.path === "/health" && attentionCount) {
+    if (route.path === "/health-monitor" && attentionCount) {
       return <span className="nav-item__count" title={`${attentionCount} target(s) not healthy`}>{attentionCount}</span>;
     }
     return null;

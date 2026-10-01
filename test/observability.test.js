@@ -318,7 +318,26 @@ test("summarizeHealth counts every state including unknown", () => {
     { status: "failed" }, { status: "unknown" }, {}
   ]);
 
-  assert.deepEqual(summary, { total: 6, healthy: 2, cooldown: 1, failed: 1, unknown: 2 });
+  assert.deepEqual(summary, {
+    total: 6, healthy: 2, cooldown: 1, failed: 1, unknown: 2,
+    // 6 minus the single cooling-down target.
+    available: 5,
+    // No entry carried a latency, so this is unavailable rather than 0 ms.
+    averageLatencyMs: null
+  });
+});
+
+test("summarizeHealth averages latency over reporting targets only", () => {
+  const summary = summarizeHealth([
+    { status: "healthy", latencyMs: 100 },
+    { status: "healthy", latencyMs: 300 },
+    // An unprobed target must not count as an instant one.
+    { status: "unknown", latencyMs: null },
+    { status: "cooldown", latencyMs: 200 }
+  ]);
+
+  assert.equal(summary.averageLatencyMs, 200);
+  assert.equal(summary.available, 3);
 });
 
 test("summarizeRequests returns null rates when there is no traffic", () => {
