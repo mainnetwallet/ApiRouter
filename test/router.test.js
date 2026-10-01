@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildTargets, isProviderConfigured, loadConfig } from "../src/config.js";
+import { buildTargets, isProviderConfigured, loadConfig, resolveCloudflareBaseUrl } from "../src/config.js";
 import {
   RouteSession,
   SessionStore,
@@ -154,6 +154,23 @@ test("sticky session starts from the last successful target", async () => {
   }, undefined, session, health);
 
   assert.equal(tried[0], "b");});
+
+test("cloudflare needs an account id: base url is built from CLOUDFLARE_ACCOUNT_ID", () => {
+  const base = "https://api.cloudflare.com/client/v4/accounts/abc123/ai/v1";
+  assert.equal(resolveCloudflareBaseUrl("", "abc123"), base);
+  assert.equal(resolveCloudflareBaseUrl("", ""), "");
+  // A custom base url wins, and may use an {ACCOUNT_ID} placeholder.
+  assert.equal(resolveCloudflareBaseUrl("https://gw.example/v1/{ACCOUNT_ID}/x", "abc123"), "https://gw.example/v1/abc123/x");
+  assert.equal(resolveCloudflareBaseUrl("https://gw.example/custom", "abc123"), "https://gw.example/custom");
+
+  const withId = loadConfig({ CLOUDFLARE_API_KEYS: "tok", CLOUDFLARE_MODELS: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", CLOUDFLARE_ACCOUNT_ID: "abc123" });
+  assert.equal(withId.providers.cloudflare.baseUrl, base);
+  assert.equal(isProviderConfigured(withId.providers.cloudflare), true);
+
+  // Token without an account id is not routable (no way to build the URL).
+  const noId = loadConfig({ CLOUDFLARE_API_KEYS: "tok", CLOUDFLARE_MODELS: "m" });
+  assert.equal(isProviderConfigured(noId.providers.cloudflare), false);
+});
 
 test("provider is invalid when any required field is missing", () => {
   assert.equal(isProviderConfigured({

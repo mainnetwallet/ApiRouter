@@ -5,6 +5,23 @@ const PROVIDER_IDS = ["agentrouter", "gemini", "groq", "huggingface", "mistral",
 
 const split = (value) => String(value || "").split(",").map((v) => v.trim()).filter(Boolean);
 
+const CLOUDFLARE_API_ROOT = "https://api.cloudflare.com/client/v4/accounts";
+
+/**
+ * Cloudflare Workers AI is account-scoped: its OpenAI-compatible endpoint is
+ * `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1`, so an API
+ * token alone is not enough. Accept either a full CLOUDFLARE_BASE_URL (which may
+ * use an `{ACCOUNT_ID}` placeholder) or just CLOUDFLARE_ACCOUNT_ID.
+ */
+export function resolveCloudflareBaseUrl(baseUrl, accountId) {
+  const base = String(baseUrl || "").trim();
+  const account = String(accountId || "").trim();
+  if (base) {
+    return account ? base.replace(/\{\s*account[_-]?id\s*\}/gi, account) : base;
+  }
+  return account ? `${CLOUDFLARE_API_ROOT}/${encodeURIComponent(account)}/ai/v1` : "";
+}
+
 export function isProviderConfigured(provider) {
   return Boolean(provider && provider.apiKeys.length > 0 && provider.models.length > 0 && provider.baseUrl);
 }
@@ -37,7 +54,11 @@ export function loadConfig(env = process.env) {
     providers[id] = {
       apiKeys: split(env[key + "_API_KEYS"]),
       models: split(env[key + "_MODELS"]),
-      baseUrl: String(env[key + "_BASE_URL"] || "").trim(),
+      baseUrl: id === "cloudflare"
+        ? resolveCloudflareBaseUrl(env.CLOUDFLARE_BASE_URL, env.CLOUDFLARE_ACCOUNT_ID)
+        : String(env[key + "_BASE_URL"] || "").trim(),
+      // Cloudflare only: kept so the dashboard can say what is missing.
+      ...(id === "cloudflare" ? { accountId: String(env.CLOUDFLARE_ACCOUNT_ID || "").trim() } : {}),
       clientHeaders: id === "agentrouter" ? {
         originator: String(env.AGENTROUTER_ORIGINATOR || "").trim(),
         version: String(env.AGENTROUTER_VERSION || "").trim(),

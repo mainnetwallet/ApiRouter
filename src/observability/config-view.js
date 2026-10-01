@@ -41,7 +41,9 @@ function describeProvider(id, provider, targets) {
       : [
           provider.apiKeys.length === 0 ? "api keys" : null,
           provider.models.length === 0 ? "models" : null,
-          !provider.baseUrl ? "base url" : null
+          !provider.baseUrl
+            ? (id === "cloudflare" ? "account id (CLOUDFLARE_ACCOUNT_ID) or base url" : "base url")
+            : null
         ].filter(Boolean),
 
     baseUrl: provider.baseUrl || null,
@@ -106,7 +108,10 @@ export function describeEnvironment(config) {
       vars: [
         { name: `${prefix}_API_KEYS`, configured: provider.apiKeys.length > 0, kind: "secret" },
         { name: `${prefix}_MODELS`, configured: provider.models.length > 0, kind: "list" },
-        { name: `${prefix}_BASE_URL`, configured: Boolean(provider.baseUrl), kind: "url" }
+        { name: `${prefix}_BASE_URL`, configured: Boolean(provider.baseUrl), kind: "url" },
+        ...(id === "cloudflare"
+          ? [{ name: "CLOUDFLARE_ACCOUNT_ID", configured: Boolean(provider.accountId), kind: "id" }]
+          : [])
       ]
     };
   });
