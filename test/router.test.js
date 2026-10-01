@@ -163,13 +163,42 @@ test("cloudflare needs an account id: base url is built from CLOUDFLARE_ACCOUNT_
   assert.equal(resolveCloudflareBaseUrl("https://gw.example/v1/{ACCOUNT_ID}/x", "abc123"), "https://gw.example/v1/abc123/x");
   assert.equal(resolveCloudflareBaseUrl("https://gw.example/custom", "abc123"), "https://gw.example/custom");
 
-  const withId = loadConfig({ CLOUDFLARE_API_KEYS: "tok", CLOUDFLARE_MODELS: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", CLOUDFLARE_ACCOUNT_ID: "abc123" });
+  const withId = loadConfig({ CLOUDFLARE_API_KEYS: "tok", CLOUDFLARE_MODELS: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", CLOUDFLARE_ACCOUNT_IDS: "abc123" });
   assert.equal(withId.providers.cloudflare.baseUrl, base);
   assert.equal(isProviderConfigured(withId.providers.cloudflare), true);
 
   // Token without an account id is not routable (no way to build the URL).
   const noId = loadConfig({ CLOUDFLARE_API_KEYS: "tok", CLOUDFLARE_MODELS: "m" });
   assert.equal(isProviderConfigured(noId.providers.cloudflare), false);
+});
+
+test("cloudflare pairs each api key with its own account id", () => {
+  const cfg = loadConfig({
+    CLOUDFLARE_API_KEYS: "tok1,tok2",
+    CLOUDFLARE_ACCOUNT_IDS: "id1,id2",
+    CLOUDFLARE_MODELS: "@cf/a,@cf/b"
+  });
+  const targets = buildTargets(cfg.providers).filter((t) => t.provider === "cloudflare");
+  const url = (id) => `https://api.cloudflare.com/client/v4/accounts/${id}/ai/v1`;
+  assert.equal(targets.length, 4);
+  for (const t of targets) {
+    assert.equal(t.baseUrl, url(t.keyIndex === 0 ? "id1" : "id2"));
+    assert.equal(t.apiKey, t.keyIndex === 0 ? "tok1" : "tok2");
+  }
+
+  // One id shared by every key.
+  const shared = buildTargets(loadConfig({ CLOUDFLARE_API_KEYS: "t1,t2", CLOUDFLARE_ACCOUNT_IDS: "only", CLOUDFLARE_MODELS: "m" }).providers)
+    .filter((t) => t.provider === "cloudflare");
+  assert.deepEqual(shared.map((t) => t.baseUrl), [url("only"), url("only")]);
+
+  // More keys than ids: the key without an id is skipped, never paired with a guess.
+  const short = buildTargets(loadConfig({ CLOUDFLARE_API_KEYS: "t1,t2,t3", CLOUDFLARE_ACCOUNT_IDS: "a,b", CLOUDFLARE_MODELS: "m" }).providers)
+    .filter((t) => t.provider === "cloudflare");
+  assert.deepEqual(short.map((t) => [t.keyIndex, t.baseUrl]), [[0, url("a")], [1, url("b")]]);
+
+  // The singular name still works.
+  const single = loadConfig({ CLOUDFLARE_API_KEYS: "t", CLOUDFLARE_ACCOUNT_ID: "legacy", CLOUDFLARE_MODELS: "m" });
+  assert.equal(single.providers.cloudflare.baseUrl, url("legacy"));
 });
 
 test("provider is invalid when any required field is missing", () => {

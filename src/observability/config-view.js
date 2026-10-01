@@ -42,7 +42,7 @@ function describeProvider(id, provider, targets) {
           provider.apiKeys.length === 0 ? "api keys" : null,
           provider.models.length === 0 ? "models" : null,
           !provider.baseUrl
-            ? (id === "cloudflare" ? "account id (CLOUDFLARE_ACCOUNT_ID)" : "base url")
+            ? (id === "cloudflare" ? "account ids (CLOUDFLARE_ACCOUNT_IDS)" : "base url")
             : null
         ].filter(Boolean),
 
@@ -110,7 +110,7 @@ export function describeEnvironment(config) {
         { name: `${prefix}_MODELS`, configured: provider.models.length > 0, kind: "list" },
         ...(id === "cloudflare"
           // Cloudflare's URL is built from the account id, so that is what to set.
-          ? [{ name: "CLOUDFLARE_ACCOUNT_ID", configured: Boolean(provider.accountId), kind: "id" }]
+          ? [{ name: "CLOUDFLARE_ACCOUNT_IDS", configured: (provider.accountIds || []).length > 0, kind: "list" }]
           : [{ name: `${prefix}_BASE_URL`, configured: Boolean(provider.baseUrl), kind: "url" }])
       ]
     };

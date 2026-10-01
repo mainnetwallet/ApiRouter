@@ -22,6 +22,23 @@ export function resolveCloudflareBaseUrl(baseUrl, accountId) {
   return account ? `${CLOUDFLARE_API_ROOT}/${encodeURIComponent(account)}/ai/v1` : "";
 }
 
+/**
+ * Pairs each Cloudflare API key with its account id.
+ *   CLOUDFLARE_API_KEYS=key1,key2   CLOUDFLARE_ACCOUNT_IDS=id1,id2   -> key1/id1, key2/id2
+ * A single id is shared by every key (several tokens, one account). When there
+ * are several ids, a key with no matching id is skipped rather than guessed.
+ * CLOUDFLARE_ACCOUNT_ID (singular) is accepted as an alias.
+ */
+function applyCloudflareAccounts(provider, env) {
+  const accountIds = split(env.CLOUDFLARE_ACCOUNT_IDS || env.CLOUDFLARE_ACCOUNT_ID);
+  const accountFor = (keyIndex) => (accountIds.length === 1 ? accountIds[0] : accountIds[keyIndex] || "");
+  provider.accountIds = accountIds;
+  provider.baseUrls = provider.apiKeys.map((_, keyIndex) =>
+    resolveCloudflareBaseUrl(env.CLOUDFLARE_BASE_URL, accountFor(keyIndex)));
+  // First usable URL, for the "is this provider configured / what does it point at" views.
+  provider.baseUrl = provider.baseUrls.find(Boolean) || resolveCloudflareBaseUrl(env.CLOUDFLARE_BASE_URL, accountIds[0]);
+}
+
 export function isProviderConfigured(provider) {
   return Boolean(provider && provider.apiKeys.length > 0 && provider.models.length > 0 && provider.baseUrl);
 }
@@ -32,10 +49,13 @@ export function buildTargets(providers) {
     if (!isProviderConfigured(provider)) continue;
     for (const model of provider.models) {
       for (let keyIndex = 0; keyIndex < provider.apiKeys.length; keyIndex += 1) {
+        // Cloudflare keys each have their own account, hence their own URL.
+        const baseUrl = Array.isArray(provider.baseUrls) ? provider.baseUrls[keyIndex] : provider.baseUrl;
+        if (!baseUrl) continue;
         targets.push({
           provider: providerId,
           model,
-          baseUrl: provider.baseUrl,
+          baseUrl,
           apiKey: provider.apiKeys[keyIndex],
           protocols: providerProtocols(providerId),
           clientHeaders: provider.clientHeaders || {},
@@ -54,11 +74,7 @@ export function loadConfig(env = process.env) {
     providers[id] = {
       apiKeys: split(env[key + "_API_KEYS"]),
       models: split(env[key + "_MODELS"]),
-      baseUrl: id === "cloudflare"
-        ? resolveCloudflareBaseUrl(env.CLOUDFLARE_BASE_URL, env.CLOUDFLARE_ACCOUNT_ID)
-        : String(env[key + "_BASE_URL"] || "").trim(),
-      // Cloudflare only: kept so the dashboard can say what is missing.
-      ...(id === "cloudflare" ? { accountId: String(env.CLOUDFLARE_ACCOUNT_ID || "").trim() } : {}),
+      baseUrl: id === "cloudflare" ? "" : String(env[key + "_BASE_URL"] || "").trim(),
       clientHeaders: id === "agentrouter" ? {
         originator: String(env.AGENTROUTER_ORIGINATOR || "").trim(),
         version: String(env.AGENTROUTER_VERSION || "").trim(),
@@ -66,6 +82,7 @@ export function loadConfig(env = process.env) {
       } : {}
     };
   }
+  applyCloudflareAccounts(providers.cloudflare, env);
   const retryableValues = split(env.RETRY_STATUS_CODES || DEFAULT_RETRY_STATUS_CODES.join(","))
     .map(Number).filter((v) => Number.isInteger(v) && v >= 100 && v <= 599);
   return {
