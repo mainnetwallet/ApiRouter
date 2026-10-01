@@ -96,6 +96,41 @@ test("failed key is cooled down without disabling sibling keys", async () => {
   assert.ok(health.ensureTarget(targets[0]).cooldownUntil > Date.now());
 });
 
+test("a quota failure cools down every model on the same provider key, not other keys or providers", async () => {
+  const targets = [
+    { provider: "agentrouter", model: "opus", keyIndex: 0 },
+    { provider: "agentrouter", model: "deepseek", keyIndex: 0 },
+    { provider: "agentrouter", model: "opus", keyIndex: 1 },
+    { provider: "gemini", model: "flash", keyIndex: 0 }
+  ];
+  const health = new HealthRegistry({ cooldownMs: 900000 });
+  const tried = [];
+
+  const result = await withFallback(
+    targets,
+    async (target) => {
+      tried.push(`${target.provider}:${target.model}:${target.keyIndex}`);
+      if (target.provider === "agentrouter" && target.keyIndex === 0) {
+        const err = new Error("Budget pool quota has been exhausted");
+        err.status = 402;
+        throw err;
+      }
+      return "ok";
+    },
+    undefined,
+    new RouteSession(),
+    health
+  );
+
+  assert.equal(result, "ok");
+  // Only one model of the exhausted key was tried; its sibling model was skipped.
+  assert.equal(tried.filter((t) => t.endsWith(":0") && t.startsWith("agentrouter")).length, 1);
+  assert.equal(health.isAvailable(targets[0]), false);
+  assert.equal(health.isAvailable(targets[1]), false);
+  // A different key on the same provider is unaffected.
+  assert.equal(health.isAvailable(targets[2]), true);
+});
+
 test("sticky session starts from the last successful target", async () => {
   const targets = [
     { provider: "a", model: "m1", keyIndex: 0 },

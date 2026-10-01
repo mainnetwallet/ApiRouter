@@ -6,6 +6,10 @@ const DEFAULT_RETRY_STATUS_CODES = new Set([401, 402, 403, 404, 408, 409, 425, 4
 // an unbounded map would grow without limit on a long-running gateway.
 const DEFAULT_MAX_SESSIONS = 10000;
 
+// These statuses describe the API key / account, not the model: once one
+// model rejects a key, every other model on that provider + key will too.
+const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
+
 export function isRetryableStatus(status, retryableStatus = DEFAULT_RETRY_STATUS_CODES) {
   return retryableStatus.has(Number(status));
 }
@@ -142,6 +146,19 @@ export async function withFallback(
         }
 
         health.markFailure(target, status);
+
+        // Quota/auth failures hit the whole key. Cool the sibling models on the
+        // same provider + key down too, so this request (and the next ones)
+        // skip them instead of burning time on a guaranteed failure or a hang.
+        if (KEY_LEVEL_STATUS_CODES.has(status)) {
+          const reason = `${status} on ${target.model} applies to the whole key`;
+          for (const sibling of plan.flat()) {
+            if (sibling === target) continue;
+            if (sibling.provider !== target.provider || sibling.keyIndex !== target.keyIndex) continue;
+            if (health.key(sibling) === health.key(target)) continue;
+            health.markFailure(sibling, status, { reason });
+          }
+        }
       }
     }
   }
