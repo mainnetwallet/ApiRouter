@@ -19,10 +19,18 @@ import { formatLatency, protocolLabel, providerLabel, EMPTY } from "../lib/forma
  *
  * Every value on this page is produced by the backend. The pipeline, the
  * candidate list, the ranking and the selected target all come from
- * `/api/router/preview`, which runs the same `selectRouteTargets` and
- * `healthRegistry.rank` calls the live proxy runs. The frontend performs no
- * routing arithmetic of its own — it cannot, because it has no copy of the
- * rule to drift out of date.
+ * `/api/router/preview`, which runs the same selection the live proxy runs:
+ *
+ *   1. a protocol-specific bridge selector picks the reachable targets —
+ *      `selectBridgeTargets` (Anthropic), `selectCodexTargets` (Responses),
+ *      `selectChatTargets` (Chat) or `selectGeminiTargets` (Gemini);
+ *   2. `fallbackGroups` splits those into the requested model's targets and
+ *      the different-model fallbacks, in the order they will be walked;
+ *   3. health score and the session's sticky target order the targets *inside*
+ *      each group, never across the boundary.
+ *
+ * The frontend performs no routing arithmetic of its own — it cannot, because
+ * it has no copy of the rule to drift out of date.
  */
 export default function RouterControl() {
   const { targets: healthTargets } = useHealth();
