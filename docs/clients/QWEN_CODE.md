@@ -58,6 +58,19 @@ fallback on retryable failure
 
 Provider API keys stay inside the router.
 
+## Fallback
+
+An exact match for the requested model is tried first and the remaining
+reachable targets follow. Qwen Code reaches chat-completions providers directly
+and Gemini providers through the router's translation bridge, so a Gemini-only
+configuration serves Qwen Code too.
+
+On a bridged (Gemini) request these are dropped rather than guessed at:
+
+- tools that are not `type: "function"` (hosted/built-in tools have no
+  `generateContent` equivalent);
+- remote image URLs — only base64 `data:` URLs are forwarded.
+
 ## Security
 
 Keep real keys in `.env`. Never commit provider or router credentials.

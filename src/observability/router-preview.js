@@ -1,11 +1,14 @@
-import { selectRouteTargets, planFallbackOrder } from "./route-select.js";
+import { selectTargetsForProtocol, planFallbackOrder } from "./route-select.js";
+
+/** Client protocols whose requests can be bridged to a non-native provider. */
+const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses"]);
 
 /**
  * A faithful, read-only rendering of the decision the router makes for a given
  * request shape.
  *
  * This deliberately contains no routing policy of its own. Target selection
- * comes from `selectRouteTargets` and ranking from the caller's health
+ * comes from `selectTargetsForProtocol` and ranking from the caller's health
  * registry — the same code the live proxy path executes. The frontend is
  * therefore unable to show a route the router would not actually take.
  *
@@ -36,8 +39,9 @@ function describeCandidate(target, health, { rank = null, available, status }) {
 }
 
 export function describeRouting({ targets = [], config, health, protocol, model = "", stickyTargetId = null, now = Date.now() } = {}) {
-  const selection = selectRouteTargets(targets, protocol, model);
+  const selection = selectTargetsForProtocol(targets, protocol, model);
   const { compatible, exact, selected, modelMatched } = selection;
+  const bridged = BRIDGED_PROTOCOLS.has(protocol);
 
   const ranked = health.rank(selected, now);
   const rankedIds = new Set(ranked.map((target) => health.key(target)));
@@ -99,8 +103,10 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     },
     {
       key: "compatible",
-      label: "Compatible targets",
-      detail: `${compatible.length} of ${targets.length} targets support this protocol`,
+      label: bridged ? "Reachable targets" : "Compatible targets",
+      detail: bridged
+        ? `${compatible.length} of ${targets.length} targets reachable (native or bridged)`
+        : `${compatible.length} of ${targets.length} targets support this protocol`,
       count: compatible.length,
       state: compatible.length === 0 ? "error" : "ok"
     },
@@ -128,7 +134,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     {
       key: "ranking",
       label: "Ranking",
-      detail: "ordered by health score, then provider, model and key index",
+      detail: "ordered by health score; ties keep the caller's order (exact model match first)",
       count: ranked.length,
       state: "info"
     },

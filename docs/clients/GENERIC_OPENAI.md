@@ -49,4 +49,13 @@ curl.exe http://127.0.0.1:8788/v1/chat/completions `
 
 The router handles health ranking and fallback while provider keys stay server-side.
 
+A chat-completions provider is called directly. A Gemini provider is reached
+through the router's translation bridge, so a Gemini-only configuration still
+serves any OpenAI-compatible client. On such a bridged request, tools that are
+not `type: "function"` are dropped (they have no `generateContent` equivalent)
+and only base64 `data:` image URLs are forwarded.
+
+An exact match for the requested model is tried first, then the remaining
+reachable targets; a retryable failure moves the request to the next one.
+
 Clients such as Cursor, Cline, Roo Code, Continue, Qwen Code and similar tools can use the same endpoint when they support custom OpenAI-compatible providers.

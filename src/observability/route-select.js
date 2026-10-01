@@ -1,10 +1,14 @@
+import { bridgeProtocol, selectBridgeTargets } from "../anthropic-bridge.js";
+import { codexProtocol, selectCodexTargets } from "../codex-bridge.js";
+import { chatProtocol, selectChatTargets } from "../chat-bridge.js";
+
 /**
  * The gateway's target-selection rule, in one place.
  *
  * This logic previously lived inline in `proxy()`. It is extracted here so the
  * routing preview can report the decision the router will *actually* make
  * rather than a re-implementation that could silently drift from it. Both the
- * proxy path and `/api/router/preview` call `selectRouteTargets`.
+ * proxy path and `/api/router/preview` call `selectTargetsForProtocol`.
  *
  * The rule, in order:
  *   1. Only targets declaring the client's protocol are candidates.
@@ -37,6 +41,37 @@ export function selectRouteTargets(targets, protocol, requestedModel) {
     exact,
     selected: exact.length > 0 ? exact : compatible
   };
+}
+
+/**
+ * The selector the proxy and the preview must agree on, chosen by the *client*
+ * protocol. Claude Code (anthropic), Codex (Responses) and chat clients each
+ * have a bridge, so their candidate set is every target they can reach natively
+ * or by translation. The Gemini client protocol has no bridge, so it keeps the
+ * strict "declares the protocol" rule.
+ */
+export function selectTargetsForProtocol(targets, protocol, requestedModel) {
+  if (protocol === "anthropic") return selectBridgeTargets(targets, requestedModel);
+  if (protocol === "openai-responses") return selectCodexTargets(targets, requestedModel);
+  if (protocol === "openai-chat") return selectChatTargets(targets, requestedModel);
+  return selectRouteTargets(targets, protocol, requestedModel);
+}
+
+/**
+ * Client protocols the gateway can actually serve, given its targets. A bridged
+ * protocol is servable whenever any target is reachable through its bridge,
+ * even if no target declares that protocol natively.
+ */
+export function servableProtocols(targets) {
+  const all = Array.isArray(targets) ? targets : [];
+  const protocols = new Set();
+  for (const target of all) {
+    for (const protocol of target.protocols ?? []) protocols.add(protocol);
+  }
+  if (all.some((target) => bridgeProtocol(target))) protocols.add("anthropic");
+  if (all.some((target) => codexProtocol(target))) protocols.add("openai-responses");
+  if (all.some((target) => chatProtocol(target))) protocols.add("openai-chat");
+  return protocols;
 }
 
 /**
