@@ -47,6 +47,21 @@ OpenCode uses:
 POST /v1/chat/completions
 ```
 
+## Fallback
+
+Targets are health-ranked, so a request moves to the next available target on a
+retryable failure. A chat-completions provider is called directly; a Gemini
+provider is reached through the router's translation bridge, so a Gemini-only
+setup still works.
+
+Two limits apply to bridged (Gemini) targets:
+
+- tools are forwarded only when they are `type: "function"`; hosted/built-in
+  tools have no `generateContent` equivalent and are dropped;
+- remote image URLs are dropped; only base64 `data:` URLs are forwarded.
+
+## Security
+
 Keep provider keys inside the router.
 
 Reference: https://opencode.ai/docs/providers

@@ -21,6 +21,9 @@ This pattern can work with clients that support a custom OpenAI-compatible provi
 
 Set the custom base URL and use the MultiAI Router gateway key if authentication is enabled.
 
+Chat completions reach any provider configured with a chat-completions endpoint
+directly, and a Gemini provider through the router's translation bridge.
+
 ## Anthropic-compatible
 
 Clients using the Anthropic Messages protocol should use:
@@ -29,6 +32,16 @@ Clients using the Anthropic Messages protocol should use:
 http://127.0.0.1:8788
 ```
 
-The router only falls back between targets compatible with the requested protocol.
+## Fallback
+
+Requests are health-ranked, an exact match for the requested model is tried
+first, and a retryable failure moves the request to the next reachable target.
+
+Falling back is no longer limited to targets that speak the client's own
+protocol. Claude Code (`/v1/messages`) and Codex (`/v1/responses`) can fall
+back to **any** configured provider — chat-only or Gemini — through a
+translation bridge, and a chat client can fall back to a Gemini provider the
+same way. See [CLIENTS.md](CLIENTS.md) for the protocol-by-provider matrix and
+the content a bridged request drops.
 
 For exact client configuration, use the client's own documentation.
