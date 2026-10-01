@@ -7,12 +7,24 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:ui": "vitest run --config ui/vite.config.js",
+    "test:all": "npm test && npm run test:ui",
+    "ui:dev": "vite --config ui/vite.config.js",
+    "ui:build": "vite build --config ui/vite.config.js",
+    "ui:preview": "vite preview --config ui/vite.config.js"
   },
   "dependencies": {
-    "dotenv": "^17.2.2"
+    "dotenv": "^17.2.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.3"
   }
 }

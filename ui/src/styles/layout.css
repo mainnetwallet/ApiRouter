@@ -1,0 +1,299 @@
+/* App shell: sidebar, header, content, responsive navigation. */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-rows: var(--header-height) 1fr;
+  grid-template-areas:
+    "brand header"
+    "sidebar main";
+  height: 100%;
+}
+
+/* --- Brand ---------------------------------------------------------------- */
+
+.brand {
+  grid-area: brand;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  min-width: 0;
+}
+
+.brand__mark {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  color: var(--ok);
+}
+
+.brand__name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Header --------------------------------------------------------------- */
+
+.header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  min-width: 0;
+}
+
+.header__title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.header__spacer { flex: 1 1 auto; }
+
+.header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* --- Sidebar -------------------------------------------------------------- */
+
+.sidebar {
+  grid-area: sidebar;
+  border-right: 1px solid var(--border);
+  background: var(--bg-surface);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--sp-2) 0 var(--sp-4);
+}
+
+.nav-group {
+  padding: var(--sp-3) var(--sp-3) var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: 7px var(--sp-3);
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.nav-item[aria-current="page"] {
+  background: var(--accent-dim);
+  border-left-color: var(--accent);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.nav-item__icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  opacity: 0.85;
+}
+
+.nav-item__label {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-item__count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+/* --- Main ----------------------------------------------------------------- */
+
+.main {
+  grid-area: main;
+  overflow-y: auto;
+  padding: var(--sp-4) var(--sp-5) var(--sp-10);
+  min-width: 0;
+}
+
+.page {
+  max-width: 1500px;
+  margin: 0 auto;
+}
+
+.page__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-4);
+}
+
+.page__heading { min-width: 0; }
+
+.page__title {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.page__subtitle {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  margin-top: 2px;
+}
+
+.page__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.section {
+  margin-bottom: var(--sp-5);
+}
+
+.section__header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+
+.section__title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.section__actions { margin-left: auto; display: flex; gap: var(--sp-2); }
+
+.split {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.split--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.split--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.split--sidebar { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+
+/* --- Mobile navigation ---------------------------------------------------- */
+
+.mobile-bar {
+  display: none;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: calc(var(--z-drawer) - 1);
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+/* --- Responsive ----------------------------------------------------------- */
+
+/* Tablet: the sidebar collapses to icons. */
+@media (max-width: 1100px) {
+  .app {
+    grid-template-columns: var(--sidebar-collapsed) 1fr;
+  }
+
+  .brand__name,
+  .nav-item__label,
+  .nav-item__count,
+  .nav-group {
+    display: none;
+  }
+
+  .brand { justify-content: center; padding: 0; }
+  .nav-item { justify-content: center; padding: 10px 0; }
+  .split--3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Mobile: the sidebar becomes an overlay drawer. */
+@media (max-width: 720px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "header"
+      "main";
+  }
+
+  .brand { display: none; }
+  .header { padding: 0 var(--sp-3); }
+  .mobile-bar { display: flex; }
+  .main { padding: var(--sp-3) var(--sp-3) var(--sp-10); }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(84vw, var(--sidebar-width));
+    z-index: var(--z-drawer);
+    box-shadow: var(--shadow-overlay);
+    transform: translateX(-100%);
+    transition: transform var(--transition);
+  }
+
+  .sidebar[data-open="true"] { transform: translateX(0); }
+
+  /* Labels come back inside the mobile drawer. */
+  .sidebar .brand__name,
+  .sidebar .nav-item__label,
+  .sidebar .nav-item__count,
+  .sidebar .nav-group {
+    display: block;
+  }
+  .sidebar .nav-item { justify-content: flex-start; padding: 9px var(--sp-3); }
+  .sidebar .nav-group { padding: var(--sp-3) var(--sp-3) var(--sp-1); }
+
+  .split--2,
+  .split--3,
+  .split--sidebar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .page__actions { margin-left: 0; width: 100%; }
+}
