@@ -10,6 +10,8 @@ const DEFAULT_MAX_SESSIONS = 10000;
 // model rejects a key, every other model on that provider + key will too.
 const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 
+const SIZE_LIMIT_COOLDOWN_MS = 60 * 1000;
+
 export function isRetryableStatus(status, retryableStatus = DEFAULT_RETRY_STATUS_CODES) {
   return retryableStatus.has(Number(status));
 }
@@ -145,7 +147,9 @@ export async function withFallback(
           throw error;
         }
 
-        health.markFailure(target, status);
+        // A 413 depends on the size of this one request (per-minute token caps
+        // reset quickly), so cool the target down briefly, not for 15 minutes.
+        health.markFailure(target, status, status === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : {});
 
         // Quota/auth failures hit the whole key. Cool the sibling models on the
         // same provider + key down too, so this request (and the next ones)

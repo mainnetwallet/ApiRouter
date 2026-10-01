@@ -368,6 +368,25 @@ test("MAX_REQUEST_BODY_MB controls the largest accepted request body", async (t)
   assert.equal(res.status, 413);
 });
 
+test("an upstream 413 (provider size/TPM limit) falls back to the next target", async (t) => {
+  let calls = 0;
+  const { upstream, router } = await withRig(
+    t,
+    () => (++calls === 1
+      ? { status: 413, body: { error: { message: "Request too large for model on tokens per minute" } } }
+      : { status: 200, body: { id: "x", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] } }),
+    (u) => ({
+      GROQ_API_KEYS: "k0,k1",
+      GROQ_MODELS: "m",
+      GROQ_BASE_URL: u.baseUrl
+    })
+  );
+
+  const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [] }));
+  assert.equal(res.status, 200);
+  assert.equal(upstream.apiRequests.length, 2);
+});
+
 // ---------------------------------------------------------------------------
 // Sticky sessions
 // ---------------------------------------------------------------------------

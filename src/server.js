@@ -339,6 +339,11 @@ async function proxy(req, res, protocol, pathname) {
             const text = await upstream.text();
             const error = new Error(text.slice(0, 2000) || ("Upstream HTTP " + upstream.status));
             error.status = upstream.status;
+            // An upstream 413 means this provider/tier cannot take a request of
+            // this size (e.g. a small tokens-per-minute cap). Another provider
+            // may well accept it, so fall back instead of failing the request.
+            // (The router's own body-limit 413 is raised before routing starts.)
+            if (upstream.status === 413) error.retryable = true;
             attempt(false, upstream.status, error.message);
             throw error;
           }
