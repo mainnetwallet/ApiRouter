@@ -521,3 +521,85 @@ test("with groups omitted, the whole target list is one tier", async () => {
   // No grouping was requested, so ranking alone decides — the pre-grouping behaviour.
   assert.deepEqual(attempted, ["model-B"]);
 });
+
+// ---------------------------------------------------------------------------
+// Non-retryable failures on the exact tier
+//
+// A deliberate policy consequence of exact-model-first, locked down here: a
+// 401/403 from the requested model's own provider means the request is
+// misconfigured for that provider, so it fails with that status rather than
+// being silently served by a different model. Changing this is a product
+// decision, not a refactor.
+// ---------------------------------------------------------------------------
+
+for (const status of [401, 403]) {
+  test(`a ${status} on the exact tier is returned unchanged and never reaches the fallback`, async () => {
+    const exact = target("p1", "model-A");
+    const fallback = target("p2", "model-B");
+    const health = new HealthRegistry();
+    const attempted = [];
+
+    await assert.rejects(
+      () => route(selectionFor([exact, fallback], "model-A"), {
+        health,
+        invoke: async (t) => {
+          attempted.push(`${t.provider}:${t.model}`);
+          const error = new Error("invalid api key");
+          error.status = status;
+          throw error;
+        }
+      }),
+      (error) => error.status === status
+    );
+
+    assert.deepEqual(attempted, ["p1:model-A"], "the fallback must not be attempted");
+    assert.equal(health.isAvailable(exact), true, "a non-retryable failure must not cool the target down");
+  });
+}
+
+test("a non-retryable exact failure does not fall through to another exact target", async () => {
+  const first = target("p1", "model-A");
+  const second = target("p2", "model-A");
+  const fallback = target("p3", "model-B");
+  const health = new HealthRegistry();
+  const attempted = [];
+
+  await assert.rejects(
+    () => route(selectionFor([first, second, fallback], "model-A"), {
+      health,
+      invoke: async (t) => {
+        attempted.push(`${t.provider}:${t.model}`);
+        const error = new Error("forbidden");
+        error.status = 403;
+        throw error;
+      }
+    }),
+    (error) => error.status === 403
+  );
+
+  assert.deepEqual(attempted, ["p1:model-A"], "a non-retryable status stops the walk immediately");
+});
+
+test("an explicitly retryable error on the exact tier still falls through", async () => {
+  // The contrast case: the escape hatch keeps working alongside the tests above.
+  const exact = target("p1", "model-A");
+  const fallback = target("p2", "model-B");
+  const health = new HealthRegistry();
+  const attempted = [];
+
+  const { result } = await route(selectionFor([exact, fallback], "model-A"), {
+    health,
+    invoke: async (t) => {
+      attempted.push(`${t.provider}:${t.model}`);
+      if (t.model === "model-A") {
+        const error = new Error("quota");
+        error.status = 402;
+        throw error;
+      }
+      return { t };
+    }
+  });
+
+  assert.deepEqual(attempted, ["p1:model-A", "p2:model-B"]);
+  assert.equal(result.t.model, "model-B");
+});
