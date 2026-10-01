@@ -49,18 +49,25 @@ as follows:
 | Gemini | Forwarded to the chat provider |
 | --- | --- |
 | `mode: "NONE"` | `tool_choice: "none"` |
-| `mode: "ANY"`, one allowed function | `tool_choice: {type: "function", function: {name}}` |
-| `mode: "ANY"`, several allowed functions | `tool_choice: "required"`, with only the allowed declarations forwarded |
-| `mode: "ANY"`, empty or undeclared names | `tool_choice: "required"`, all declarations forwarded |
+| `mode: "ANY"`, one allowed function that the request declares | `tool_choice: {type: "function", function: {name}}` |
+| `mode: "ANY"`, several allowed functions, all declared | `tool_choice: "required"`, with only the allowed declarations forwarded |
+| `mode: "ANY"`, empty list, or names the request does not declare | `tool_choice: "required"`, all declarations forwarded |
+| `mode: "ANY"`, but the request declares no tools at all | no `tool_choice`, no tools |
 | `mode: "AUTO"` with allowed names | the default choice, with only the allowed declarations forwarded |
 
 OpenAI-compatible APIs can express "call *some* function" but not "call one of
 exactly these N". When several functions are allowed the bridge keeps the
 restriction by forwarding only the allowed declarations, so a `required` choice
 can only select among them — the upstream request means the same thing as the
-original. When the restriction cannot be represented (an empty list, or a name
-with no matching declaration to send), the bridge falls back to `required` and
-drops the name restriction; the model is still told it must call a tool.
+original.
+
+When the restriction cannot be represented, the bridge falls back to `required`
+and drops the name restriction; the model is still told it must call a tool. A
+function name the request never declares is never invented or forwarded as an
+exact choice, because providers reject a `tool_choice` naming an unknown
+function. And when there is nothing callable at all, no choice is sent: `required`
+with an empty tool list is a contradictory request, so the bridge leaves the
+choice unset rather than assert something the request cannot support.
 
 ## Fallback
 
