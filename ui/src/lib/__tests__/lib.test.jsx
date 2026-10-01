@@ -189,11 +189,12 @@ describe("error taxonomy", () => {
     expect([...labels]).not.toContain("Offline");
   });
 
-  it("marks only transient statuses retryable", () => {
+  it("marks transient and provider-side failures retryable", () => {
     expect(isRetryableStatus(429)).toBe(true);
     expect(isRetryableStatus(503)).toBe(true);
-    expect(isRetryableStatus(401)).toBe(false);
+    expect(isRetryableStatus(401)).toBe(true);
     expect(isRetryableStatus(402)).toBe(true);
+    expect(isRetryableStatus(400)).toBe(false);
     expect(isRetryableStatus(200)).toBe(false);
   });
 

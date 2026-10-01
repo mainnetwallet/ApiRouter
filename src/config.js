@@ -1,6 +1,6 @@
 import { providerProtocols } from "./adapters.js";
 
-const DEFAULT_RETRY_STATUS_CODES = [402, 408, 429, 500, 502, 503, 504];
+const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529];
 const PROVIDER_IDS = ["agentrouter", "gemini", "groq", "huggingface", "mistral", "openrouter", "cerebras", "cloudflare", "sambanova", "cohere", "zai"];
 
 const split = (value) => String(value || "").split(",").map((v) => v.trim()).filter(Boolean);

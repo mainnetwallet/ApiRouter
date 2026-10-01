@@ -348,7 +348,12 @@ async function proxy(req, res, protocol, pathname) {
           }
           // A transport-level rejection (DNS, TLS, socket) records here; an
           // HTTP error status was already recorded above.
-          if (!recorded) attempt(false, Number(error?.status) || null, error?.message);
+          if (!recorded) {
+            attempt(false, Number(error?.status) || null, error?.message);
+            // No HTTP status means the provider never answered (DNS, refused or
+            // reset connection, TLS). Another target may well succeed.
+            if (error && typeof error === "object" && !Number.isInteger(error.status)) error.retryable = true;
+          }
           throw error;
         } finally { clearTimeout(timer); }
       },
