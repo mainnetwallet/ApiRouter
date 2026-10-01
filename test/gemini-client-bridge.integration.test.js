@@ -360,3 +360,120 @@ test("the routing preview serves gemini when only a chat target is configured", 
   assert.ok(body.selected, "the preview must show the target the proxy would really use");
   assert.equal(body.selected.provider, "groq");
 });
+
+// ---------------------------------------------------------------------------
+// Exact-model-first ordering, over HTTP
+//
+// `selectGeminiTargets` puts the requested model first, but the ordering is
+// only real if the proxy keeps it: health ranking and the session's sticky
+// target both used to be able to promote a *different* model ahead of an exact
+// match that was available. These two tests drive the live HTTP path.
+// ---------------------------------------------------------------------------
+
+test("an exact model match is served before the session's sticky fallback", async (t) => {
+  const exact = await startMockUpstream(() => chatOk("from-exact"));
+  const other = await startMockUpstream(() => chatOk("from-other"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "k1",
+    GROQ_MODELS: "wanted-model",
+    GROQ_BASE_URL: exact.baseUrl,
+    OPENROUTER_API_KEYS: "k2",
+    OPENROUTER_MODELS: "other-model",
+    OPENROUTER_BASE_URL: other.baseUrl
+  });
+  t.after(async () => {
+    await router.close();
+    await exact.close();
+    await other.close();
+  });
+
+  const session = { "x-multi-ai-session-id": "sticky-session" };
+
+  // 1. Ask for a model only the fallback serves, so the session's sticky
+  //    target becomes the other-model provider.
+  const first = await router.request("/v1beta/models/other-model:generateContent", postJson(ask, session));
+  assert.equal(first.status, 200);
+  assert.equal(other.apiRequests.length, 1);
+
+  // 2. Now ask for the exact model. The sticky target is still the fallback,
+  //    but an available exact match outranks it.
+  const second = await router.request("/v1beta/models/wanted-model:generateContent", postJson(ask, session));
+
+  assert.equal(second.status, 200);
+  assert.equal((await second.json()).candidates[0].content.parts[0].text, "from-exact");
+  assert.equal(exact.apiRequests.length, 1, "the exact model must be tried");
+  assert.equal(other.apiRequests.length, 1, "the sticky fallback must not be reached while an exact match is available");
+});
+
+test("a failing exact target is followed by the different-model fallback tier", async (t) => {
+  const exact = await startMockUpstream(() => ({ status: 500, body: { error: { message: "boom" } } }));
+  const fallback = await startMockUpstream(() => chatOk("from-fallback"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "k1",
+    GROQ_MODELS: "wanted-model",
+    GROQ_BASE_URL: exact.baseUrl,
+    OPENROUTER_API_KEYS: "k2",
+    OPENROUTER_MODELS: "other-model",
+    OPENROUTER_BASE_URL: fallback.baseUrl
+  });
+  t.after(async () => {
+    await router.close();
+    await exact.close();
+    await fallback.close();
+  });
+
+  const res = await router.request("/v1beta/models/wanted-model:generateContent", postJson(ask));
+
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).candidates[0].content.parts[0].text, "from-fallback");
+  // The exact target went first and was exhausted; only then was the
+  // different model reached.
+  assert.equal(exact.apiRequests.length, 1);
+  assert.equal(fallback.apiRequests.length, 1);
+  assert.equal(fallback.apiRequests[0].body.model, "other-model");
+});
+
+test("the routing preview predicts the order the proxy walks under sticky pressure", async (t) => {
+  const exact = await startMockUpstream(() => chatOk("from-exact"));
+  const other = await startMockUpstream(() => chatOk("from-other"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "k1",
+    GROQ_MODELS: "wanted-model",
+    GROQ_BASE_URL: exact.baseUrl,
+    OPENROUTER_API_KEYS: "k2",
+    OPENROUTER_MODELS: "other-model",
+    OPENROUTER_BASE_URL: other.baseUrl
+  });
+  t.after(async () => {
+    await router.close();
+    await exact.close();
+    await other.close();
+  });
+
+  // Make the other-model target the sticky one, exactly as a real session would.
+  await router.request(
+    "/v1beta/models/other-model:generateContent",
+    postJson(ask, { "x-multi-ai-session-id": "preview-session" })
+  );
+
+  const res = await router.request(
+    "/api/router/preview?protocol=gemini&model=wanted-model&session=openrouter:other-model:key-0"
+  );
+  assert.equal(res.status, 200);
+  const body = await res.json();
+
+  // What the preview shows ...
+  assert.equal(body.selected.provider, "groq");
+  assert.equal(body.fallbackOrder[0].provider, "groq", "the exact match must lead the previewed order");
+  assert.equal(body.fallbackOrder.at(-1).provider, "openrouter");
+
+  // ... is what the proxy does.
+  const served = await router.request(
+    "/v1beta/models/wanted-model:generateContent",
+    postJson(ask, { "x-multi-ai-session-id": "preview-session" })
+  );
+  assert.equal(served.status, 200);
+  assert.equal((await served.json()).candidates[0].content.parts[0].text, "from-exact");
+  assert.equal(exact.apiRequests.length, 1);
+  assert.equal(other.apiRequests.length, 1, "the sticky target must not receive a second request");
+});

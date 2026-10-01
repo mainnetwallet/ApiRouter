@@ -68,64 +68,89 @@ export class RouteSession {
   }
 }
 
+/**
+ * Walks the candidate targets until one answers.
+ *
+ * `groups` — supplied by the caller as `fallbackGroups(selection)` — splits the
+ * candidates into ordered tiers. Every target in a tier is exhausted, whether
+ * by being tried or by being skipped while it cools down, before the next tier
+ * is looked at. That is what keeps an available exact model match ahead of a
+ * different-model fallback no matter what the health scores say, while ranking
+ * and the session's sticky target still decide the order *within* a tier.
+ *
+ * Without `groups` the whole target list behaves as a single tier, which is
+ * what the callers that have no notion of an exact match want.
+ */
 export async function withFallback(
   targets,
   invoke,
   retryableStatus = DEFAULT_RETRY_STATUS_CODES,
   session = new RouteSession(),
-  health = new HealthRegistry()
+  health = new HealthRegistry(),
+  { groups = null } = {}
 ) {
-  if (!Array.isArray(targets) || targets.length === 0) {
+  const plan = (Array.isArray(groups) && groups.length > 0 ? groups : [targets])
+    .filter((group) => Array.isArray(group) && group.length > 0);
+
+  if (plan.length === 0) {
     const err = new Error("No fully configured routing targets available");
     err.status = 503;
     throw err;
   }
 
   const failures = [];
-  const ranked = health.rank(targets);
+  let available = 0;
 
-  if (ranked.length === 0) {
+  for (const group of plan) {
+    const ranked = health.rank(group);
+    if (ranked.length === 0) continue;
+    available += ranked.length;
+
+    // Try the session's sticky target first, then every other ranked target.
+    // Scanning forward from the sticky target's rank would silently abandon
+    // better-ranked healthy targets whenever the sticky target fails. A sticky
+    // target outside this group is simply not found, so it cannot reach across
+    // the tier boundary.
+    const preferred = session.current(ranked, health);
+    const preferredId = health.key(preferred);
+    const order = [
+      preferred,
+      ...ranked.filter((target) => health.key(target) !== preferredId)
+    ];
+
+    for (const target of order) {
+      if (!health.isAvailable(target)) continue;
+
+      const startedAt = Date.now();
+
+      try {
+        const result = await invoke(target);
+        health.markSuccess(target, { latencyMs: Date.now() - startedAt });
+        session.saveSuccess(target, health);
+        return result;
+      } catch (error) {
+        const status = Number(error?.status || 0);
+
+        failures.push({
+          target,
+          status,
+          message: error?.message || String(error)
+        });
+
+        if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) {
+          throw error;
+        }
+
+        health.markFailure(target, status);
+      }
+    }
+  }
+
+  if (available === 0) {
     const err = new Error("No routing targets are currently available");
     err.status = 503;
     err.failures = [];
     throw err;
-  }
-
-  // Try the session's sticky target first, then every other ranked target.
-  // Scanning forward from the sticky target's rank would silently abandon
-  // better-ranked healthy targets whenever the sticky target fails.
-  const preferred = session.current(ranked, health);
-  const preferredId = health.key(preferred);
-  const order = [
-    preferred,
-    ...ranked.filter((target) => health.key(target) !== preferredId)
-  ];
-
-  for (const target of order) {
-    if (!health.isAvailable(target)) continue;
-
-    const startedAt = Date.now();
-
-    try {
-      const result = await invoke(target);
-      health.markSuccess(target, { latencyMs: Date.now() - startedAt });
-      session.saveSuccess(target, health);
-      return result;
-    } catch (error) {
-      const status = Number(error?.status || 0);
-
-      failures.push({
-        target,
-        status,
-        message: error?.message || String(error)
-      });
-
-      if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) {
-        throw error;
-      }
-
-      health.markFailure(target, status);
-    }
   }
 
   const err = new Error("All routing targets failed");

@@ -8,6 +8,8 @@ import {
   withFallback
 } from "../src/router.js";
 import { HealthRegistry, refreshAllHealth, healthRegistry } from "../src/health.js";
+import { fallbackGroups } from "../src/observability/route-select.js";
+import { describeRouting } from "../src/observability/router-preview.js";
 
 test("retryable statuses include quota/rate-limit/server failures", () => {
   for (const code of [402, 408, 429, 500, 502, 503, 504]) {
@@ -353,37 +355,169 @@ function targetId(target) {
 }
 
 // ---------------------------------------------------------------------------
-// Known gap: exact-model preference is not guaranteed at runtime
+// Exact-model-first routing
 // ---------------------------------------------------------------------------
 
+const target = (provider, model) => ({ provider, model, keyIndex: 0, protocols: ["openai-chat"] });
+
+/** The selection shape every bridge selector returns, for a request for `model`. */
+function selectionFor(targets, model) {
+  const exact = targets.filter((t) => t.model === model);
+  const rest = targets.filter((t) => t.model !== model);
+  return {
+    modelMatched: exact.length > 0,
+    compatible: targets,
+    exact,
+    selected: exact.length > 0 ? [...exact, ...rest] : targets
+  };
+}
+
 /**
- * `selectGeminiTargets` (like the other bridges' selectors) returns the exact
- * model match first, and `describeRouting` reports that order. `withFallback`
- * does not preserve it: it re-ranks by health score, and a sticky session can
- * promote an older target ahead of it. A target that failed once and has since
- * left cooldown sits at score 25 while an untouched target sits at 50, so the
- * request is served by the wrong model even though the exact match is available.
- *
- * Marked `todo` because this is a routing-policy decision, not a defect in the
- * bridge: fixing it means either ranking exact matches ahead of score or
- * dropping the "exact match is tried first" promise. Either way it changes
- * behaviour for every client protocol, so it needs a product call.
+ * Drives `withFallback` exactly as `src/server.js` does: the selector's `selected`
+ * list is passed as the candidate set and `fallbackGroups(selection)` as the
+ * tier plan.
  */
-test("an available exact model match is tried first even when a fallback scores higher", { todo: true }, async () => {
-  const exact = { provider: "p1", model: "model-A", keyIndex: 0, protocols: ["openai-chat"] };
-  const other = { provider: "p2", model: "model-B", keyIndex: 0, protocols: ["openai-chat"] };
-
-  const health = new HealthRegistry();
-  health.markFailure(exact, 500, { cooldownMs: -1 }); // failed once; cooldown has elapsed
-
+async function route(selection, { health, session = new RouteSession(), invoke } = {}) {
   const attempted = [];
-  await withFallback(
-    [exact, other],
-    async (target) => { attempted.push(target.model); return {}; },
-    new Set([500]),
-    new RouteSession(),
-    health
+  const result = await withFallback(
+    selection.selected,
+    invoke ?? (async (t) => {
+      attempted.push(`${t.provider}:${t.model}`);
+      return { target: t };
+    }),
+    new Set([500, 429, 502, 503, 504, 408, 402]),
+    session,
+    health,
+    { groups: fallbackGroups(selection) }
+  );
+  return { attempted, result };
+}
+
+test("A: an available exact match is tried before a higher-scored fallback model", async () => {
+  const exact = target("p1", "model-A");
+  const fallback = target("p2", "model-B");
+  const health = new HealthRegistry();
+  // A failed once and has since left cooldown: it is available, but scores 25
+  // against the untouched fallback's 50.
+  health.markFailure(exact, 500, { cooldownMs: -1 });
+
+  assert.ok(health.isAvailable(exact), "the exact target must be available for this to prove anything");
+  assert.ok(
+    health.ensureTarget(exact).score < health.ensureTarget(fallback).score,
+    "the fallback must out-score the exact match for this test to mean anything"
   );
 
-  assert.equal(attempted[0], "model-A");
+  const { attempted } = await route(selectionFor([exact, fallback], "model-A"), { health });
+
+  assert.deepEqual(attempted, ["p1:model-A"]);
+});
+
+test("B: a sticky fallback target does not preempt an available exact match", async () => {
+  const exact = target("p1", "model-A");
+  const fallback = target("p2", "model-B");
+  const health = new HealthRegistry();
+  health.markSuccess(fallback, {}); // healthy *and* the session's last success
+  const session = new RouteSession({ targetId: health.key(fallback) });
+
+  const { attempted } = await route(selectionFor([exact, fallback], "model-A"), { health, session });
+
+  assert.deepEqual(attempted, ["p1:model-A"]);
+});
+
+test("C: health ranking still orders the targets inside the exact-match group", async () => {
+  const slow = target("p1", "model-A");
+  const fast = target("p2", "model-A");
+  const fallback = target("p3", "model-B");
+  const health = new HealthRegistry();
+  health.markSuccess(fast, {}); // 62.5 against the others' 50
+
+  const { attempted } = await route(selectionFor([slow, fast, fallback], "model-A"), { health });
+
+  assert.deepEqual(attempted, ["p2:model-A"]);
+});
+
+test("D: a different model is attempted only after every exact target has failed", async () => {
+  const exactOne = target("p1", "model-A");
+  const exactTwo = target("p2", "model-A");
+  const fallback = target("p3", "model-B");
+  const health = new HealthRegistry();
+  // The fallback is the healthiest target of the three; it still must wait for
+  // both exact matches.
+  health.markSuccess(fallback, {});
+  const attempted = [];
+
+  const { result } = await route(selectionFor([exactOne, exactTwo, fallback], "model-A"), {
+    health,
+    invoke: async (t) => {
+      attempted.push(`${t.provider}:${t.model}`);
+      if (t.model === "model-A") {
+        const error = new Error("upstream is busy");
+        error.status = 500;
+        throw error;
+      }
+      return { target: t };
+    }
+  });
+
+  assert.deepEqual(attempted, ["p1:model-A", "p2:model-A", "p3:model-B"]);
+  assert.equal(result.target.model, "model-B");
+  // Both exact targets burned a failure and were cooled down; the fallback was not.
+  assert.equal(health.isAvailable(exactOne), false);
+  assert.equal(health.isAvailable(exactTwo), false);
+  assert.equal(health.isAvailable(fallback), true);
+});
+
+test("E: the routing preview shows the order the runtime actually walks", async () => {
+  const exact = target("p1", "model-A");
+  const fallback = target("p2", "model-B");
+  const health = new HealthRegistry();
+  health.markFailure(exact, 500, { cooldownMs: -1 });
+  health.markSuccess(fallback, {});
+  const session = new RouteSession({ targetId: health.key(fallback) });
+
+  const selection = selectionFor([exact, fallback], "model-A");
+  const { attempted } = await route(selection, { health, session });
+
+  const preview = describeRouting({
+    targets: selection.compatible,
+    health,
+    protocol: "openai-chat",
+    model: "model-A",
+    stickyTargetId: health.key(fallback)
+  });
+
+  assert.deepEqual(attempted, ["p1:model-A"]);
+  // The preview queues the exact match first and only then the fallback — the
+  // same order the runtime walks. It is a superset of `attempted`, which stops
+  // at the first success.
+  assert.equal(preview.fallbackOrder[0].provider, "p1");
+  assert.deepEqual(
+    preview.fallbackOrder.map((c) => `${c.provider}:${c.model}`).slice(0, attempted.length),
+    attempted
+  );
+  assert.equal(preview.selected.provider, "p1");
+});
+
+test("a cooled-down exact match yields to the fallback tier", async () => {
+  const exact = target("p1", "model-A");
+  const fallback = target("p2", "model-B");
+  const health = new HealthRegistry();
+  health.markFailure(exact, 500); // full cooldown: unavailable right now
+
+  const { attempted } = await route(selectionFor([exact, fallback], "model-A"), { health });
+
+  assert.deepEqual(attempted, ["p2:model-B"]);
+});
+
+test("with groups omitted, the whole target list is one tier", async () => {
+  const a = target("p1", "model-A");
+  const b = target("p2", "model-B");
+  const health = new HealthRegistry();
+  health.markFailure(a, 500, { cooldownMs: -1 });
+
+  const attempted = [];
+  await withFallback([a, b], async (t) => { attempted.push(t.model); return {}; }, new Set([500]), new RouteSession(), health);
+
+  // No grouping was requested, so ranking alone decides — the pre-grouping behaviour.
+  assert.deepEqual(attempted, ["model-B"]);
 });
