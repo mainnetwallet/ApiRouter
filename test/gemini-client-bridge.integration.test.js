@@ -477,3 +477,49 @@ test("the routing preview predicts the order the proxy walks under sticky pressu
   assert.equal(exact.apiRequests.length, 1);
   assert.equal(other.apiRequests.length, 1, "the sticky target must not receive a second request");
 });
+
+// ---------------------------------------------------------------------------
+// Tool-config hardening, over HTTP
+//
+// The unit tests in test/gemini-bridge.test.js pin the conversion; these prove
+// the contradictory request never leaves the router.
+// ---------------------------------------------------------------------------
+
+test("a tool choice that would need no tools is never sent upstream", async (t) => {
+  const { upstream, router } = await withRig(
+    t,
+    () => chatOk(),
+    (u) => ({ GROQ_API_KEYS: "k", GROQ_MODELS: "m", GROQ_BASE_URL: u.baseUrl })
+  );
+
+  await generate(router, "m", {
+    contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    toolConfig: { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["lookup"] } }
+  });
+
+  const sent = upstream.apiRequests[0].body;
+  assert.equal(sent.tools, undefined, "no declarations were supplied, so none are forwarded");
+  assert.equal(sent.tool_choice, undefined, "`required` with no tools is a contradictory request");
+});
+
+test("an undeclared allowed function never becomes an exact tool choice upstream", async (t) => {
+  const { upstream, router } = await withRig(
+    t,
+    () => chatOk(),
+    (u) => ({ GROQ_API_KEYS: "k", GROQ_MODELS: "m", GROQ_BASE_URL: u.baseUrl })
+  );
+
+  await generate(router, "m", {
+    contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    tools: [{ functionDeclarations: [{ name: "lookup", description: "l", parameters: { type: "object", properties: {} } }] }],
+    toolConfig: { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["ghost"] } }
+  });
+
+  const sent = upstream.apiRequests[0].body;
+  assert.equal(sent.tool_choice, "required");
+  assert.deepEqual(sent.tools.map((tool) => tool.function.name), ["lookup"]);
+  assert.ok(
+    sent.tools.every((tool) => tool.function.name !== "ghost"),
+    "the request must never mention a function it does not declare"
+  );
+});

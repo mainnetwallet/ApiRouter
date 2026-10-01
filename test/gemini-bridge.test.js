@@ -252,3 +252,77 @@ test("no toolConfig leaves the declarations and the choice untouched", () => {
   assert.equal(out.tool_choice, undefined);
   assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup", "search", "delete"]);
 });
+
+// ---------------------------------------------------------------------------
+// Hardening: a tool_choice must never name a function the request does not
+// declare, and a `required` choice must never be sent with no tools at all.
+// ---------------------------------------------------------------------------
+
+test("mode ANY with a single undeclared function is not sent as an exact choice", () => {
+  // Regression: this used to emit {type:"function",function:{name:"ghost"}}
+  // while `ghost` was absent from out.tools, which providers reject.
+  const out = toChatFromGemini(toolBody({ mode: "ANY", allowedFunctionNames: ["ghost"] }), "m");
+
+  assert.notDeepEqual(out.tool_choice, { type: "function", function: { name: "ghost" } });
+  assert.ok(
+    out.tools.every((tool) => tool.function.name !== "ghost"),
+    "an undeclared function must never be invented or forwarded"
+  );
+  // It lands on the same controlled fallback as any other unrepresentable list.
+  assert.equal(out.tool_choice, "required");
+  assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup", "search", "delete"]);
+});
+
+test("mode ANY with a single declared function still sends an exact choice", () => {
+  // The guard must not disturb the case that already worked.
+  const out = toChatFromGemini(toolBody({ mode: "ANY", allowedFunctionNames: ["search"] }), "m");
+  assert.deepEqual(out.tool_choice, { type: "function", function: { name: "search" } });
+  assert.deepEqual(out.tools.map((tool) => tool.function.name), ["lookup", "search", "delete"]);
+});
+
+test("mode ANY with no declared tools never asks for a required call", () => {
+  // Regression: this used to send tool_choice "required" with no tools array,
+  // a contradictory request. The choice is now left unset.
+  const body = {
+    contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    toolConfig: {
+      functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["lookup", "search"] }
+    }
+  };
+  const out = toChatFromGemini(body, "m");
+
+  assert.equal(out.tool_choice, undefined);
+  assert.equal(out.tools, undefined);
+});
+
+test("mode ANY with no declared tools and one named function sends no choice", () => {
+  const body = {
+    contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    toolConfig: { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["lookup"] } }
+  };
+  const out = toChatFromGemini(body, "m");
+
+  assert.equal(out.tool_choice, undefined);
+  assert.equal(out.tools, undefined);
+});
+
+test("mode ANY with an empty tool declaration list sends no choice", () => {
+  const body = {
+    contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    tools: [{ functionDeclarations: [] }],
+    toolConfig: { functionCallingConfig: { mode: "ANY" } }
+  };
+  const out = toChatFromGemini(body, "m");
+
+  assert.equal(out.tool_choice, undefined);
+  assert.equal(out.tools, undefined);
+});
+
+test("mode NONE is still representable with no tools declared", () => {
+  // "none" is a valid choice with or without declarations, so it is untouched.
+  const out = toChatFromGemini(
+    { contents: [{ role: "user", parts: [{ text: "hi" }] }], toolConfig: { functionCallingConfig: { mode: "NONE" } } },
+    "m"
+  );
+  assert.equal(out.tool_choice, "none");
+});

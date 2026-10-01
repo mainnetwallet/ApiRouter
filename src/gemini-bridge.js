@@ -154,8 +154,11 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
       ? mode.allowedFunctionNames.filter((name) => typeof name === "string" && name)
       : [];
 
-    if (allowed.length === 1) {
-      // One named function is representable exactly, so send it as such.
+    if (allowed.length === 1 && declaredNames.has(allowed[0])) {
+      // One named function is representable exactly, so send it as such. The
+      // declaration is checked first: a `tool_choice` naming a function the
+      // request never declares is rejected upstream, so an undeclared name
+      // falls through to the controlled fallback below instead.
       out.tool_choice = { type: "function", function: { name: allowed[0] } };
     } else if (allowed.length > 1 && allowed.every((name) => declaredNames.has(name))) {
       // "Call one of these N" has no OpenAI-compatible tool_choice value.
@@ -165,13 +168,20 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
       // upstream sees a request whose meaning matches the original exactly.
       out.tools = tools.filter((tool) => allowed.includes(tool.function.name));
       out.tool_choice = "required";
-    } else {
-      // Empty allowedFunctionNames (Gemini reads it as "any tool"), or a name
-      // with no matching functionDeclaration, cannot be represented. The
-      // controlled fallback is `required`: the model is still told it must call
-      // a tool, and only the name restriction is dropped.
+    } else if (tools.length > 0) {
+      // Empty allowedFunctionNames (Gemini reads it as "any tool"), a single
+      // name with no matching functionDeclaration, or a mixed list of declared
+      // and undeclared names: none of these can be represented. The controlled
+      // fallback is `required` over every declared tool — the model is still
+      // told it must call one, and only the name restriction is dropped. An
+      // undeclared name is never invented or forwarded.
       out.tool_choice = "required";
     }
+    // Otherwise nothing is callable at all: the request declares no tools, so
+    // "a call must happen" cannot be honoured. `required` with an empty tool
+    // list is a contradictory request providers reject, and any exact choice
+    // would name an undeclared function, so the choice is left unset and the
+    // request stays well-formed.
   } else if (mode?.mode === "AUTO" && Array.isArray(mode.allowedFunctionNames)) {
     // AUTO plus allowedFunctionNames means "may call one of these, or nothing".
     // The provider default already carries the "or nothing" half; narrowing the

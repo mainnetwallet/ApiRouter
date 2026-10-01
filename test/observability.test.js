@@ -7,7 +7,7 @@ import {
   REDACTION_PLACEHOLDER
 } from "../src/observability/sanitize.js";
 import { RequestLog } from "../src/observability/request-log.js";
-import { selectRouteTargets, selectTargetsForProtocol, planFallbackOrder } from "../src/observability/route-select.js";
+import { selectRouteTargets, selectTargetsForProtocol, planFallbackOrder, fallbackGroups } from "../src/observability/route-select.js";
 import { describeConfig, describeEnvironment } from "../src/observability/config-view.js";
 import { describeRouting } from "../src/observability/router-preview.js";
 import { HealthRegistry } from "../src/health.js";
@@ -211,7 +211,7 @@ test("selectRouteTargets prefers an exact model match and widens otherwise", () 
 
   const exact = selectRouteTargets(targets, "openai-chat", "model-b");
   assert.equal(exact.modelMatched, true);
-  assert.equal(exact.selected.length, 1);
+  assert.equal(exact.selected.length, 3);
   assert.equal(exact.selected[0].model, "model-b");
 
   const widened = selectRouteTargets(targets, "openai-chat", "does-not-exist");
@@ -221,6 +221,32 @@ test("selectRouteTargets prefers an exact model match and widens otherwise", () 
   const none = selectRouteTargets(targets, "openai-chat", "");
   assert.equal(none.modelMatched, false);
   assert.equal(none.selected.length, 3);
+});
+
+// Regression: the generic selector used to return `selected: exact` whenever a
+// model matched, discarding every other reachable target. A protocol routed
+// through it would have had no fallback at all as soon as the requested model
+// was configured, contradicting the `[...exact, ...rest]` contract the four
+// bridge selectors implement.
+test("selectRouteTargets keeps the different-model fallbacks behind an exact match", () => {
+  const targets = [
+    target("groq", "model-a", ["openai-chat"], 0),
+    target("groq", "model-a", ["openai-chat"], 1),
+    target("groq", "model-b", ["openai-chat"], 0)
+  ];
+
+  const selection = selectRouteTargets(targets, "openai-chat", "model-b");
+
+  assert.equal(selection.exact.length, 1);
+  assert.equal(selection.selected.length, 3, "fallbacks must survive an exact match");
+  assert.equal(selection.selected[0].model, "model-b", "the exact match still leads");
+  assert.deepEqual(
+    selection.selected.slice(1).map((t) => t.model),
+    ["model-a", "model-a"],
+    "the remaining reachable targets follow in their original order"
+  );
+  // The shape must agree with the bridge selectors, so the same grouping applies.
+  assert.deepEqual(fallbackGroups(selection), [selection.exact, selection.selected.slice(1)]);
 });
 
 test("planFallbackOrder moves the sticky target first only when it is available", () => {
