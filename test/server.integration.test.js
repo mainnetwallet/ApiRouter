@@ -328,6 +328,29 @@ test("upstream timeout is treated as a retryable 408 failure", async (t) => {
   assert.equal(payload.error.failures[0].message, "Upstream request timed out");
 });
 
+test("a hung streaming upstream fails over after STREAM_CONNECT_TIMEOUT_MS, not the full request timeout", async (t) => {
+  const { router } = await withRig(
+    t,
+    () => ({ hang: true }),
+    (u) => ({
+      GROQ_API_KEYS: "k0,k1",
+      GROQ_MODELS: "m",
+      GROQ_BASE_URL: u.baseUrl,
+      REQUEST_TIMEOUT_MS: "20000",
+      STREAM_CONNECT_TIMEOUT_MS: "300"
+    })
+  );
+
+  const startedAt = Date.now();
+  const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [], stream: true }));
+
+  assert.equal(res.status, 502);
+  const payload = await res.json();
+  assert.equal(payload.error.failures.length, 2);
+  assert.equal(payload.error.failures[0].status, 408);
+  assert.ok(Date.now() - startedAt < 5000, "should give up well before REQUEST_TIMEOUT_MS");
+});
+
 // ---------------------------------------------------------------------------
 // Sticky sessions
 // ---------------------------------------------------------------------------

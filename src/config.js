@@ -51,6 +51,10 @@ export function loadConfig(env = process.env) {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
     port: Number(env.PORT || 8788),
     timeoutMs: Number(env.REQUEST_TIMEOUT_MS || 120000),
+    // Streaming requests should get response headers within seconds. If a
+    // provider hangs, give up on it quickly and fall back instead of waiting
+    // for the full REQUEST_TIMEOUT_MS.
+    connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
     retryableStatus: new Set(retryableValues),
     providers
   };

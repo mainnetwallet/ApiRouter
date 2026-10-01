@@ -303,7 +303,13 @@ async function proxy(req, res, protocol, pathname) {
                 ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream })
                 : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+        // fetch() resolves once response headers arrive, so for streaming
+        // requests this is a time-to-first-response limit: a hung provider
+        // fails over after connectTimeoutMs rather than the full request timeout.
+        const attemptTimeoutMs = wantsStream && config.connectTimeoutMs > 0
+          ? Math.min(config.timeoutMs, config.connectTimeoutMs)
+          : config.timeoutMs;
+        const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
         const attemptStartedAt = Date.now();
 
         // Records one real upstream attempt, in the order `withFallback` makes
