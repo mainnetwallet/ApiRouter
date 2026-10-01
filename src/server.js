@@ -17,7 +17,7 @@ import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId, is
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
-import { selectTargetsForProtocol } from "./observability/route-select.js";
+import { selectTargetsForProtocol, fallbackGroups } from "./observability/route-select.js";
 import {
   bridgeProtocol,
   buildBridgeRequest,
@@ -266,6 +266,9 @@ async function proxy(req, res, protocol, pathname) {
       ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true }
       : null;
   const routeTargets = selection.selected;
+  // The requested model's targets are walked to exhaustion before any other
+  // model is considered; ranking only orders the targets inside a group.
+  const routeGroups = fallbackGroups(selection);
 
   if (selection.compatible.length === 0) {
     recordRequest({
@@ -351,7 +354,8 @@ async function proxy(req, res, protocol, pathname) {
       },
       config.retryableStatus,
       sessionInfo.state.session,
-      healthRegistry
+      healthRegistry,
+      { groups: routeGroups }
     );
 
     const sessionId = sessionInfo.id;

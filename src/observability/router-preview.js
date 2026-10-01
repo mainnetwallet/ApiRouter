@@ -1,4 +1,4 @@
-import { selectTargetsForProtocol, planFallbackOrder } from "./route-select.js";
+import { selectTargetsForProtocol, fallbackGroups, planFallbackGroups } from "./route-select.js";
 
 /** Client protocols whose requests can be bridged to a non-native provider. */
 const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses", "gemini"]);
@@ -43,10 +43,13 @@ export function describeRouting({ targets = [], config, health, protocol, model 
   const { compatible, exact, selected, modelMatched } = selection;
   const bridged = BRIDGED_PROTOCOLS.has(protocol);
 
-  const ranked = health.rank(selected, now);
+  // The same grouping and the same ranking the proxy applies, so the order
+  // shown here is the order the request will actually be attempted in.
+  const groups = fallbackGroups(selection);
+  const ranked = groups.flatMap((group) => health.rank(group, now));
   const rankedIds = new Set(ranked.map((target) => health.key(target)));
 
-  const order = planFallbackOrder(ranked, health, stickyTargetId);
+  const order = planFallbackGroups(groups, health, stickyTargetId, now);
 
   /**
    * The reporting status of a target. Derived the same way for every list on
@@ -134,7 +137,11 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     {
       key: "ranking",
       label: "Ranking",
-      detail: "ordered by health score; ties keep the caller's order (exact model match first)",
+      detail: groups.length > 1
+        ? `exact-match group tried first (${groups[0].length} target(s)), then ${groups[1].length} fallback target(s); health score orders each group`
+        : exact.length > 0
+          ? "ordered by health score; every reachable target matches the requested model"
+          : "ordered by health score; ties keep the caller's order",
       count: ranked.length,
       state: "info"
     },

@@ -145,12 +145,42 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
   if (stream) out.stream = true;
 
   const mode = body?.toolConfig?.functionCallingConfig;
-  if (mode?.mode === "NONE") out.tool_choice = "none";
-  else if (mode?.mode === "ANY") {
-    const names = mode.allowedFunctionNames;
-    out.tool_choice = Array.isArray(names) && names.length === 1
-      ? { type: "function", function: { name: names[0] } }
-      : "required";
+  const declaredNames = new Set(tools.map((tool) => tool.function.name));
+
+  if (mode?.mode === "NONE") {
+    out.tool_choice = "none";
+  } else if (mode?.mode === "ANY") {
+    const allowed = Array.isArray(mode.allowedFunctionNames)
+      ? mode.allowedFunctionNames.filter((name) => typeof name === "string" && name)
+      : [];
+
+    if (allowed.length === 1) {
+      // One named function is representable exactly, so send it as such.
+      out.tool_choice = { type: "function", function: { name: allowed[0] } };
+    } else if (allowed.length > 1 && allowed.every((name) => declaredNames.has(name))) {
+      // "Call one of these N" has no OpenAI-compatible tool_choice value.
+      // `required` carries the "a call must happen" half; narrowing the
+      // declarations to the allowed set carries the restriction half, because
+      // the model then has nothing outside the allowed set to choose from. The
+      // upstream sees a request whose meaning matches the original exactly.
+      out.tools = tools.filter((tool) => allowed.includes(tool.function.name));
+      out.tool_choice = "required";
+    } else {
+      // Empty allowedFunctionNames (Gemini reads it as "any tool"), or a name
+      // with no matching functionDeclaration, cannot be represented. The
+      // controlled fallback is `required`: the model is still told it must call
+      // a tool, and only the name restriction is dropped.
+      out.tool_choice = "required";
+    }
+  } else if (mode?.mode === "AUTO" && Array.isArray(mode.allowedFunctionNames)) {
+    // AUTO plus allowedFunctionNames means "may call one of these, or nothing".
+    // The provider default already carries the "or nothing" half; narrowing the
+    // declarations carries the restriction, so the model cannot call a
+    // function the client excluded.
+    const allowed = mode.allowedFunctionNames.filter((name) => declaredNames.has(name));
+    if (allowed.length > 0 && allowed.length < tools.length) {
+      out.tools = tools.filter((tool) => allowed.includes(tool.function.name));
+    }
   }
 
   if (typeof generation.temperature === "number") out.temperature = generation.temperature;
