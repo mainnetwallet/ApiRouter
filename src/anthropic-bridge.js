@@ -73,6 +73,18 @@ function safeParse(text) {
 export function cleanSchemaForGemini(schema) {
   if (Array.isArray(schema)) return schema.map(cleanSchemaForGemini);
   if (!schema || typeof schema !== "object") return schema;
+
+  // Gemini has no anyOf/oneOf/allOf here: collapse to the first non-null
+  // variant so the node keeps a usable type instead of becoming `{}`.
+  const variants = schema.anyOf || schema.oneOf || schema.allOf;
+  if (Array.isArray(variants) && variants.length) {
+    const pick = variants.find((v) => v && v.type !== "null") || variants[0];
+    const { anyOf, oneOf, allOf, ...rest } = schema;
+    const merged = cleanSchemaForGemini({ ...pick, ...rest });
+    if (variants.some((v) => v && v.type === "null")) merged.nullable = true;
+    return merged;
+  }
+
   const allowed = ["type", "description", "enum", "properties", "required", "items", "nullable"];
   const out = {};
   for (const key of allowed) {
@@ -86,12 +98,19 @@ export function cleanSchemaForGemini(schema) {
         Object.entries(schema.properties || {}).map(([k, v]) => [k, cleanSchemaForGemini(v)])
       );
     } else if (key === "items") {
-      out.items = cleanSchemaForGemini(schema.items);
+      // Tuple-style `items: [...]` is not supported; use the first entry.
+      const item = Array.isArray(schema.items) ? schema.items[0] : schema.items;
+      out.items = cleanSchemaForGemini(item);
     } else {
       out[key] = schema[key];
     }
   }
   if (!out.type && out.properties) out.type = "object";
+  if (!out.type && out.items) out.type = "array";
+  // Gemini requires every array node (at any depth) to declare `items`, and
+  // every node to declare a `type`.
+  if (out.type === "array" && (!out.items || typeof out.items !== "object")) out.items = { type: "string" };
+  if (!out.type) out.type = "string";
   return out;
 }
 

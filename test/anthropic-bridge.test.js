@@ -142,6 +142,29 @@ test("cleanSchemaForGemini keeps only supported keys", () => {
   );
 });
 
+test("cleanSchemaForGemini gives every array node an items field, at any depth", () => {
+  // Mirrors the failing tool: query.where is an array whose items are arrays with no items of their own.
+  const out = cleanSchemaForGemini({
+    type: "object",
+    properties: {
+      query: {
+        type: "object",
+        properties: {
+          where: { type: "array", items: { type: "array" } },
+          bare: { type: "array" },
+          tuple: { type: "array", items: [{ type: "number" }] },
+          either: { anyOf: [{ type: "null" }, { type: "array", items: { type: "array" } }] }
+        }
+      }
+    }
+  });
+  const q = out.query ?? out.properties.query;
+  assert.deepEqual(q.properties.where, { type: "array", items: { type: "array", items: { type: "string" } } });
+  assert.deepEqual(q.properties.bare, { type: "array", items: { type: "string" } });
+  assert.deepEqual(q.properties.tuple, { type: "array", items: { type: "number" } });
+  assert.deepEqual(q.properties.either, { type: "array", items: { type: "array", items: { type: "string" } }, nullable: true });
+});
+
 test("buildBridgeRequest builds the right URLs and auth for each protocol", () => {
   const chat = buildBridgeRequest({ ...target("groq", "m", ["openai-chat"]), baseUrl: "https://api.groq.com/openai/v1" }, "openai-chat", { stream: true, messages: [] });
   assert.equal(chat.url, "https://api.groq.com/openai/v1/chat/completions");
