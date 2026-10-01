@@ -54,13 +54,44 @@ const render = (rows, now = T0 + 2500) => renderToStaticMarkup(<LiveLogList rows
 const cards = (html) => (html.match(/livelog__card /g) ?? []).length;
 const boxes = (html) => (html.match(/data-step-state=/g) ?? []).length;
 
-describe("one card per API call, one box per model tried", () => {
-  it("a finished call with a fallback is one card with two boxes", () => {
+describe("one full card per model tried", () => {
+  it("a finished call with a fallback is two cards, each with its own box", () => {
     const row = buildRow(finished());
     expect(row.state).toBe(STATE.SUCCESS);
     const html = render([row]);
-    expect(cards(html)).toBe(1);
+    expect(cards(html)).toBe(2);
     expect(boxes(html)).toBe(2);
+  });
+
+  it("every card has the same shape: a header (time, state, protocol, request id) above its box", () => {
+    const html = render([buildRow(finished())]);
+    const parts = html.split("livelog__card ").slice(1);
+    expect(parts).toHaveLength(2);
+    for (const part of parts) {
+      expect(part).toContain("livelog__card-head");
+      expect(part).toContain("abc12345");
+      expect(part).toContain("gemini · gemini-3.7-flash");
+      expect(part).toContain("data-step-state");
+    }
+    // The failed model's card carries its own state; the last card carries the call's.
+    expect(parts[0]).toContain("FAILED");
+    expect(parts[1]).toContain("SUCCESS");
+    expect(parts[1]).toContain("200 · 1.82 s");
+  });
+
+  it("a single-model call is one card, same shape, no FALLBACK line", () => {
+    const html = render([buildRow(finished({ attempts: [{ provider: "gemini", model: "m", keyIndex: 1, ok: true, status: 200, latencyMs: 90 }] }))]);
+    expect(cards(html)).toBe(1);
+    expect(html).not.toContain("FALLBACK");
+  });
+
+  it("the FALLBACK line sits between two cards, not inside one", () => {
+    const html = render([buildRow(finished())]);
+    const first = html.indexOf("livelog__card ");
+    const second = html.indexOf("livelog__card ", first + 1);
+    const fallback = html.indexOf("livelog__fallback");
+    expect(first).toBeLessThan(fallback);
+    expect(fallback).toBeLessThan(second);
   });
 
   it("each attempt is a box: the failed one first, then the one that answered", () => {

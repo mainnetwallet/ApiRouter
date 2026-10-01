@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { STATE, STATE_TONE, STEP, STEP_TONE, isLive, shortRequestId } from "../../lib/liveLogs.js";
 import { sanitizeText } from "../../lib/sanitize.js";
 import { EMPTY, formatLatency, providerLabel } from "../../lib/format.js";
@@ -98,88 +99,121 @@ function StepBox({ step, now }) {
   );
 }
 
-/** The line between a failed box and the one the router fell back to. */
+/** The line between a failed model's card and the next model's card. */
 function FallbackLink({ from }) {
   const why = sanitizeText([
     Number.isInteger(from.status) ? String(from.status) : null,
     from.reason
   ].filter(Boolean).join(" · "));
   return (
-    <div className="livelog__fallback mono" aria-label="Fallback to the next model">
+    <li className="livelog__fallback mono" aria-label="Fallback to the next model">
       <span aria-hidden="true">↓</span> FALLBACK{why ? ` · ${why}` : ""}
+    </li>
+  );
+}
+
+/** Time, state, protocol and request id: the top of every card. */
+function CardHead({ time, state, tone, live, request, outcome, row, rid, onSelectRequest }) {
+  return (
+    <div className="livelog__card-head">
+      <time className="livelog__time mono tabular">{formatClock(time)}</time>
+      <span
+        className={`livelog__type livelog__type--${tone}${live ? " livelog__type--live" : ""}`}
+        title={STATE_HINT[state]}
+      >
+        {state}
+      </span>
+      <span className="livelog__sub dim mono" title={request}>{request}</span>
+      <span className="livelog__outcome mono tabular">{outcome}</span>
+      {rid ? (
+        onSelectRequest ? (
+          <button
+            type="button"
+            className="livelog__rid mono"
+            title={`Filter to request ${row.requestId}`}
+            onClick={() => onSelectRequest(row.requestId)}
+          >
+            {rid}
+          </button>
+        ) : (
+          <span className="livelog__rid mono" title={row.requestId}>{rid}</span>
+        )
+      ) : (
+        <span className="livelog__rid" />
+      )}
     </div>
   );
 }
 
 /**
- * One card per API call. The header carries the call as a whole; below it every
- * model the router tried gets its own box, with a FALLBACK line between a
- * failed box and the next one. Missing optional fields simply drop out;
- * nothing here can throw on a sparse row.
+ * One API call. Every model the router tries gets its own full card (header,
+ * then the model's box), the same shape whether the call needed one model or
+ * five, with a FALLBACK line between a failed card and the next. The last card
+ * carries the call's overall state and total time. Missing optional fields
+ * simply drop out; nothing here can throw on a sparse row.
  */
 export function LiveLogRow({ row, now = Date.now(), onSelectRequest = null }) {
   if (!row) return null;
 
-  const tone = STATE_TONE[row.state] ?? "neutral";
-  const live = isLive(row);
   const steps = Array.isArray(row.steps) ? row.steps : [];
-  const outcome = describeOutcome(row, now);
   const request = sanitizeText(requestText(row));
-  // With no boxes (rejected before any provider was tried) the target, if any,
-  // is the only thing to name.
-  const target = steps.length === 0 ? sanitizeText(describeTarget(row)) : "";
-  const reason = row.reason ? sanitizeText(row.reason) : "";
   const rid = shortRequestId(row.requestId);
+  const live = isLive(row);
+
+  // Rejected before any provider was tried: one card, no model box.
+  if (steps.length === 0) {
+    const tone = STATE_TONE[row.state] ?? "neutral";
+    const target = sanitizeText(describeTarget(row));
+    const reason = row.reason ? sanitizeText(row.reason) : "";
+    return (
+      <li
+        className={`livelog__card livelog__card--first livelog__card--${tone}${live ? " livelog__card--live" : ""}`}
+        data-state={row.state}
+        data-request-id={row.requestId ?? undefined}
+      >
+        <CardHead
+          time={row.ts} state={row.state} tone={tone} live={live} request={request}
+          outcome={describeOutcome(row, now)} row={row} rid={rid} onSelectRequest={onSelectRequest}
+        />
+        {target ? <div className="livelog__target mono livelog__lone" title={target}>{target}</div> : null}
+        {reason ? <div className="livelog__detail mono livelog__reason" title={reason}>{reason}</div> : null}
+      </li>
+    );
+  }
 
   return (
-    <li
-      className={`livelog__card livelog__card--${tone}${live ? " livelog__card--live" : ""}`}
-      data-state={row.state}
-      data-request-id={row.requestId ?? undefined}
-    >
-      <div className="livelog__card-head">
-        <time className="livelog__time mono tabular">{formatClock(row.ts)}</time>
-        <span
-          className={`livelog__type livelog__type--${tone}${live ? " livelog__type--live" : ""}`}
-          title={STATE_HINT[row.state]}
-        >
-          {row.state}
-        </span>
-        <span className="livelog__sub dim mono" title={request}>{request}</span>
-        <span className="livelog__outcome mono tabular">{outcome}</span>
-        {rid ? (
-          onSelectRequest ? (
-            <button
-              type="button"
-              className="livelog__rid mono"
-              title={`Filter to request ${row.requestId}`}
-              onClick={() => onSelectRequest(row.requestId)}
+    <>
+      {steps.map((step, index) => {
+        const last = index === steps.length - 1;
+        const state = last ? row.state : step.state;
+        const tone = STEP_TONE[step.state] ?? "neutral";
+        const badgeTone = STATE_TONE[state] ?? STEP_TONE[state] ?? "neutral";
+        const cardLive = last && live;
+        const time = Number.isFinite(step.startedAt) ? step.startedAt : (index === 0 ? row.ts : null);
+        const reason = last && row.reason ? sanitizeText(row.reason) : "";
+
+        return (
+          <Fragment key={index}>
+            {index > 0 && steps[index - 1].state === STEP.FAILED ? <FallbackLink from={steps[index - 1]} /> : null}
+            <li
+              className={`livelog__card${index === 0 ? " livelog__card--first" : ""} livelog__card--${tone}${cardLive ? " livelog__card--live" : ""}`}
+              data-state={state}
+              data-request-id={row.requestId ?? undefined}
             >
-              {rid}
-            </button>
-          ) : (
-            <span className="livelog__rid mono" title={row.requestId}>{rid}</span>
-          )
-        ) : (
-          <span className="livelog__rid" />
-        )}
-      </div>
-
-      {target ? <div className="livelog__target mono livelog__lone" title={target}>{target}</div> : null}
-
-      {steps.length > 0 ? (
-        <div className="livelog__steps">
-          {steps.map((step, index) => (
-            <div className="livelog__stepwrap" key={index}>
-              {index > 0 && steps[index - 1].state === STEP.FAILED ? <FallbackLink from={steps[index - 1]} /> : null}
-              <StepBox step={step} now={now} />
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {reason ? <div className="livelog__detail mono livelog__reason" title={reason}>{reason}</div> : null}
-    </li>
+              <CardHead
+                time={time} state={state} tone={badgeTone} live={cardLive} request={request}
+                outcome={last ? describeOutcome(row, now) : describeStepOutcome(step, now)}
+                row={row} rid={rid} onSelectRequest={onSelectRequest}
+              />
+              <div className="livelog__steps">
+                <StepBox step={step} now={now} />
+              </div>
+              {reason ? <div className="livelog__detail mono livelog__reason" title={reason}>{reason}</div> : null}
+            </li>
+          </Fragment>
+        );
+      })}
+    </>
   );
 }
 

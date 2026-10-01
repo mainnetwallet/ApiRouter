@@ -884,6 +884,8 @@
   font-size: var(--fs-xs);
   line-height: 1.45;
 }
+/* A new call starts a little further down than the next model of the same call. */
+.livelog__card--first { margin-top: var(--sp-4); }
 .livelog__card--info { border-left-color: var(--info); }
 .livelog__card--danger { border-left-color: var(--danger); }
 .livelog__card--warn { border-left-color: var(--warn); }
@@ -899,7 +901,6 @@
 .livelog__lone, .livelog__reason { padding: 0 var(--sp-3) var(--sp-2); }
 
 .livelog__steps { display: flex; flex-direction: column; padding: 0 var(--sp-3) var(--sp-3); }
-.livelog__stepwrap { display: flex; flex-direction: column; }
 
 /* One box per model the router tried. */
 .livelog__step {
@@ -926,7 +927,10 @@
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
-  margin: var(--sp-3) 0;
+  margin: var(--sp-3) var(--sp-3);
+  list-style: none;
+  font-size: var(--fs-xs);
+  line-height: 1.45;
   color: var(--accent);
   font-weight: 600;
   letter-spacing: 0.04em;
