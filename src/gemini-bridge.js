@@ -5,9 +5,15 @@ function id(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
 }
 
+/** Tool arguments arrive as a JSON string. A malformed one must not crash. */
 function parseArgs(value) {
   if (typeof value !== "string") return value && typeof value === "object" ? value : {};
-  try { return JSON.parse(value); } catch { return {}; }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function textParts(parts = []) {
@@ -45,8 +51,15 @@ export function selectGeminiTargets(targets, requestedModel) {
   };
 }
 
-/** Gemini generateContent request -> OpenAI chat request. */
-export function toChatFromGemini(body, requestedModel) {
+/**
+ * Gemini generateContent request -> OpenAI chat request.
+ *
+ * `model` is the *target's* model, never the model the client asked for: the
+ * provider is chosen by the router, and it only serves the model names it was
+ * configured with. Forwarding the client's name turns every fallback into a
+ * model-not-found error.
+ */
+export function toChatFromGemini(body, model, { stream = false } = {}) {
   const messages = [];
   const system = body?.systemInstruction?.parts
     ? textParts(body.systemInstruction.parts)
@@ -57,14 +70,20 @@ export function toChatFromGemini(body, requestedModel) {
   for (const content of Array.isArray(body?.contents) ? body.contents : []) {
     const role = content?.role === "model" ? "assistant" : "user";
     const text = [];
+    const parts = [];
     const toolCalls = [];
     const toolResults = [];
 
     for (const part of Array.isArray(content?.parts) ? content.parts : []) {
-      if (typeof part?.text === "string") text.push(part.text);
+      if (typeof part?.text === "string") {
+        text.push(part.text);
+        // A mixed turn must use the content-parts form, in which every entry
+        // is an object. A bare string is not a valid OpenAI content part.
+        parts.push({ type: "text", text: part.text });
+      }
       if (part?.inlineData) {
         const image = inlineToChat(part);
-        if (image) text.push(image);
+        if (image) parts.push(image);
       }
       if (part?.functionCall) {
         const callId = part.functionCall.id || id("call");
@@ -87,15 +106,22 @@ export function toChatFromGemini(body, requestedModel) {
       }
     }
 
+    const hasImage = parts.some((p) => p.type === "image_url");
+
     if (role === "assistant") {
-      const message = { role, content: text.length ? text : null };
+      const message = { role, content: text.length ? text.join("") : null };
       if (toolCalls.length) message.tool_calls = toolCalls;
       messages.push(message);
-    } else {
-      const hasImage = text.some((p) => typeof p === "object");
-      messages.push({ role, content: hasImage ? text : text.join("") });
-      messages.push(...toolResults);
+      continue;
     }
+
+    // A functionResponse turn carries no user text. Emitting an empty user
+    // message there would separate the tool result from the assistant turn it
+    // answers, which OpenAI-compatible providers reject outright.
+    if (parts.length > 0) {
+      messages.push({ role, content: hasImage ? parts : text.join("") });
+    }
+    messages.push(...toolResults);
   }
 
   const tools = [];
@@ -114,11 +140,9 @@ export function toChatFromGemini(body, requestedModel) {
   }
 
   const generation = body?.generationConfig || {};
-  const out = {
-    model: requestedModel,
-    messages,
-  };
+  const out = { model, messages };
   if (tools.length) out.tools = tools;
+  if (stream) out.stream = true;
 
   const mode = body?.toolConfig?.functionCallingConfig;
   if (mode?.mode === "NONE") out.tool_choice = "none";
@@ -153,10 +177,11 @@ function joinUrl(base, suffix) {
   return root + "/" + String(suffix || "").replace(/^\/+/, "");
 }
 
-export function buildGeminiBridgeRequest(target, body, requestedModel, incomingHeaders = {}) {
+/** Builds the upstream fetch request for a translated (chat-compatible) target. */
+export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { stream = false } = {}) {
   const headers = {
     "content-type": "application/json",
-    accept: body?.stream ? "text/event-stream" : "application/json",
+    accept: stream ? "text/event-stream" : "application/json",
     authorization: "Bearer " + target.apiKey
   };
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
@@ -168,21 +193,22 @@ export function buildGeminiBridgeRequest(target, body, requestedModel, incomingH
     options: {
       method: "POST",
       headers,
-      body: JSON.stringify(toChatFromGemini(body, requestedModel))
+      body: JSON.stringify(toChatFromGemini(body, target.model, { stream }))
     }
   };
 }
 
-function finishReason(reason, toolCalls) {
-  if (toolCalls) return "STOP";
+function finishReason(reason, hasToolCalls) {
+  if (hasToolCalls) return "STOP";
   if (reason === "length") return "MAX_TOKENS";
   if (reason === "content_filter") return "SAFETY";
   return "STOP";
 }
 
-export function chatJsonToGemini(json, model) {
+export function chatJsonToGemini(json) {
   const choice = json?.choices?.[0] || {};
   const message = choice.message || {};
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
   const parts = [];
 
   if (typeof message.content === "string" && message.content) {
@@ -191,7 +217,7 @@ export function chatJsonToGemini(json, model) {
     for (const part of message.content) if (typeof part?.text === "string") parts.push({ text: part.text });
   }
 
-  for (const call of message.tool_calls || []) {
+  for (const call of toolCalls) {
     const fn = call?.function;
     if (!fn?.name) continue;
     parts.push({
@@ -215,7 +241,7 @@ export function chatJsonToGemini(json, model) {
   const result = {
     candidates: [{
       content: { role: "model", parts },
-      finishReason: finishReason(choice.finish_reason, (message.tool_calls || []).length > 0),
+      finishReason: finishReason(choice.finish_reason, toolCalls.length > 0),
       index: 0
     }]
   };
@@ -223,19 +249,46 @@ export function chatJsonToGemini(json, model) {
   return result;
 }
 
-function parseSseEvent(buffer) {
-  const lines = buffer.split("\n");
-  const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
-  return data || null;
-}
+const sseData = (payload) => "data: " + JSON.stringify(payload) + "\n\n";
 
-export async function* streamToGemini(events, model) {
+/**
+ * Converts an OpenAI chat SSE stream into a Gemini SSE stream.
+ *
+ * Only ever called for a translated upstream: a native Gemini target streams
+ * its own response straight through, so every event here is chat-shaped.
+ *
+ * Tool calls arrive as fragments — an id and name on the first delta, then the
+ * arguments split across later ones, none of which parse as JSON on their own.
+ * They are accumulated per index and emitted once, when the upstream reports a
+ * finish reason (or the stream ends), so the client receives one complete
+ * `functionCall` rather than a trail of empty ones.
+ */
+export async function* streamToGemini(events) {
+  const pending = new Map();
+  const order = [];
+
+  const drainCalls = () => {
+    const parts = order.map((key) => {
+      const call = pending.get(key);
+      return {
+        functionCall: {
+          id: call.id ?? undefined,
+          name: call.name || "tool",
+          args: parseArgs(call.arguments)
+        }
+      };
+    });
+    order.length = 0;
+    pending.clear();
+    return parts;
+  };
+
   for await (const data of events) {
     if (data === "[DONE]") break;
     let parsed;
     try { parsed = JSON.parse(data); } catch { continue; }
     if (parsed?.error) {
-      yield "data: " + JSON.stringify(parsed) + "\n\n";
+      yield sseData(parsed);
       continue;
     }
 
@@ -244,27 +297,44 @@ export async function* streamToGemini(events, model) {
       const delta = choice?.delta || {};
       const parts = [];
       if (typeof delta.content === "string" && delta.content) parts.push({ text: delta.content });
-      for (const call of delta.tool_calls || []) {
-        const fn = call?.function;
-        if (fn?.name || fn?.arguments) {
-          const args = parseArgs(fn.arguments);
-          parts.push({
-            functionCall: {
-              id: call.id,
-              name: fn.name || "tool",
-              args
-            }
-          });
+
+      const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+      for (const call of fragments) {
+        const key = call.index ?? call.id ?? order.length;
+        let entry = pending.get(key);
+        if (!entry) {
+          entry = { id: null, name: "", arguments: "" };
+          pending.set(key, entry);
+          order.push(key);
         }
+        if (call.id) entry.id = call.id;
+        if (call.function?.name) entry.name += call.function.name;
+        if (typeof call.function?.arguments === "string") entry.arguments += call.function.arguments;
       }
-      if (!parts.length && !choice?.finish_reason) continue;
-      yield "data: " + JSON.stringify({
+
+      const finishing = Boolean(choice?.finish_reason);
+      if (finishing) parts.push(...drainCalls());
+
+      if (!parts.length && !finishing) continue;
+      yield sseData({
         candidates: [{
           content: { role: "model", parts },
-          finishReason: finishReason(choice.finish_reason, choice.finish_reason === "tool_calls"),
+          finishReason: finishReason(choice.finish_reason, parts.some((part) => part.functionCall)),
           index: 0
         }]
-      }) + "\n\n";
+      });
     }
+  }
+
+  // A stream cut off before any finish reason still owes the client its calls.
+  const remaining = drainCalls();
+  if (remaining.length) {
+    yield sseData({
+      candidates: [{
+        content: { role: "model", parts: remaining },
+        finishReason: "STOP",
+        index: 0
+      }]
+    });
   }
 }
