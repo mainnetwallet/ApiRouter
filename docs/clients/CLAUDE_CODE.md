@@ -81,6 +81,24 @@ curl http://localhost:8788/health
 curl http://localhost:8788/v1/models
 ```
 
+## Optional: permanent config (`~/.claude/settings.json`)
+
+Set once and Claude Code picks it up every run, with no shell `export` needed.
+`NO_PROXY` keeps localhost traffic away from any system proxy / VPN.
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8788",
+    "ANTHROPIC_AUTH_TOKEN": "any-key",
+    "ANTHROPIC_MODEL": "router",
+    "DISABLE_AUTOUPDATER": "1",
+    "NO_PROXY": "127.0.0.1,localhost",
+    "no_proxy": "127.0.0.1,localhost"
+  }
+}
+```
+
 ## Troubleshooting
 
 ### `API Error: 405 status code (no body)`
