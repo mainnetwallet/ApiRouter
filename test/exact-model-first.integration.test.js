@@ -194,3 +194,45 @@ test("anthropic: a 400 from the exact provider falls back to the next tier", asy
   assert.equal(exact.apiRequests.length, 1);
   assert.equal(fallback.apiRequests.length, 1, "the fallback tier answers after the exact tier's 400");
 });
+
+test("anthropic: a chain of 400s (model rejection, then 'content must be a string') keeps falling back", async (t) => {
+  // Mirrors a real failure: the first provider rejects the model, the second
+  // (text-only) rejects the translated message shape. Neither is a reason to
+  // stop - a third provider can still answer.
+  const first = await startMockUpstream(() => ({
+    status: 400,
+    body: { type: "error", error: { type: "invalid_request_error", message: "model: claude-sonnet-4-5 is not valid" } }
+  }));
+  const second = await startMockUpstream(() => ({
+    status: 400,
+    body: { error: { message: "messages[23].content must be a string", type: "invalid_request_error", param: "messages[23].content" } }
+  }));
+  const third = await startMockUpstream(() => ({ status: 200, body: chatReply("from-third") }));
+  const router = await startRouter({
+    AGENTROUTER_API_KEYS: "ar-key",
+    AGENTROUTER_MODELS: "claude-sonnet-4-5",
+    AGENTROUTER_BASE_URL: first.baseUrl,
+    GROQ_API_KEYS: "g-key",
+    GROQ_MODELS: "openai/gpt-oss-120b",
+    GROQ_BASE_URL: second.baseUrl,
+    OPENROUTER_API_KEYS: "orc-key",
+    OPENROUTER_MODELS: "other-model",
+    OPENROUTER_BASE_URL: third.baseUrl
+  });
+  t.after(async () => {
+    await router.close();
+    await first.close();
+    await second.close();
+    await third.close();
+  });
+
+  const res = await router.request(
+    "/v1/messages",
+    postJson({ model: "claude-sonnet-4-5", max_tokens: 32, messages: [{ role: "user", content: "hi" }] })
+  );
+
+  assert.equal(res.status, 200);
+  assert.equal(first.apiRequests.length, 1);
+  assert.equal(second.apiRequests.length, 1);
+  assert.equal(third.apiRequests.length, 1, "the third provider answers after two 400s");
+});
