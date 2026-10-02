@@ -29,21 +29,30 @@ export function resolveCloudflareBaseUrl(baseUrl, accountId) {
  * are several ids, a key with no matching id is skipped rather than guessed.
  * CLOUDFLARE_ACCOUNT_ID (singular) is accepted as an alias.
  */
-function applyCloudflareAccounts(provider, env) {
-  const accountIds = split(env.CLOUDFLARE_ACCOUNT_IDS || env.CLOUDFLARE_ACCOUNT_ID);
+function applyCloudflareAccounts(provider, env, prefix = "CLOUDFLARE") {
+  const accountIds = split(env[`${prefix}_ACCOUNT_IDS`] || env[`${prefix}_ACCOUNT_ID`]);
   const accountFor = (keyIndex) => (accountIds.length === 1 ? accountIds[0] : accountIds[keyIndex] || "");
   provider.accountIds = accountIds;
   provider.baseUrls = provider.apiKeys.map((_, keyIndex) =>
-    resolveCloudflareBaseUrl(env.CLOUDFLARE_BASE_URL, accountFor(keyIndex)));
+    resolveCloudflareBaseUrl(env[`${prefix}_BASE_URL`], accountFor(keyIndex)));
   // First usable URL, for the "is this provider configured / what does it point at" views.
-  provider.baseUrl = provider.baseUrls.find(Boolean) || resolveCloudflareBaseUrl(env.CLOUDFLARE_BASE_URL, accountIds[0]);
+  provider.baseUrl = provider.baseUrls.find(Boolean) || resolveCloudflareBaseUrl(env[`${prefix}_BASE_URL`], accountIds[0]);
 }
 
 export function isProviderConfigured(provider) {
   return Boolean(provider && provider.apiKeys.length > 0 && provider.models.length > 0 && provider.baseUrl);
 }
 
-export function buildTargets(providers) {
+export const VISION_POOL = "vision";
+
+/**
+ * Builds the routable targets of one pool.
+ *   buildTargets(config.providers)                      text pool (default)
+ *   buildTargets(config.visionProviders, VISION_POOL)   vision pool
+ * Vision targets carry `pool: "vision"` and their own `id`, so a vision model
+ * never shares health state with the same model id in the text pool.
+ */
+export function buildTargets(providers, pool = "text") {
   const targets = [];
   for (const [providerId, provider] of Object.entries(providers)) {
     if (!isProviderConfigured(provider)) continue;
@@ -53,6 +62,7 @@ export function buildTargets(providers) {
         const baseUrl = Array.isArray(provider.baseUrls) ? provider.baseUrls[keyIndex] : provider.baseUrl;
         if (!baseUrl) continue;
         targets.push({
+          ...(pool === VISION_POOL ? { id: `vision:${providerId}:${model}:key-${keyIndex}`, pool: VISION_POOL } : {}),
           provider: providerId,
           model,
           baseUrl,
@@ -68,25 +78,21 @@ export function buildTargets(providers) {
 }
 
 /**
- * Vision models, read from one `<PROVIDER>_VISION_MODELS` variable per provider
- * (GEMINI_VISION_MODELS, GROQ_VISION_MODELS, ...). Each entry is scoped to its
- * provider as `provider:model`, so the same model id on another provider is not
- * affected. The old global VISION_MODELS is still read for existing setups.
+ * Reads one provider pool from the environment.
+ *   text pool    GEMINI_API_KEYS / GEMINI_BASE_URL / GEMINI_MODELS
+ *   vision pool  GEMINI_VISION_API_KEYS / GEMINI_VISION_BASE_URL / GEMINI_VISION_MODELS
+ * The vision pool is completely separate: its own keys, its own base URL and
+ * its own model list. Cloudflare uses CLOUDFLARE_VISION_ACCOUNT_IDS.
  */
-export function readVisionModels(env = process.env) {
-  const scoped = PROVIDER_IDS.flatMap((id) =>
-    split(env[id.toUpperCase() + "_VISION_MODELS"]).map((model) => `${id}:${model}`));
-  return [...scoped, ...split(env.VISION_MODELS)];
-}
-
-export function loadConfig(env = process.env) {
+export function readProviders(env, { vision = false } = {}) {
   const providers = {};
   for (const id of PROVIDER_IDS) {
-    const key = id.toUpperCase();
+    const key = id.toUpperCase() + (vision ? "_VISION" : "");
     providers[id] = {
       apiKeys: split(env[key + "_API_KEYS"]),
       models: split(env[key + "_MODELS"]),
       baseUrl: id === "cloudflare" ? "" : String(env[key + "_BASE_URL"] || "").trim(),
+      envPrefix: key,
       clientHeaders: id === "agentrouter" ? {
         originator: String(env.AGENTROUTER_ORIGINATOR || "").trim(),
         version: String(env.AGENTROUTER_VERSION || "").trim(),
@@ -94,7 +100,13 @@ export function loadConfig(env = process.env) {
       } : {}
     };
   }
-  applyCloudflareAccounts(providers.cloudflare, env);
+  applyCloudflareAccounts(providers.cloudflare, env, vision ? "CLOUDFLARE_VISION" : "CLOUDFLARE");
+  return providers;
+}
+
+export function loadConfig(env = process.env) {
+  const providers = readProviders(env);
+  const visionProviders = readProviders(env, { vision: true });
   const retryableValues = split(env.RETRY_STATUS_CODES || DEFAULT_RETRY_STATUS_CODES.join(","))
     .map(Number).filter((v) => Number.isInteger(v) && v >= 100 && v <= 599);
   return {
@@ -110,9 +122,8 @@ export function loadConfig(env = process.env) {
     maxBodyBytes: Math.max(1, Number(env.MAX_REQUEST_BODY_MB || 32)) * 1024 * 1024,
     connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
     retryableStatus: new Set(retryableValues),
-    // Models that accept image input, as provider-scoped entries. Empty = no
-    // vision-aware filtering.
-    visionModels: readVisionModels(env),
-    providers
+    providers,
+    // Separate pool for image requests: own keys, own base URLs, own models.
+    visionProviders
   };
 }

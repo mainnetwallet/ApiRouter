@@ -1,20 +1,16 @@
 /**
  * Vision-aware routing.
  *
- * Many models on the configured providers are text-only and answer HTTP 400 as
- * soon as a request carries an image. When the <PROVIDER>_VISION_MODELS
- * variables (GEMINI_VISION_MODELS, GROQ_VISION_MODELS, ...) list the models that
- * accept images, a request containing an image is only routed to those models,
- * so text-only models are never tried (and never logged as failed attempts).
+ * Image requests use a pool of their own. Each provider can be given a separate
+ * vision key, base URL and model list (GEMINI_VISION_API_KEYS,
+ * GEMINI_VISION_BASE_URL, GEMINI_VISION_MODELS, ...). A request that carries an
+ * image is routed ONLY to those vision targets, and a text request never
+ * reaches them, so text-only models are not tried (or logged as failures) for
+ * images and vision keys are not spent on plain text.
  *
- * With no vision models configured nothing is filtered: behaviour is unchanged.
+ * While no vision target is configured at all, nothing changes: images go
+ * through the normal pool as before.
  */
-
-const split = (value) => String(value || "").split(",").map((v) => v.trim()).filter(Boolean);
-
-export function parseVisionModels(value) {
-  return split(value);
-}
 
 const MESSAGE_FIELDS = ["messages", "input", "contents", "system", "systemInstruction", "system_instruction"];
 
@@ -55,28 +51,14 @@ export function requestHasImage(body) {
 }
 
 /**
- * A vision entry is "provider:model" ("cloudflare:@cf/qwen/qwen3.8-27b"), which
- * is what the per-provider variables produce, or a bare model id
- * ("gemini-3.7-flash") from the legacy global VISION_MODELS. Matching is
- * case-insensitive.
+ * Picks the candidate pool for a request.
+ *   { pool: "vision", targets }   image request, vision targets configured
+ *   { pool: "text",   targets }   everything else (and images while no vision
+ *                                 target is configured)
+ * `targets` of the vision pool is never empty here: with no vision targets the
+ * request stays on the text pool, so a caller only needs to guard the text pool.
  */
-export function isVisionTarget(target, visionModels) {
-  const model = String(target?.model ?? "").toLowerCase();
-  const provider = String(target?.provider ?? "").toLowerCase();
-  return visionModels.some((entry) => {
-    const e = entry.toLowerCase();
-    return e === model || e === `${provider}:${model}`;
-  });
-}
-
-/**
- * Narrows the candidate targets for a request.
- *   { filtered: false }                      nothing to do (no image / no vision models configured)
- *   { filtered: true, targets }              only vision-capable targets remain
- * `targets` may be empty: the caller reports that as a clear no_route error.
- */
-export function filterTargetsForImages(targets, body, visionModels) {
-  if (!Array.isArray(visionModels) || visionModels.length === 0) return { filtered: false, targets };
-  if (!requestHasImage(body)) return { filtered: false, targets };
-  return { filtered: true, targets: targets.filter((target) => isVisionTarget(target, visionModels)) };
+export function selectPool(body, { textTargets = [], visionTargets = [] } = {}) {
+  if (visionTargets.length > 0 && requestHasImage(body)) return { pool: "vision", targets: visionTargets };
+  return { pool: "text", targets: textTargets };
 }

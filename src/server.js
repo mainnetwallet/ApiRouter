@@ -3,7 +3,7 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { loadConfig, buildTargets } from "./config.js";
+import { loadConfig, buildTargets, VISION_POOL } from "./config.js";
 import {
   describeHealth,
   rankTargets,
@@ -18,7 +18,7 @@ import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, fallbackGroups, pinTargets } from "./observability/route-select.js";
-import { filterTargetsForImages } from "./vision.js";
+import { selectPool } from "./vision.js";
 import {
   bridgeProtocol,
   buildBridgeRequest,
@@ -53,7 +53,10 @@ import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage } from "./observability/sanitize.js";
 
 const config = loadConfig();
-const targets = buildTargets(config.providers);
+const textTargets = buildTargets(config.providers);
+const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
+// Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
+const targets = [...textTargets, ...visionTargets];
 const sessions = new SessionStore();
 
 /**
@@ -319,7 +322,10 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 400, { error: { message: pin.error, type: "invalid_request_error" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  const pinned = pinTargets(targets, pin, requestedModel);
+  // An image request is served only by the vision pool (own keys / base URLs /
+  // models); every other request only by the text pool.
+  const { pool, targets: poolTargets } = selectPool(body, { textTargets, visionTargets });
+  const pinned = pinTargets(poolTargets, pin, requestedModel);
   if (pinned.pinned && pinned.targets.length === 0) {
     const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;
     const message = `No configured target matches the pinned selection (${sanitizeMessage(where)})`;
@@ -331,22 +337,7 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 404, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  // A request carrying an image only goes to models listed in the <PROVIDER>_VISION_MODELS variables.
-  // An explicit pin (Playground) is the operator's choice, so it is left alone.
-  const vision = pinned.pinned
-    ? { filtered: false, targets: pinned.targets }
-    : filterTargetsForImages(pinned.targets, body, config.visionModels);
-  if (vision.filtered && vision.targets.length === 0) {
-    const message = "The request contains an image, but no configured target is listed in any <PROVIDER>_VISION_MODELS";
-    recordRequest({
-      pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,
-      outcome: "failed", errorType: "no_route", errorMessage: message, attempts
-    });
-    return json(res, 503, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
-  }
-
-  const selection = selectTargetsForProtocol(vision.targets, protocol, requestedModel);
+  const selection = selectTargetsForProtocol(pinned.targets, protocol, requestedModel);
   const bridgeCtx = bridgeKind === "codex"
     ? { customTools: customToolNames(body), inputTokens: estimateResponsesInputTokens(body) }
     : bridgeKind === "chat"
@@ -358,6 +349,9 @@ async function proxy(req, res, protocol, pathname) {
   const routeGroups = fallbackGroups(selection);
 
   if (selection.compatible.length === 0) {
+    const noRouteMessage = pool === VISION_POOL
+      ? "No configured vision target supports this client protocol"
+      : "No configured provider targets support this client protocol";
     recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id,
@@ -367,10 +361,10 @@ async function proxy(req, res, protocol, pathname) {
       httpStatus: 503,
       outcome: "failed",
       errorType: "no_route",
-      errorMessage: "No configured provider targets support this client protocol",
+      errorMessage: noRouteMessage,
       attempts
     });
-    return json(res, 503, { error: { message: "No configured provider targets support this client protocol", type: "no_route" } });
+    return json(res, 503, { error: { message: noRouteMessage, type: "no_route" } });
   }
 
   try {

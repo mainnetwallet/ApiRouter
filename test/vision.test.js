@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { requestHasImage, filterTargetsForImages, isVisionTarget, parseVisionModels } from "../src/vision.js";
+import { requestHasImage, selectPool } from "../src/vision.js";
+import { loadConfig, buildTargets, isProviderConfigured, VISION_POOL } from "../src/config.js";
 
-const t = (provider, model) => ({ provider, model, keyIndex: 0 });
-const targets = [t("groq", "openai/gpt-oss-120b"), t("gemini", "gemini-3.7-flash"), t("cloudflare", "@cf/qwen/qwen3.8-27b"), t("groq", "qwen3.8-27b")];
+const IMAGE_BODY = { messages: [{ role: "user", content: [{ type: "image", source: {} }] }] };
+const TEXT_BODY = { messages: [{ role: "user", content: "hi" }] };
 
 test("detects images in every client protocol", () => {
   assert.equal(requestHasImage({ messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "x" } }] }] }), true);
@@ -21,47 +22,65 @@ test("text-only requests and tool schemas are not images", () => {
   assert.equal(requestHasImage(null), false);
 });
 
-test("filter keeps only vision targets when a request has an image", () => {
-  const body = { messages: [{ role: "user", content: [{ type: "image", source: {} }] }] };
-  const out = filterTargetsForImages(targets, body, ["gemini-3.7-flash", "cloudflare:@cf/qwen/qwen3.8-27b"]);
-  assert.equal(out.filtered, true);
-  assert.deepEqual(out.targets.map((x) => `${x.provider}:${x.model}`), ["gemini:gemini-3.7-flash", "cloudflare:@cf/qwen/qwen3.8-27b"]);
+test("vision pool has its own keys, base URL and models", () => {
+  const cfg = loadConfig({
+    GROQ_API_KEYS: "text-key", GROQ_BASE_URL: "https://text.example/v1", GROQ_MODELS: "text-model",
+    GROQ_VISION_API_KEYS: "vk1,vk2", GROQ_VISION_BASE_URL: "https://vision.example/v1", GROQ_VISION_MODELS: "vision-model"
+  });
+  assert.deepEqual(cfg.providers.groq.apiKeys, ["text-key"]);
+  assert.equal(cfg.providers.groq.baseUrl, "https://text.example/v1");
+  assert.deepEqual(cfg.visionProviders.groq.apiKeys, ["vk1", "vk2"]);
+  assert.equal(cfg.visionProviders.groq.baseUrl, "https://vision.example/v1");
+  assert.deepEqual(cfg.visionProviders.groq.models, ["vision-model"]);
+
+  const vision = buildTargets(cfg.visionProviders, VISION_POOL);
+  assert.deepEqual(vision.map((x) => [x.model, x.apiKey, x.baseUrl, x.pool]),
+    [["vision-model", "vk1", "https://vision.example/v1", "vision"], ["vision-model", "vk2", "https://vision.example/v1", "vision"]]);
+  const text = buildTargets(cfg.providers);
+  assert.equal(text.length, 1);
+  assert.equal(text[0].pool, undefined);
 });
 
-test("no filtering without VISION_MODELS or without an image", () => {
-  const body = { messages: [{ role: "user", content: [{ type: "image", source: {} }] }] };
-  assert.equal(filterTargetsForImages(targets, body, []).filtered, false);
-  assert.equal(filterTargetsForImages(targets, { messages: [{ role: "user", content: "hi" }] }, ["gemini-3.7-flash"]).filtered, false);
+test("a vision pool needs its own keys, models and base URL (nothing is inherited from the text pool)", () => {
+  const cfg = loadConfig({ GROQ_API_KEYS: "k", GROQ_BASE_URL: "https://x/v1", GROQ_MODELS: "m", GROQ_VISION_MODELS: "v" });
+  assert.equal(isProviderConfigured(cfg.providers.groq), true);
+  assert.equal(isProviderConfigured(cfg.visionProviders.groq), false);
+  assert.deepEqual(buildTargets(cfg.visionProviders, VISION_POOL), []);
 });
 
-test("provider:model entries are scoped to that provider and ids are case-insensitive", () => {
-  assert.equal(isVisionTarget(t("groq", "qwen3.8-27b"), ["cloudflare:qwen3.8-27b"]), false);
-  assert.equal(isVisionTarget(t("groq", "Qwen3.8-27B"), ["qwen3.8-27b"]), true);
-  assert.deepEqual(parseVisionModels(" a , b ,,"), ["a", "b"]);
+test("vision targets never share an id (health state) with text targets of the same model", () => {
+  const cfg = loadConfig({
+    GROQ_API_KEYS: "k", GROQ_BASE_URL: "https://x/v1", GROQ_MODELS: "same",
+    GROQ_VISION_API_KEYS: "v", GROQ_VISION_BASE_URL: "https://y/v1", GROQ_VISION_MODELS: "same"
+  });
+  const text = buildTargets(cfg.providers)[0];
+  const vision = buildTargets(cfg.visionProviders, VISION_POOL)[0];
+  assert.notEqual(text.id ?? `${text.provider}:${text.model}:key-${text.keyIndex}`, vision.id);
 });
 
-import { readVisionModels, loadConfig } from "../src/config.js";
-
-test("per-provider *_VISION_MODELS become provider-scoped entries", () => {
-  const env = {
-    GEMINI_VISION_MODELS: "gemini-3.7-flash, gemini-3.6-flash",
-    GROQ_VISION_MODELS: "qwen/qwen3.8-27b",
-    CLOUDFLARE_VISION_MODELS: "@cf/qwen/qwen3.8-27b"
-  };
-  assert.deepEqual(readVisionModels(env), [
-    "gemini:gemini-3.7-flash", "gemini:gemini-3.6-flash",
-    "groq:qwen/qwen3.8-27b", "cloudflare:@cf/qwen/qwen3.8-27b"
-  ]);
-  assert.deepEqual(loadConfig(env).visionModels, readVisionModels(env));
+test("cloudflare vision pool uses CLOUDFLARE_VISION_ACCOUNT_IDS", () => {
+  const cfg = loadConfig({
+    CLOUDFLARE_API_KEYS: "t", CLOUDFLARE_ACCOUNT_IDS: "textacct", CLOUDFLARE_MODELS: "m",
+    CLOUDFLARE_VISION_API_KEYS: "vt", CLOUDFLARE_VISION_ACCOUNT_IDS: "visionacct", CLOUDFLARE_VISION_MODELS: "vm"
+  });
+  const [v] = buildTargets(cfg.visionProviders, VISION_POOL);
+  assert.match(v.baseUrl, /\/accounts\/visionacct\/ai\/v1$/);
+  const [x] = buildTargets(cfg.providers);
+  assert.match(x.baseUrl, /\/accounts\/textacct\/ai\/v1$/);
 });
 
-test("a provider's vision list does not leak onto the same model id elsewhere", () => {
-  const visionModels = readVisionModels({ GROQ_VISION_MODELS: "shared-model" });
-  assert.equal(isVisionTarget({ provider: "groq", model: "shared-model" }, visionModels), true);
-  assert.equal(isVisionTarget({ provider: "openrouter", model: "shared-model" }, visionModels), false);
+test("selectPool: images go only to the vision pool, text only to the text pool", () => {
+  const textTargets = [{ provider: "groq", model: "t" }];
+  const visionTargets = [{ provider: "gemini", model: "v", pool: "vision" }];
+  assert.equal(selectPool(IMAGE_BODY, { textTargets, visionTargets }).pool, "vision");
+  assert.deepEqual(selectPool(IMAGE_BODY, { textTargets, visionTargets }).targets, visionTargets);
+  assert.equal(selectPool(TEXT_BODY, { textTargets, visionTargets }).pool, "text");
+  assert.deepEqual(selectPool(TEXT_BODY, { textTargets, visionTargets }).targets, textTargets);
 });
 
-test("no vision variables means no filtering; legacy VISION_MODELS still works", () => {
-  assert.deepEqual(readVisionModels({}), []);
-  assert.deepEqual(readVisionModels({ VISION_MODELS: "a,b" }), ["a", "b"]);
+test("selectPool: with no vision target configured, images stay on the text pool (unchanged behaviour)", () => {
+  const textTargets = [{ provider: "groq", model: "t" }];
+  const out = selectPool(IMAGE_BODY, { textTargets, visionTargets: [] });
+  assert.equal(out.pool, "text");
+  assert.deepEqual(out.targets, textTargets);
 });

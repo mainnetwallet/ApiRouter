@@ -174,7 +174,10 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
 
   // --- /api/providers ----------------------------------------------------
   function providersPayload(now = Date.now()) {
-    const entries = describeAll(now);
+    const allEntries = describeAll(now);
+    // Text providers and the separate vision pool are reported apart.
+    const entries = allEntries.filter((entry) => (entry.pool ?? "text") === "text");
+    const visionEntries = allEntries.filter((entry) => entry.pool === "vision");
     const rollup = providerRollup(entries);
     const configView = describeConfig(config, targets);
     const byId = new Map(configView.providers.map((provider) => [provider.id, provider]));
@@ -216,6 +219,11 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
         health: summarizeHealth(entries)
       },
       providers,
+      // The separate vision pool (image requests only), per target.
+      visionProviders: configView.visionProviders.map((provider) => ({
+        ...provider,
+        targets: visionEntries.filter((entry) => entry.provider === provider.id)
+      })),
       unconfiguredHealth: orphans
     };
   }

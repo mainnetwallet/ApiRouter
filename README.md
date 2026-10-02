@@ -62,17 +62,30 @@ A provider needs:
 
 Configure them in `.env`.
 
-### Images (vision-aware routing)
+### Images (separate vision providers)
 
-Many models are text-only and answer HTTP 400 to a request that carries an image.
-Set a vision list per provider: `GEMINI_VISION_MODELS`, `GROQ_VISION_MODELS`,
-`CLOUDFLARE_VISION_MODELS`, and so on (comma-separated model ids). A request
-containing an image — in any client protocol — is then routed only to those
-models, each scoped to its own provider. Every listed model must also be in that
-provider's `*_MODELS`; one that is not is ignored. With all of them empty nothing
-is filtered. If an image arrives and no configured target is listed, the client
-gets `503 no_route`. Requests pinned with the `x-multi-ai-pin-*` headers are not
-filtered. The old global `VISION_MODELS` is still read, for existing setups.
+Many models are text-only and answer HTTP 400 to a request that carries an image,
+so image requests use a pool of their own. Every provider can be given a separate
+vision key, base URL and model list:
+
+```env
+GEMINI_VISION_API_KEYS=key1,key2
+GEMINI_VISION_BASE_URL=https://generativelanguage.googleapis.com/
+GEMINI_VISION_MODELS=gemini-3.7-flash
+```
+
+The same three variables exist for every provider (`GROQ_VISION_*`,
+`MISTRAL_VISION_*`, ...); Cloudflare takes `CLOUDFLARE_VISION_ACCOUNT_IDS` instead
+of a base URL. Nothing is shared with the normal `<PROVIDER>_API_KEYS` /
+`_BASE_URL` / `_MODELS`.
+
+- A request containing an image, in any client protocol, goes **only** to the vision
+  targets, with the usual fallback between them.
+- A text request never reaches a vision target.
+- A vision provider is active once it has keys, models and a base URL.
+- While no vision provider is active at all, images use the normal pool as before.
+- Requests pinned with the `x-multi-ai-pin-*` headers are matched inside the pool
+  the request belongs to (vision pool for images, normal pool otherwise).
 
 Retryable statuses:
 

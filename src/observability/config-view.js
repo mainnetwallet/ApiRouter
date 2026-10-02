@@ -28,8 +28,8 @@ function configuredHeaderNames(provider) {
     .sort();
 }
 
-function describeProvider(id, provider, targets) {
-  const providerTargets = targets.filter((target) => target.provider === id);
+function describeProvider(id, provider, targets, pool = "text") {
+  const providerTargets = targets.filter((target) => target.provider === id && (target.pool ?? "text") === pool);
   const configured = isProviderConfigured(provider);
 
   return {
@@ -61,7 +61,7 @@ function describeProvider(id, provider, targets) {
     targetCount: providerTargets.length,
 
     // The env var names an operator would edit for this provider.
-    envPrefix: id.toUpperCase()
+    envPrefix: provider.envPrefix || id.toUpperCase()
   };
 }
 
@@ -87,11 +87,15 @@ export function describeConfig(config, targets = []) {
       exactModelPreferred: true
     },
     providers,
+    // Image requests use this separate pool (own keys, base URLs and models).
+    visionProviders: Object.entries(config.visionProviders ?? {}).map(([id, provider]) =>
+      describeProvider(id, provider, targets, "vision")),
     summary: {
       knownProviders: providers.length,
       configuredProviders: configuredProviders.length,
       unconfiguredProviders: providers.length - configuredProviders.length,
-      configuredTargets: targets.length
+      configuredTargets: targets.filter((target) => (target.pool ?? "text") === "text").length,
+      configuredVisionTargets: targets.filter((target) => target.pool === "vision").length
     }
   };
 }
@@ -100,9 +104,9 @@ export function describeConfig(config, targets = []) {
  * The env var names an operator can safely act on. Values are never included.
  * Grouped the way `.env.example` presents them so the UI can mirror that file.
  */
-export function describeEnvironment(config) {
-  const providerVars = Object.entries(config.providers).map(([id, provider]) => {
-    const prefix = id.toUpperCase();
+function providerEnvVars(providers, { vision }) {
+  return Object.entries(providers).map(([id, provider]) => {
+    const prefix = id.toUpperCase() + (vision ? "_VISION" : "");
     return {
       provider: id,
       vars: [
@@ -110,11 +114,16 @@ export function describeEnvironment(config) {
         { name: `${prefix}_MODELS`, configured: provider.models.length > 0, kind: "list" },
         ...(id === "cloudflare"
           // Cloudflare's URL is built from the account id, so that is what to set.
-          ? [{ name: "CLOUDFLARE_ACCOUNT_IDS", configured: (provider.accountIds || []).length > 0, kind: "list" }]
+          ? [{ name: `${prefix}_ACCOUNT_IDS`, configured: (provider.accountIds || []).length > 0, kind: "list" }]
           : [{ name: `${prefix}_BASE_URL`, configured: Boolean(provider.baseUrl), kind: "url" }])
       ]
     };
   });
+}
+
+export function describeEnvironment(config) {
+  const providerVars = providerEnvVars(config.providers, { vision: false });
+  const visionProviderVars = providerEnvVars(config.visionProviders ?? {}, { vision: true });
 
   return {
     server: [
@@ -123,6 +132,7 @@ export function describeEnvironment(config) {
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
       { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
     ],
-    providers: providerVars
+    providers: providerVars,
+    visionProviders: visionProviderVars
   };
 }

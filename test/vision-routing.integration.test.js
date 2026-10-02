@@ -13,76 +13,71 @@ const IMAGE = { type: "image", source: { type: "base64", media_type: "image/png"
 const withImage = { model: "any", max_tokens: 32, messages: [{ role: "user", content: [{ type: "text", text: "what is this?" }, IMAGE] }] };
 const textOnly = { model: "any", max_tokens: 32, messages: [{ role: "user", content: "hi" }] };
 
+const reply = (status, text) => () => ({ status, body: status === 200 ? chatReply(text) : { error: { message: "x" } } });
+
+/**
+ * One text provider (groq) and two vision providers (openrouter, mistral), each
+ * with its own mock upstream, key and model, so the test can see exactly which
+ * pool served a request.
+ */
 async function setup(t, { textStatus = 200, vision1Status = 429, vision2Status = 200 } = {}) {
-  const text = await startMockUpstream(() => ({ status: textStatus, body: textStatus === 200 ? chatReply("from-text") : { error: { message: "x" } } }));
-  const v1 = await startMockUpstream(() => ({ status: vision1Status, body: vision1Status === 200 ? chatReply("from-v1") : { error: { message: "x" } } }));
-  const v2 = await startMockUpstream(() => ({ status: vision2Status, body: vision2Status === 200 ? chatReply("from-v2") : { error: { message: "x" } } }));
+  const text = await startMockUpstream(reply(textStatus, "from-text"));
+  const v1 = await startMockUpstream(reply(vision1Status, "from-v1"));
+  const v2 = await startMockUpstream(reply(vision2Status, "from-v2"));
   const router = await startRouter({
-    GROQ_API_KEYS: "k1", GROQ_MODELS: "text-model", GROQ_BASE_URL: text.baseUrl,
-    OPENROUTER_API_KEYS: "k2", OPENROUTER_MODELS: "vision-1", OPENROUTER_BASE_URL: v1.baseUrl,
-    MISTRAL_API_KEYS: "k3", MISTRAL_MODELS: "vision-2", MISTRAL_BASE_URL: v2.baseUrl,
-    VISION_MODELS: "vision-1,vision-2"
+    GROQ_API_KEYS: "text-key", GROQ_MODELS: "text-model", GROQ_BASE_URL: text.baseUrl,
+    OPENROUTER_VISION_API_KEYS: "vk1", OPENROUTER_VISION_MODELS: "vision-1", OPENROUTER_VISION_BASE_URL: v1.baseUrl,
+    MISTRAL_VISION_API_KEYS: "vk2", MISTRAL_VISION_MODELS: "vision-2", MISTRAL_VISION_BASE_URL: v2.baseUrl
   });
   t.after(async () => { await router.close(); await text.close(); await v1.close(); await v2.close(); });
   return { text, v1, v2, router };
 }
 
-test("image request: text-only model is never tried; a failing vision model falls back to the next vision model", async (t) => {
+test("image request goes only to the vision pool and falls back inside it", async (t) => {
   const { text, v1, v2, router } = await setup(t);
-  // Asking for vision-1 makes it the first target, so the fallback path is deterministic.
   const res = await router.request("/v1/messages", postJson({ ...withImage, model: "vision-1" }));
   assert.equal(res.status, 200);
-  assert.equal(text.apiRequests.length, 0, "text-only model must not receive an image request");
-  assert.equal(v1.apiRequests.length, 1, "first vision model is tried (and fails with 429)");
-  assert.equal(v2.apiRequests.length, 1, "next vision model answers");
+  assert.equal(text.apiRequests.length, 0, "text pool must not receive an image request");
+  assert.equal(v1.apiRequests.length, 1, "first vision target is tried (and fails with 429)");
+  assert.equal(v2.apiRequests.length, 1, "next vision target answers");
 });
 
-test("image request: when every vision model fails, the text-only model is still not used", async (t) => {
+test("image request: when every vision target fails, the text pool is still not used", async (t) => {
   const { text, router } = await setup(t, { vision2Status: 500 });
   const res = await router.request("/v1/messages", postJson(withImage));
   assert.notEqual(res.status, 200);
   assert.equal(text.apiRequests.length, 0);
 });
 
-test("text-only request: all models stay eligible, exactly as before", async (t) => {
-  const { text, router } = await setup(t, { vision1Status: 500, vision2Status: 500 });
+test("text request never reaches the vision pool", async (t) => {
+  const { text, v1, v2, router } = await setup(t, { vision1Status: 200, vision2Status: 200 });
   const res = await router.request("/v1/messages", postJson(textOnly));
-  assert.equal(res.status, 200, "falls through the failing vision models to the text model");
+  assert.equal(res.status, 200);
   assert.equal(text.apiRequests.length, 1);
+  assert.equal(v1.apiRequests.length, 0);
+  assert.equal(v2.apiRequests.length, 0);
 });
 
-test("image request with no configured vision target gets a clear 503", async (t) => {
-  const text = await startMockUpstream(() => ({ status: 200, body: chatReply("from-text") }));
+test("vision targets use their own key and base URL", async (t) => {
+  const v = await startMockUpstream(reply(200, "from-vision"));
+  const text = await startMockUpstream(reply(200, "from-text"));
   const router = await startRouter({
-    GROQ_API_KEYS: "k1", GROQ_MODELS: "text-model", GROQ_BASE_URL: text.baseUrl,
-    VISION_MODELS: "some-other-vision-model"
+    GROQ_API_KEYS: "text-key", GROQ_MODELS: "m", GROQ_BASE_URL: text.baseUrl,
+    GROQ_VISION_API_KEYS: "vision-key", GROQ_VISION_MODELS: "vm", GROQ_VISION_BASE_URL: v.baseUrl
   });
+  t.after(async () => { await router.close(); await text.close(); await v.close(); });
+  const res = await router.request("/v1/messages", postJson(withImage));
+  assert.equal(res.status, 200);
+  assert.equal(text.apiRequests.length, 0);
+  assert.equal(v.apiRequests.length, 1);
+  assert.match(JSON.stringify(v.apiRequests[0].headers), /vision-key/);
+});
+
+test("no vision pool configured: images keep using the normal pool", async (t) => {
+  const text = await startMockUpstream(reply(200, "from-text"));
+  const router = await startRouter({ GROQ_API_KEYS: "k1", GROQ_MODELS: "text-model", GROQ_BASE_URL: text.baseUrl });
   t.after(async () => { await router.close(); await text.close(); });
   const res = await router.request("/v1/messages", postJson(withImage));
-  assert.equal(res.status, 503);
-  assert.equal(text.apiRequests.length, 0);
-});
-
-test("per-provider *_VISION_MODELS route an image only to those providers", async (t) => {
-  const text = await startMockUpstream(() => ({ status: 200, body: chatReply("from-text") }));
-  const v1 = await startMockUpstream(() => ({ status: 429, body: { error: { message: "x" } } }));
-  const v2 = await startMockUpstream(() => ({ status: 200, body: chatReply("from-v2") }));
-  const router = await startRouter({
-    GROQ_API_KEYS: "k1", GROQ_MODELS: "text-model", GROQ_BASE_URL: text.baseUrl,
-    OPENROUTER_API_KEYS: "k2", OPENROUTER_MODELS: "vision-1", OPENROUTER_BASE_URL: v1.baseUrl,
-    OPENROUTER_VISION_MODELS: "vision-1",
-    MISTRAL_API_KEYS: "k3", MISTRAL_MODELS: "vision-2", MISTRAL_BASE_URL: v2.baseUrl,
-    MISTRAL_VISION_MODELS: "vision-2"
-  });
-  t.after(async () => { await router.close(); await text.close(); await v1.close(); await v2.close(); });
-
-  const res = await router.request("/v1/messages", postJson({ ...withImage, model: "vision-1" }));
   assert.equal(res.status, 200);
-  assert.equal(text.apiRequests.length, 0, "provider without a vision list is skipped for images");
-  assert.equal(v1.apiRequests.length, 1);
-  assert.equal(v2.apiRequests.length, 1);
-
-  const plain = await router.request("/v1/messages", postJson({ ...textOnly, model: "text-model" }));
-  assert.equal(plain.status, 200);
-  assert.equal(text.apiRequests.length, 1, "text requests still reach every provider");
+  assert.equal(text.apiRequests.length, 1);
 });

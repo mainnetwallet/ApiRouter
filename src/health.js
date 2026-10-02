@@ -50,6 +50,7 @@ export class HealthRegistry {
         provider: target.provider,
         model: target.model,
         keyIndex: target.keyIndex,
+        pool: target.pool ?? "text",
         status: HEALTH_STATES.UNKNOWN,
         score: 50,
         cooldownUntil: 0,
