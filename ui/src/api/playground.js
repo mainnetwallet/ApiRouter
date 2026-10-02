@@ -66,9 +66,11 @@ export function buildRequestBody({
   system,
   temperature,
   maxTokens,
+  images = [],
   stream = true
 }) {
   const text = String(prompt ?? "");
+  const pictures = Array.isArray(images) ? images.filter((image) => image?.data && image?.mimeType) : [];
   const includeModel = !autoRoute && Boolean(model);
   // Blank means "no limit": the field is simply not sent, so the provider's own
   // default applies. (`Number("")` is 0, which must never reach the wire.)
@@ -82,7 +84,18 @@ export function buildRequestBody({
       max_tokens: limited ? maxTokens : ANTHROPIC_UNLIMITED_MAX_TOKENS,
       ...(system ? { system } : {}),
       ...(Number.isFinite(temperature) ? { temperature } : {}),
-      messages: [{ role: "user", content: text }],
+      messages: [{
+        role: "user",
+        content: pictures.length === 0
+          ? text
+          : [
+            ...pictures.map((image) => ({
+              type: "image",
+              source: { type: "base64", media_type: image.mimeType, data: image.data }
+            })),
+            ...(text ? [{ type: "text", text }] : [])
+          ]
+      }],
       stream
     };
   }
@@ -90,7 +103,18 @@ export function buildRequestBody({
   if (protocol === "openai-responses") {
     return {
       ...(includeModel ? { model } : {}),
-      input: text,
+      input: pictures.length === 0
+        ? text
+        : [{
+          role: "user",
+          content: [
+            ...(text ? [{ type: "input_text", text }] : []),
+            ...pictures.map((image) => ({
+              type: "input_image",
+              image_url: `data:${image.mimeType};base64,${image.data}`
+            }))
+          ]
+        }],
       ...(system ? { instructions: system } : {}),
       ...(Number.isFinite(temperature) ? { temperature } : {}),
       ...(limited ? { max_output_tokens: maxTokens } : {}),
@@ -104,7 +128,13 @@ export function buildRequestBody({
     if (limited) generationConfig.maxOutputTokens = maxTokens;
 
     return {
-      contents: [{ role: "user", parts: [{ text }] }],
+      contents: [{
+        role: "user",
+        parts: [
+          ...(text || pictures.length === 0 ? [{ text }] : []),
+          ...pictures.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } }))
+        ]
+      }],
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       ...(Object.keys(generationConfig).length ? { generationConfig } : {})
     };
@@ -114,7 +144,18 @@ export function buildRequestBody({
     ...(includeModel ? { model } : {}),
     messages: [
       ...(system ? [{ role: "system", content: system }] : []),
-      { role: "user", content: text }
+      {
+        role: "user",
+        content: pictures.length === 0
+          ? text
+          : [
+            ...(text ? [{ type: "text", text }] : []),
+            ...pictures.map((image) => ({
+              type: "image_url",
+              image_url: { url: `data:${image.mimeType};base64,${image.data}` }
+            }))
+          ]
+      }
     ],
     ...(Number.isFinite(temperature) ? { temperature } : {}),
     ...(limited ? { max_tokens: maxTokens } : {}),
@@ -208,13 +249,14 @@ export function extractText(protocol, parsed) {
  */
 export async function sendPlaygroundRequest({
   protocol,
+  model,
   body,
   headers,
   signal,
   onDelta,
   onMeta
 }) {
-  const response = await apiStream(endpointFor(protocol, body.model), { body, signal, headers });
+  const response = await apiStream(endpointFor(protocol, model ?? body.model), { body, signal, headers });
 
   const routed = {
     provider: response.headers.get("x-multi-ai-provider"),

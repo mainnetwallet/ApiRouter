@@ -171,3 +171,70 @@ describe("playground pinning", () => {
     expect(buildPinHeaders({ autoRoute: false, provider: "", customModel: true })).toEqual({});
   });
 });
+
+describe("playground image attachments", () => {
+  const png = { mimeType: "image/png", data: "AAAA" };
+
+  it("keeps the plain-text shape when there are no images", () => {
+    expect(buildRequestBody({ protocol: "openai-chat", autoRoute: true, prompt: "hi", images: [] }).messages.at(-1))
+      .toEqual({ role: "user", content: "hi" });
+    expect(buildRequestBody({ protocol: "anthropic", autoRoute: true, prompt: "hi" }).messages[0].content).toBe("hi");
+  });
+
+  it("sends images as image_url parts for openai-chat", () => {
+    const body = buildRequestBody({ protocol: "openai-chat", autoRoute: true, prompt: "what is this?", images: [png] });
+    expect(body.messages.at(-1).content).toEqual([
+      { type: "text", text: "what is this?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }
+    ]);
+  });
+
+  it("sends images as base64 image blocks for anthropic", () => {
+    const body = buildRequestBody({ protocol: "anthropic", autoRoute: true, prompt: "what is this?", images: [png] });
+    expect(body.messages[0].content).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+      { type: "text", text: "what is this?" }
+    ]);
+  });
+
+  it("sends images as input_image parts for openai-responses", () => {
+    const body = buildRequestBody({ protocol: "openai-responses", autoRoute: true, prompt: "what is this?", images: [png] });
+    expect(body.input).toEqual([{
+      role: "user",
+      content: [
+        { type: "input_text", text: "what is this?" },
+        { type: "input_image", image_url: "data:image/png;base64,AAAA" }
+      ]
+    }]);
+  });
+
+  it("sends images as inlineData parts for gemini", () => {
+    const body = buildRequestBody({ protocol: "gemini", autoRoute: true, prompt: "what is this?", images: [png] });
+    expect(body.contents[0].parts).toEqual([
+      { text: "what is this?" },
+      { inlineData: { mimeType: "image/png", data: "AAAA" } }
+    ]);
+  });
+
+  it("allows an image with no text", () => {
+    const body = buildRequestBody({ protocol: "openai-chat", autoRoute: true, prompt: "", images: [png] });
+    expect(body.messages.at(-1).content).toEqual([
+      { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }
+    ]);
+  });
+
+  it("is detected as an image request by the gateway's own rules", async () => {
+    const { requestHasImage } = await import("../../../../src/vision.js");
+    for (const protocol of ["openai-chat", "anthropic", "openai-responses", "gemini"]) {
+      const body = buildRequestBody({ protocol, autoRoute: true, prompt: "x", images: [png] });
+      expect(requestHasImage(body), protocol).toBe(true);
+      expect(requestHasImage(buildRequestBody({ protocol, autoRoute: true, prompt: "x" })), protocol).toBe(false);
+    }
+  });
+});
+
+describe("custom model reaches the gateway", () => {
+  it("puts the chosen model in the gemini URL", () => {
+    expect(endpointFor("gemini", "brand-new-model")).toBe("/v1beta/models/brand-new-model:generateContent");
+  });
+});

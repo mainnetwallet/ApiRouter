@@ -12,6 +12,7 @@ import {
 } from "../api/playground.js";
 import { formatLatency, formatTokens, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 import { sanitizeText } from "../lib/sanitize.js";
+import { MAX_IMAGES, ACCEPTED_IMAGE_TYPES, imageProblem, readImageFile } from "../lib/images.js";
 
 /**
  * Playground.
@@ -54,6 +55,8 @@ export default function Playground() {
   const [maxTokens, setMaxTokens] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [images, setImages] = useState([]);
+  const fileInputRef = useRef(null);
 
   const activeProtocol = protocol || protocols[0] || "";
 
@@ -72,6 +75,7 @@ export default function Playground() {
   // A hand-typed model id wins over the dropdown. It needs a provider, because a
   // custom id can only be called through a pinned provider's own credentials.
   const customId = provider ? customModel.trim() : "";
+  const hasImages = images.length > 0;
 
   const selectedModel = customId || (model && modelOptions.includes(model)
     ? model
@@ -129,15 +133,52 @@ export default function Playground() {
   const [meta, setMeta] = useState(null);
   const abortRef = useRef(null);
 
+  const addImages = useCallback(async (fileList) => {
+    const files = Array.from(fileList ?? []);
+    let count = images.length;
+    const added = [];
+    for (const file of files) {
+      const problem = imageProblem(file, count);
+      if (problem) {
+        toast.error("Image not attached", { detail: problem });
+        continue;
+      }
+      try {
+        added.push(await readImageFile(file));
+        count += 1;
+      } catch (error) {
+        toast.error("Image not attached", { detail: error?.message });
+      }
+    }
+    if (added.length > 0) setImages((current) => [...current, ...added].slice(0, MAX_IMAGES));
+  }, [images.length, toast]);
+
+  const removeImage = (id) => setImages((current) => current.filter((image) => image.id !== id));
+
+  const onPaste = (event) => {
+    const files = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith("image/"));
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addImages(files);
+  };
+
+  const onDrop = (event) => {
+    const files = Array.from(event.dataTransfer?.files ?? []).filter((file) => file.type.startsWith("image/"));
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addImages(files);
+  };
+
   const send = useCallback(async () => {
     const text = prompt.trim();
-    if (!text) return;
+    if (!text && images.length === 0) return;
+    const attached = images;
 
     const startedAt = Date.now();
     setBusy(true);
     setMeta(null);
 
-    const userMessage = { id: `u-${Date.now()}`, role: "user", text };
+    const userMessage = { id: `u-${Date.now()}`, role: "user", text, images: attached };
     const assistantId = `a-${Date.now()}`;
     setMessages((current) => [
       ...current,
@@ -145,6 +186,7 @@ export default function Playground() {
       { id: assistantId, role: "assistant", text: "", pending: true }
     ]);
     setPrompt("");
+    setImages([]);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -155,6 +197,7 @@ export default function Playground() {
         model: selectedModel,
         autoRoute,
         prompt: text,
+        images: attached,
         system: systemPrompt.trim() || null,
         temperature: Number(temperature),
         maxTokens: parseMaxTokens(maxTokens),
@@ -163,6 +206,9 @@ export default function Playground() {
 
       const result = await sendPlaygroundRequest({
         protocol: activeProtocol,
+        // Gemini carries the model in the URL, not the body, so it is passed
+        // explicitly; otherwise a pinned or custom model would never be sent.
+        model: !autoRoute && selectedModel ? selectedModel : undefined,
         body,
         headers: buildPinHeaders({ autoRoute, provider, keyIndex: pinnedKey, customModel: customId !== "" }),
         signal: controller.signal,
@@ -214,7 +260,7 @@ export default function Playground() {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [prompt, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, toast]);
+  }, [prompt, images, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, toast]);
 
   const cancel = () => abortRef.current?.abort();
 
@@ -320,16 +366,19 @@ export default function Playground() {
                   className="input mono"
                   type="text"
                   value={customModel}
-                  disabled={!provider}
-                  placeholder={provider ? "Custom model id (optional)" : "Pick a provider to use a custom model"}
+                  placeholder="Custom model id (optional)"
                   autoCapitalize="off"
                   autoCorrect="off"
                   spellCheck={false}
                   aria-label="Custom model id"
                   onChange={(event) => {
-                    setCustomModel(event.target.value);
+                    const value = event.target.value;
+                    // A custom id can only be called through one provider's own
+                    // credentials, so typing one with no provider picks the first.
+                    if (value.trim() && !provider && providerOptions.length > 0) setProvider(providerOptions[0]);
+                    setCustomModel(value);
                     setKeyIndex("");
-                    if (event.target.value.trim()) setAutoRoute(false);
+                    if (value.trim()) setAutoRoute(false);
                   }}
                   style={{ marginTop: "var(--sp-2)" }}
                 />
@@ -444,10 +493,17 @@ export default function Playground() {
                         {message.role === "user" ? "Prompt" : "Response"}
                         {message.error ? <span style={{ marginLeft: "auto", color: "var(--danger)" }}>{message.error.label}</span> : null}
                       </header>
+                      {message.images?.length ? (
+                        <div className="msg__images">
+                          {message.images.map((image) => (
+                            <img key={image.id} className="msg__image" src={image.dataUrl} alt={image.name} />
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="msg__body">
                         {message.text}
                         {message.pending ? <span className="stream-cursor" aria-label="streaming" /> : null}
-                        {!message.text && !message.pending && !message.error ? (
+                        {!message.text && !message.pending && !message.error && !message.images?.length ? (
                           <span className="dim">Provider returned an empty response.</span>
                         ) : null}
                       </div>
@@ -463,15 +519,16 @@ export default function Playground() {
             </div>
 
             <div className="panel__footer">
-              <div className="composer grow">
+              <div className="composer grow" onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
                 <label className="sr-only" htmlFor="pg-prompt">Prompt</label>
                 <textarea
                   id="pg-prompt"
                   className="textarea"
                   rows={3}
-                  placeholder="Ask something…  (Ctrl+Enter to send)"
+                  placeholder="Ask something…  (Ctrl+Enter to send, paste or drop images)"
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
+                  onPaste={onPaste}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
                       event.preventDefault();
@@ -479,12 +536,54 @@ export default function Playground() {
                     }
                   }}
                 />
+                {hasImages ? (
+                  <div className="attachments">
+                    {images.map((image) => (
+                      <div key={image.id} className="attachment">
+                        <img className="attachment__thumb" src={image.dataUrl} alt={image.name} />
+                        <button
+                          type="button"
+                          className="attachment__remove"
+                          aria-label={`Remove ${image.name}`}
+                          onClick={() => removeImage(image.id)}
+                          disabled={busy}
+                        >×</button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {hasImages && autoRoute ? (
+                  <span className="tiny dim">
+                    Image attached: Auto Route only uses models listed in VISION_MODELS.
+                  </span>
+                ) : null}
                 <div className="row">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept={ACCEPTED_IMAGE_TYPES.join(",")}
+                    multiple
+                    hidden
+                    onChange={(event) => {
+                      void addImages(event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={busy || images.length >= MAX_IMAGES}
+                    title={`Attach up to ${MAX_IMAGES} images`}
+                  >
+                    <Icon name="image" className="btn__icon" size={12} />
+                    Image
+                  </button>
                   <button
                     type="button"
                     className="btn btn--primary"
                     onClick={send}
-                    disabled={busy || prompt.trim().length === 0}
+                    disabled={busy || (prompt.trim().length === 0 && !hasImages)}
                   >
                     <Icon name="play" className="btn__icon" size={12} />
                     Send
