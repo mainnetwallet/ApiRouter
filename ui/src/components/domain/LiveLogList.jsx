@@ -239,3 +239,47 @@ export function LiveLogList({ rows, now = Date.now(), onSelectRequest = null }) 
     </ol>
   );
 }
+
+/**
+ * Plain-text transcript of the given calls (what is on screen), for pasting
+ * into a bug report or chat. Free text is scrubbed like everything else shown;
+ * only key indexes appear, never key values.
+ */
+export function formatRowsAsText(rows) {
+  const clean = (value) => sanitizeText(value, { maxLength: 1000 });
+  const blocks = (Array.isArray(rows) ? rows : []).filter(Boolean).map((row) => {
+    const steps = Array.isArray(row.steps) ? row.steps : [];
+    const head = [
+      `[${formatClock(steps[0]?.startedAt ?? row.ts)}]`,
+      row.state,
+      clean(requestText(row)),
+      row.requestId ? `id ${row.requestId}` : null,
+      describeOutcome(row, row.ts) ? `total ${describeOutcome(row, row.ts)}` : null
+    ].filter(Boolean).join("  ");
+    const lines = [head];
+
+    if (steps.length === 0) {
+      const target = clean(describeTarget(row));
+      if (target) lines.push(`  ${target}`);
+      if (row.reason) lines.push(`  ${clean(row.reason)}`);
+      return lines.join("\n");
+    }
+
+    steps.forEach((step, index) => {
+      if (index > 0 && steps[index - 1].state === STEP.FAILED) {
+        const prev = steps[index - 1];
+        const why = clean([Number.isInteger(prev.status) ? String(prev.status) : null, prev.reason].filter(Boolean).join(" · "));
+        lines.push(`  ↓ FALLBACK${why ? ` · ${why}` : ""}`);
+      }
+      const figures = describeStepOutcome(step, step.startedAt);
+      lines.push(`  ${index + 1}. ${step.state}  ${clean(describeTarget(step))}${figures ? `  (${figures})` : ""}`);
+      if (step.state === STEP.FAILED) {
+        const why = clean([step.reason, step.detail].filter(Boolean).join(" · "));
+        if (why) lines.push(`     ${why}`);
+      }
+    });
+    if (row.reason) lines.push(`  ${clean(row.reason)}`);
+    return lines.join("\n");
+  });
+  return blocks.join("\n\n");
+}

@@ -7,7 +7,8 @@ import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { Icon } from "../components/ui/Icon.jsx";
-import { LiveLogList } from "../components/domain/LiveLogList.jsx";
+import { LiveLogList, formatRowsAsText } from "../components/domain/LiveLogList.jsx";
+import { CopyButton } from "../components/ui/CopyButton.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
 import { getRequests } from "../api/requests.js";
@@ -149,6 +150,8 @@ export default function LiveLogs() {
     setRows([]);
   };
 
+  const copyText = useCallback(() => formatRowsAsText(visible), [visible]);
+
   const filtering = Boolean(provider || status || debouncedSearch.trim() || debouncedRequestId.trim());
   const initialLoading = log.loading && !log.data && !streaming && rows.length === 0;
   const disconnected = Boolean(log.error) && !streaming && !paused;
@@ -183,6 +186,12 @@ export default function LiveLogs() {
               <Icon name={paused ? "play" : "stop"} className="btn__icon" size={12} />
               {paused ? "Resume" : "Pause"}
             </button>
+            <CopyButton
+              label="Copy logs"
+              title="Copy the calls currently shown as plain text"
+              disabled={visible.length === 0}
+              getText={copyText}
+            />
             <button type="button" className="btn" onClick={clear} disabled={rows.length === 0}>
               <Icon name="trash" className="btn__icon" size={12} />
               Clear

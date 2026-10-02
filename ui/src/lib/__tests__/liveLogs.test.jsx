@@ -5,7 +5,7 @@ import {
   MAX_ROWS, STATE, STEP, buildRow, filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows
 } from "../liveLogs.js";
 import { createSseParser } from "../../api/liveStream.js";
-import { LiveLogList, LiveLogRow, describeOutcome, describeStepOutcome, formatClock } from "../../components/domain/LiveLogList.jsx";
+import { LiveLogList, LiveLogRow, describeOutcome, describeStepOutcome, formatClock, formatRowsAsText } from "../../components/domain/LiveLogList.jsx";
 
 const SECRET = "sk-super-secret-provider-key-1234567890";
 const T0 = Date.UTC(2026, 9, 1, 14, 2, 11);
@@ -478,5 +478,31 @@ describe("only the last 50 calls are kept", () => {
     rows = mergeRows(rows, [call(50)]);
     expect(rows).toHaveLength(50);
     expect(rows[0].requestId).toBe("id-1");
+  });
+});
+
+describe("copy logs as text", () => {
+  it("writes every model tried, the fallback line and the failure reason", () => {
+    const text = formatRowsAsText([buildRow(finished())]);
+    expect(text).toContain("SUCCESS");
+    expect(text).toContain("1. FAILED");
+    expect(text).toContain("↓ FALLBACK · 429");
+    expect(text).toContain("2. SUCCESS");
+    expect(text).toContain("key 0");
+    expect(text).toContain("key 1");
+    expect(text).toContain("quota");
+  });
+
+  it("never leaks a credential-shaped string", () => {
+    const row = buildRow(finished({
+      attempts: [{ index: 1, provider: "gemini", model: "m", keyIndex: 0, ok: false, status: 500, startedAt: T0, latencyMs: 5, errorMessage: `bad key ${SECRET}` }],
+      outcome: "failed", httpStatus: 500
+    }));
+    expect(formatRowsAsText([row])).not.toContain(SECRET);
+  });
+
+  it("is empty for no rows", () => {
+    expect(formatRowsAsText([])).toBe("");
+    expect(formatRowsAsText(null)).toBe("");
   });
 });
