@@ -446,7 +446,7 @@ test("the existing gateway contract is unchanged by the admin API", async (t) =>
 
   const models = await (await router.request("/v1/models")).json();
   assert.equal(models.object, "list");
-  assert.equal(models.data.length, 4);
+  assert.equal(models.data.length, 2, "unique model ids (model-a, model-b), not one per key");
 
   // The pre-existing 404 contract for unknown POST routes still holds.
   const nope = await router.request("/nope", {

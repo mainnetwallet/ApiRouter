@@ -709,8 +709,13 @@ test("GET /health and GET /v1/models report configured targets", async (t) => {
 
   const models = await (await router.request("/v1/models")).json();
   assert.equal(models.object, "list");
-  assert.equal(models.data.length, 2);
+  assert.equal(models.data.length, 1, "one entry per unique model id, not per key");
   assert.equal(models.data[0].id, "m");
+  assert.equal(models.data[0].type, "model");
+  assert.equal(models.has_more, false);
+
+  const doubled = await (await router.request("//v1/models")).json();
+  assert.equal(doubled.object, "list");
 });
 
 test("unknown routes return 404", async (t) => {

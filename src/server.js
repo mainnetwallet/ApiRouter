@@ -635,8 +635,9 @@ function isReserved(pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, "http://localhost");
-  const pathname = url.pathname;
+  // "//v1/models" (base URL with trailing slash + "/v1/...") must not parse as a host.
+  const url = new URL(String(req.url).replace(/^\/{2,}/, "/"), "http://localhost");
+  const pathname = url.pathname.replace(/\/{2,}/g, "/");
 
   if (req.method === "GET" && pathname === "/health") {
     const ranked = rankTargets(targets).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, protocols: target.protocols }));
@@ -644,8 +645,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && pathname === "/v1/models") {
-    const data = rankTargets(targets).map((target) => ({ id: target.model, object: "model", provider: target.provider, keyIndex: target.keyIndex }));
-    return json(res, 200, { object: "list", data });
+    // One entry per unique model id (clients choke on duplicates), in ranked order.
+    // Carries both OpenAI fields (object) and Anthropic fields (type, display_name,
+    // created_at, has_more...) so Claude Desktop / Claude Code discovery accepts it.
+    const seen = new Set();
+    const data = [];
+    for (const target of rankTargets(targets)) {
+      if (seen.has(target.model)) continue;
+      seen.add(target.model);
+      data.push({ type: "model", id: target.model, display_name: target.model, created_at: "2026-01-01T00:00:00Z", object: "model", provider: target.provider });
+    }
+    return json(res, 200, { object: "list", data, has_more: false, first_id: data[0]?.id ?? null, last_id: data.at(-1)?.id ?? null });
   }
 
   // Admin surface. Same auth rule as the proxy path.
