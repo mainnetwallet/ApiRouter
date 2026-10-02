@@ -163,7 +163,7 @@ for (const protocol of PROTOCOLS) {
   });
 }
 
-test("anthropic: a 400 from the exact provider is returned and the fallback is never tried", async (t) => {
+test("anthropic: a 400 from the exact provider falls back to the next tier", async (t) => {
   // The unit-level policy is covered in test/router.test.js; this confirms it
   // survives the whole HTTP path, status code included.
   const exact = await startMockUpstream(() => ({
@@ -190,7 +190,7 @@ test("anthropic: a 400 from the exact provider is returned and the fallback is n
     postJson({ model: "wanted-model", max_tokens: 32, messages: [{ role: "user", content: "hi" }] })
   );
 
-  assert.equal(res.status, 400, "the exact provider's status is surfaced unchanged");
+  assert.equal(res.status, 200, "a 400 on the exact provider now falls back to another target");
   assert.equal(exact.apiRequests.length, 1);
-  assert.equal(fallback.apiRequests.length, 0, "a non-retryable failure must not fall back");
+  assert.equal(fallback.apiRequests.length, 1, "the fallback tier answers after the exact tier's 400");
 });

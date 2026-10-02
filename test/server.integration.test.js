@@ -210,7 +210,31 @@ for (const status of [402, 408, 429, 500, 502, 503, 504]) {
   });
 }
 
-for (const status of [400, 422]) {
+test("HTTP 400 falls back to the next target without cooling the first down", async (t) => {
+  let n = 0;
+  const { upstream, router } = await withRig(
+    t,
+    () => (++n === 1 ? fail(400, "unsupported parameter") : ok()),
+    (u) => ({
+      GROQ_API_KEYS: "key-0,key-1",
+      GROQ_MODELS: "model-a",
+      GROQ_BASE_URL: u.baseUrl
+    })
+  );
+
+  const res = await router.request("/v1/chat/completions", postJson({ model: "model-a", messages: [] }));
+  assert.equal(res.status, 200);
+  assert.equal(upstream.apiRequests.length, 2);
+  assert.equal(upstream.apiRequests[0].headers.authorization, "Bearer key-0");
+  assert.equal(upstream.apiRequests[1].headers.authorization, "Bearer key-1");
+
+  // A generic 400 is not the provider's fault: key-0 must stay routable.
+  const health = await (await router.request("/health")).json();
+  const failed = (health.health || []).filter((h) => h.status === "failed" || h.status === "cooldown");
+  assert.equal(failed.length, 0, "a generic 400 must not cool any target down");
+});
+
+for (const status of [422]) {
   test(`HTTP ${status} is not retried and is returned to the client`, async (t) => {
     const { upstream, router } = await withRig(
       t,
@@ -406,7 +430,7 @@ test("an upstream 400 that rejects the model id falls back to the next target", 
   assert.equal(upstream.apiRequests.length, 2);
 });
 
-test("an ordinary upstream 400 is still not retried", async (t) => {
+test("an ordinary upstream 400 on every target is returned to the client as 400", async (t) => {
   const { upstream, router } = await withRig(
     t,
     () => ({ status: 400, body: { error: { message: "messages: field required" } } }),
@@ -419,7 +443,7 @@ test("an ordinary upstream 400 is still not retried", async (t) => {
 
   const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [] }));
   assert.equal(res.status, 400);
-  assert.equal(upstream.apiRequests.length, 1);
+  assert.equal(upstream.apiRequests.length, 2, "both keys are tried before giving up with 400");
 });
 
 // ---------------------------------------------------------------------------

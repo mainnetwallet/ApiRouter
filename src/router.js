@@ -147,6 +147,12 @@ export async function withFallback(
           throw error;
         }
 
+        // A generic 400 says this provider rejected this particular request
+        // (unsupported parameter, schema quirk, context window), not that the
+        // provider is unhealthy. Try the next target, but leave this one's
+        // health and cooldown alone so it keeps serving requests it accepts.
+        if (error?.skipCooldown) continue;
+
         // A 413 depends on the size of this one request (per-minute token caps
         // reset quickly), so cool the target down briefly, not for 15 minutes.
         health.markFailure(target, status, status === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : {});
@@ -174,8 +180,13 @@ export async function withFallback(
     throw err;
   }
 
-  const err = new Error("All routing targets failed");
-  err.status = 502;
+  // Every target answered 400: the request itself is almost certainly invalid,
+  // so report that to the client instead of masking it as a 502 gateway error.
+  const allBadRequest = failures.length > 0 && failures.every((failure) => failure.status === 400);
+  const err = new Error(allBadRequest
+    ? failures[failures.length - 1].message
+    : "All routing targets failed");
+  err.status = allBadRequest ? 400 : 502;
   err.failures = failures;
   throw err;
 }

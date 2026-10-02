@@ -685,3 +685,58 @@ test("an explicitly retryable error on the exact tier still falls through", asyn
   assert.deepEqual(attempted, ["p1:model-A", "p2:model-B"]);
   assert.equal(result.t.model, "model-B");
 });
+
+test("a generic 400 falls back to the next target without cooling the first down", async () => {
+  const targets = [
+    { provider: "a", model: "m1", keyIndex: 0 },
+    { provider: "b", model: "m2", keyIndex: 0 }
+  ];
+  const health = new HealthRegistry({ cooldownMs: 900000 });
+  const tried = [];
+
+  const result = await withFallback(
+    targets,
+    async (target) => {
+      tried.push(target.provider);
+      if (target.provider === "a") {
+        const e = new Error("unsupported parameter");
+        e.status = 400;
+        e.retryable = true;
+        e.skipCooldown = true;
+        throw e;
+      }
+      return "ok";
+    },
+    undefined,
+    new RouteSession(),
+    health
+  );
+
+  assert.equal(result, "ok");
+  assert.deepEqual(tried, ["a", "b"]);
+  assert.equal(health.isAvailable(targets[0]), true, "a generic 400 must not cool the target down");
+});
+
+test("when every target answers 400 the client gets a 400, not a 502", async () => {
+  const targets = [
+    { provider: "a", model: "m1", keyIndex: 0 },
+    { provider: "b", model: "m2", keyIndex: 0 }
+  ];
+
+  await assert.rejects(
+    () => withFallback(
+      targets,
+      async () => {
+        const e = new Error("messages: invalid");
+        e.status = 400;
+        e.retryable = true;
+        e.skipCooldown = true;
+        throw e;
+      },
+      undefined,
+      new RouteSession(),
+      new HealthRegistry({ cooldownMs: 900000 })
+    ),
+    (error) => error.status === 400 && error.failures.length === 2 && /invalid/.test(error.message)
+  );
+});

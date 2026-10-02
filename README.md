@@ -68,6 +68,10 @@ Retryable statuses:
 401,402,403,404,408,409,425,429,500,501,502,503,504,520,521,522,523,524,529
 ```
 
+HTTP 400 from a provider also falls back to the next target. A generic 400
+(unsupported parameter, schema quirk) does not cool the target down, and if
+every target answers 400 the client receives the 400 instead of a 502.
+
 ## Endpoints
 
 ### Gateway (public)
