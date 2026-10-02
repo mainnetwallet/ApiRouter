@@ -81,6 +81,18 @@ curl http://localhost:8788/health
 curl http://localhost:8788/v1/models
 ```
 
+## One-command launcher (no manual env setup)
+
+`bin/claude-router` sets `ANTHROPIC_BASE_URL`, the auth token and `NO_PROXY` for you,
+then starts `claude`. Start the router first (`npm start`), then:
+
+```bash
+bin/claude-router          # Termux / Linux / macOS / Git Bash
+bin\claude-router.cmd      # Windows
+```
+
+Optional overrides: `ROUTER_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`.
+
 ## Troubleshooting
 
 ### `API Error: 405 status code (no body)`
