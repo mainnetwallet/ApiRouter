@@ -35,7 +35,32 @@ $env:ANTHROPIC_API_KEY=$null
 claude
 ```
 
-If `MULTIAI_ROUTER_API_KEYS` is empty, local gateway authentication is not required.
+Bash / Termux (permanent, `~/.claude/settings.json`):
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8788",
+    "ANTHROPIC_AUTH_TOKEN": "any-key",
+    "ANTHROPIC_MODEL": "router",
+    "DISABLE_AUTOUPDATER": "1"
+  }
+}
+```
+
+Bash (current session only):
+
+```bash
+export ANTHROPIC_BASE_URL="http://localhost:8788"
+export ANTHROPIC_AUTH_TOKEN="any-key"
+unset ANTHROPIC_API_KEY
+claude
+```
+
+No trailing path on the base URL; Claude Code calls `/v1/messages` itself.
+
+If `MULTIAI_ROUTER_API_KEYS` is empty, local gateway authentication is not required
+(any token value works). If it is set, `ANTHROPIC_AUTH_TOKEN` must match one key.
 
 Claude Code uses:
 
@@ -50,6 +75,48 @@ The router selects only compatible Anthropic targets.
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8788/health
 ```
+
+```bash
+curl http://localhost:8788/health
+curl http://localhost:8788/v1/models
+```
+
+## Troubleshooting
+
+### `API Error: 405 status code (no body)`
+
+Cause: a system proxy (`HTTP_PROXY` / `HTTPS_PROXY`, VPN or corporate proxy) is
+intercepting Claude Code's request to `localhost:8788`. The proxy never reaches the
+router, so nothing shows in the router log. The router itself never returns an
+empty-body 405.
+
+Fix: make localhost bypass the proxy.
+
+Bash / Termux:
+
+```bash
+env | grep -i proxy
+export NO_PROXY=127.0.0.1,localhost
+export no_proxy=127.0.0.1,localhost
+```
+
+Permanent: add the two `export` lines to `~/.bashrc`, or add `NO_PROXY` and `no_proxy`
+to the `env` block in `~/.claude/settings.json`.
+
+PowerShell (Windows):
+
+```powershell
+Get-ChildItem Env: | Where-Object Name -match "proxy"
+$env:NO_PROXY="127.0.0.1,localhost"
+$env:no_proxy="127.0.0.1,localhost"
+setx NO_PROXY "127.0.0.1,localhost"
+setx no_proxy "127.0.0.1,localhost"
+```
+
+Open a new terminal after `setx`.
+
+If the 405 persists with `NO_PROXY` set, check the provider `*_BASE_URL` for extra
+path segments and the model name in `ANTHROPIC_MODEL`.
 
 Keep real keys in `.env`.
 
