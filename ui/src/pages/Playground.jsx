@@ -47,6 +47,7 @@ export default function Playground() {
   const [protocol, setProtocol] = useState("");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
+  const [customModel, setCustomModel] = useState("");
   const [keyIndex, setKeyIndex] = useState("");
   const [autoRoute, setAutoRoute] = useState(true);
   const [temperature, setTemperature] = useState(0.7);
@@ -68,9 +69,13 @@ export default function Playground() {
 
   // With a provider chosen the model is always concrete: the first of that
   // provider's models until the operator picks another.
-  const selectedModel = model && modelOptions.includes(model)
+  // A hand-typed model id wins over the dropdown. It needs a provider, because a
+  // custom id can only be called through a pinned provider's own credentials.
+  const customId = provider ? customModel.trim() : "";
+
+  const selectedModel = customId || (model && modelOptions.includes(model)
     ? model
-    : provider ? modelOptions[0] ?? "" : "";
+    : provider ? modelOptions[0] ?? "" : "");
 
   // Keys of the chosen provider that serve the chosen model, with their health.
   const keyOptions = useMemo(() => {
@@ -78,12 +83,12 @@ export default function Playground() {
     const byIndex = new Map();
     for (const entry of models) {
       if (entry.provider !== provider) continue;
-      if (selectedModel && entry.model !== selectedModel) continue;
+      if (selectedModel && !customId && entry.model !== selectedModel) continue;
       if (!Number.isInteger(entry.keyIndex) || byIndex.has(entry.keyIndex)) continue;
       byIndex.set(entry.keyIndex, entry.status);
     }
     return [...byIndex.entries()].sort((a, b) => a[0] - b[0]).map(([index, status]) => ({ index, status }));
-  }, [models, provider, selectedModel]);
+  }, [models, provider, selectedModel, customId]);
 
   const pinnedKey = keyIndex !== "" && keyOptions.some((option) => option.index === Number(keyIndex))
     ? Number(keyIndex)
@@ -92,12 +97,14 @@ export default function Playground() {
   const pickProvider = (value) => {
     setProvider(value);
     setModel("");
+    setCustomModel("");
     setKeyIndex("");
     if (value) setAutoRoute(false);
   };
 
   const pickModel = (value) => {
     setModel(value);
+    setCustomModel("");
     setKeyIndex("");
     if (value) setAutoRoute(false);
   };
@@ -112,6 +119,7 @@ export default function Playground() {
     if (checked) {
       setProvider("");
       setModel("");
+      setCustomModel("");
       setKeyIndex("");
     }
   };
@@ -156,7 +164,7 @@ export default function Playground() {
       const result = await sendPlaygroundRequest({
         protocol: activeProtocol,
         body,
-        headers: buildPinHeaders({ autoRoute, provider, keyIndex: pinnedKey }),
+        headers: buildPinHeaders({ autoRoute, provider, keyIndex: pinnedKey, customModel: customId !== "" }),
         signal: controller.signal,
         onDelta: (delta) => {
           setMessages((current) =>
@@ -206,7 +214,7 @@ export default function Playground() {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [prompt, activeProtocol, selectedModel, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, toast]);
+  }, [prompt, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, toast]);
 
   const cancel = () => abortRef.current?.abort();
 
@@ -300,15 +308,36 @@ export default function Playground() {
                 <select
                   id="pg-model"
                   className="select"
-                  value={selectedModel}
+                  value={customId ? "" : selectedModel}
                   onChange={(event) => pickModel(event.target.value)}
                 >
+                  {customId ? <option value="">Custom model in use</option> : null}
                   {provider ? null : <option value="">First available</option>}
                   {modelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
                 </select>
+                <input
+                  id="pg-custom-model"
+                  className="input mono"
+                  type="text"
+                  value={customModel}
+                  disabled={!provider}
+                  placeholder={provider ? "Custom model id (optional)" : "Pick a provider to use a custom model"}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  aria-label="Custom model id"
+                  onChange={(event) => {
+                    setCustomModel(event.target.value);
+                    setKeyIndex("");
+                    if (event.target.value.trim()) setAutoRoute(false);
+                  }}
+                  style={{ marginTop: "var(--sp-2)" }}
+                />
                 <span className="field__hint">
-                  {provider
-                    ? `Models served by ${providerLabel(provider)}.`
+                  {customId
+                    ? `Trying "${customId}" on ${providerLabel(provider)} with its own key and base URL. Clear the box to use the list.`
+                    : provider
+                    ? `Models served by ${providerLabel(provider)}. Or type any new model id above to try it.`
                     : autoRoute
                       ? "Auto Route is on — no model is sent. Pick one to switch it off."
                       : "The gateway prefers this model on any provider and may fall back."}

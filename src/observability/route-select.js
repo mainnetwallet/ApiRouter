@@ -47,10 +47,23 @@ export function pinTargets(targets, pin = {}, requestedModel = "") {
   const keyIndex = Number.isInteger(pin?.keyIndex) && pin.keyIndex >= 0 ? pin.keyIndex : null;
   const model = typeof requestedModel === "string" ? requestedModel : "";
 
-  const narrowed = all.filter((target) =>
+  const providerTargets = all.filter((target) =>
     target.provider === provider
-    && (keyIndex === null || target.keyIndex === keyIndex)
-    && (!model || target.model === model));
+    && (keyIndex === null || target.keyIndex === keyIndex));
+  const narrowed = providerTargets.filter((target) => !model || target.model === model);
+
+  // Custom model: the operator is trying a model id that is not in the provider's
+  // configured list (a freshly released one, say). Reuse the provider's own
+  // credentials, base URL and protocols, one target per key, with only the model
+  // swapped. Only ever for a model that is not configured, and only when the
+  // client opted in, so a typo against the configured list still returns no_route.
+  if (pin?.customModel === true && model && narrowed.length === 0 && providerTargets.length > 0) {
+    const byKey = new Map();
+    for (const target of providerTargets) {
+      if (!byKey.has(target.keyIndex)) byKey.set(target.keyIndex, { ...target, model });
+    }
+    return { pinned: true, targets: [...byKey.values()], provider, keyIndex, model, custom: true };
+  }
 
   return { pinned: true, targets: narrowed, provider, keyIndex, model: model || null };
 }

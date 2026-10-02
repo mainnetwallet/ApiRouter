@@ -24,10 +24,13 @@ export const PROTOCOL_ENDPOINTS = Object.freeze({
  * Pin headers understood by the gateway. A pin needs a provider; a key index
  * is meaningless on its own, so it is only sent alongside one.
  */
-export function buildPinHeaders({ autoRoute, provider, keyIndex } = {}) {
+export function buildPinHeaders({ autoRoute, provider, keyIndex, customModel } = {}) {
   if (autoRoute || !provider) return {};
   const headers = { "x-multi-ai-pin-provider": provider };
   if (Number.isInteger(keyIndex) && keyIndex >= 0) headers["x-multi-ai-pin-key-index"] = String(keyIndex);
+  // A custom model is a model id typed in by hand, not one of the provider's
+  // configured models. The gateway only accepts an unconfigured id when told to.
+  if (customModel === true) headers["x-multi-ai-pin-custom-model"] = "1";
   return headers;
 }
 

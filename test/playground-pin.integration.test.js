@@ -117,3 +117,53 @@ test("without pin headers routing is unchanged", async (t) => {
   const res = await post(router, "shared-model");
   assert.equal(res.status, 200);
 });
+
+test("a custom model is refused unless the client opts in", async (t) => {
+  const { groq, router } = await setup(t);
+
+  const res = await post(router, "brand-new-model", { "x-multi-ai-pin-provider": "groq" });
+  assert.equal(res.status, 404);
+  assert.equal(apiCalls(groq).length, 0);
+});
+
+test("a custom model is called on the pinned provider with its own key", async (t) => {
+  const { groq, orc, router } = await setup(t);
+
+  const res = await post(router, "brand-new-model", {
+    "x-multi-ai-pin-provider": "groq",
+    "x-multi-ai-pin-custom-model": "1"
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("x-multi-ai-provider"), "groq");
+  assert.equal(apiCalls(groq).length, 1);
+  assert.equal(apiCalls(orc).length, 0);
+  assert.equal(apiCalls(groq)[0].body.model, "brand-new-model");
+});
+
+test("a custom model still honours a pinned key index", async (t) => {
+  const { groq, router } = await setup(t);
+
+  const res = await post(router, "brand-new-model", {
+    "x-multi-ai-pin-provider": "groq",
+    "x-multi-ai-pin-key-index": "1",
+    "x-multi-ai-pin-custom-model": "1"
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("x-multi-ai-key-index"), "1");
+  assert.equal(apiCalls(groq).length, 1);
+});
+
+test("the custom-model opt-in does nothing without a provider pin or for a configured model", async (t) => {
+  const { groq, orc, router } = await setup(t);
+
+  const unpinned = await post(router, "brand-new-model", { "x-multi-ai-pin-custom-model": "1" });
+  assert.notEqual(apiCalls(groq).length + apiCalls(orc).length, 0, "falls back to normal routing");
+  assert.equal(unpinned.headers.get("x-multi-ai-provider") !== null, true);
+
+  const configured = await post(router, "groq-only", {
+    "x-multi-ai-pin-provider": "groq",
+    "x-multi-ai-pin-custom-model": "1"
+  });
+  assert.equal(configured.status, 200);
+  assert.equal(configured.headers.get("x-multi-ai-model"), "groq-only");
+});

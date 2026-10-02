@@ -161,4 +161,13 @@ describe("playground pinning", () => {
     expect(buildPinHeaders({ autoRoute: false, provider: "groq", keyIndex: 0 }))
       .toEqual({ "x-multi-ai-pin-provider": "groq", "x-multi-ai-pin-key-index": "0" });
   });
+
+  it("flags a custom model only when pinned to a provider", () => {
+    expect(buildPinHeaders({ autoRoute: false, provider: "groq", keyIndex: null, customModel: true }))
+      .toEqual({ "x-multi-ai-pin-provider": "groq", "x-multi-ai-pin-custom-model": "1" });
+    expect(buildPinHeaders({ autoRoute: false, provider: "groq", customModel: false }))
+      .toEqual({ "x-multi-ai-pin-provider": "groq" });
+    expect(buildPinHeaders({ autoRoute: true, provider: "groq", customModel: true })).toEqual({});
+    expect(buildPinHeaders({ autoRoute: false, provider: "", customModel: true })).toEqual({});
+  });
 });

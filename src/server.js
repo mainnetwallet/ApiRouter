@@ -217,13 +217,14 @@ function progressRequest(startSeq, update) {
 function readPin(req) {
   const provider = String(req.headers["x-multi-ai-pin-provider"] || "").trim();
   const rawKey = String(req.headers["x-multi-ai-pin-key-index"] ?? "").trim();
+  const customModel = ["1", "true"].includes(String(req.headers["x-multi-ai-pin-custom-model"] ?? "").trim().toLowerCase());
   if (!provider) return { provider: "", keyIndex: null };
-  if (rawKey === "") return { provider, keyIndex: null };
+  if (rawKey === "") return { provider, keyIndex: null, customModel };
   const keyIndex = Number(rawKey);
   if (!Number.isInteger(keyIndex) || keyIndex < 0) {
     return { error: "x-multi-ai-pin-key-index must be a non-negative integer" };
   }
-  return { provider, keyIndex };
+  return { provider, keyIndex, customModel };
 }
 
 /**
