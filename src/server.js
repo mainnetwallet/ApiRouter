@@ -634,7 +634,7 @@ function isReserved(pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, "http://127.0.0.1");
+  const url = new URL(req.url, "http://localhost");
   const pathname = url.pathname;
 
   if (req.method === "GET" && pathname === "/health") {

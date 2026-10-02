@@ -91,12 +91,12 @@ export async function startMockUpstream(script, options = {}) {
     });
   });
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => server.listen(0, "localhost", resolve));
   const { port } = server.address();
 
   return {
     port,
-    baseUrl: `http://127.0.0.1:${port}`,
+    baseUrl: `http://localhost:${port}`,
     requests,
     /** Requests excluding health-monitor probes. */
     get apiRequests() {
@@ -108,7 +108,7 @@ export async function startMockUpstream(script, options = {}) {
 
 export async function getFreePort() {
   const server = net.createServer();
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => server.listen(0, "localhost", resolve));
   const { port } = server.address();
   await new Promise((resolve) => server.close(resolve));
   return port;

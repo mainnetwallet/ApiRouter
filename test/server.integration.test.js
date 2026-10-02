@@ -738,7 +738,7 @@ test("an unreachable provider (no HTTP status) falls back to the next target", a
     // Port 1 refuses connections, so fetch rejects without any HTTP status.
     GROQ_API_KEYS: "k0",
     GROQ_MODELS: "m",
-    GROQ_BASE_URL: "http://127.0.0.1:1",
+    GROQ_BASE_URL: "http://localhost:1",
     CEREBRAS_API_KEYS: "k1",
     CEREBRAS_MODELS: "m2",
     CEREBRAS_BASE_URL: upstream.baseUrl

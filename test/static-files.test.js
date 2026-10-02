@@ -24,15 +24,15 @@ async function makeRoot(t, files = {}) {
 async function serveRoot(t, root) {
   const handler = createStaticHandler({ root });
   const server = http.createServer(async (req, res) => {
-    const pathname = new URL(req.url, "http://127.0.0.1").pathname;
+    const pathname = new URL(req.url, "http://localhost").pathname;
     if (await handler.serve(req, res, pathname)) return;
     return handler.serveIndex(req, res);
   });
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => server.listen(0, "localhost", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
 
-  return { baseUrl: `http://127.0.0.1:${server.address().port}`, handler };
+  return { baseUrl: `http://localhost:${server.address().port}`, handler };
 }
 
 // ---------------------------------------------------------------------------

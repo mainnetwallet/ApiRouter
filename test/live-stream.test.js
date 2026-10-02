@@ -76,9 +76,9 @@ async function heldUpstream() {
     req.resume();
     req.on("end", () => waiting.push(res));
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => server.listen(0, "localhost", resolve));
   return {
-    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    baseUrl: `http://localhost:${server.address().port}`,
     get held() { return waiting.length; },
     reply(status, body) {
       const res = waiting.shift();

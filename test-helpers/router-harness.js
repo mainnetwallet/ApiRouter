@@ -45,7 +45,7 @@ export async function startRouter(env = {}) {
     });
   });
 
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const baseUrl = `http://localhost:${port}`;
 
   // The startup health monitor fires immediately; let it settle so its
   // uniform success marks cannot interleave with a test's assertions.
