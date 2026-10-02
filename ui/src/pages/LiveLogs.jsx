@@ -151,6 +151,8 @@ export default function LiveLogs() {
   };
 
   const copyText = useCallback(() => formatRowsAsText(visible), [visible]);
+  // Every call the page holds, regardless of filters.
+  const copyAllText = useCallback(() => formatRowsAsText(rows), [rows]);
 
   const filtering = Boolean(provider || status || debouncedSearch.trim() || debouncedRequestId.trim());
   const initialLoading = log.loading && !log.data && !streaming && rows.length === 0;
@@ -186,11 +188,19 @@ export default function LiveLogs() {
               <Icon name={paused ? "play" : "stop"} className="btn__icon" size={12} />
               {paused ? "Resume" : "Pause"}
             </button>
+            {filtering ? (
+              <CopyButton
+                label="Copy shown"
+                title="Copy only the calls matching the current filters, as plain text"
+                disabled={visible.length === 0}
+                getText={copyText}
+              />
+            ) : null}
             <CopyButton
-              label="Copy logs"
-              title="Copy the calls currently shown as plain text"
-              disabled={visible.length === 0}
-              getText={copyText}
+              label="Copy all"
+              title="Copy every call in the log (ignores filters), as plain text"
+              disabled={rows.length === 0}
+              getText={copyAllText}
             />
             <button type="button" className="btn" onClick={clear} disabled={rows.length === 0}>
               <Icon name="trash" className="btn__icon" size={12} />
