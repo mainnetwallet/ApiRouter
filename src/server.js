@@ -18,6 +18,7 @@ import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, fallbackGroups, pinTargets } from "./observability/route-select.js";
+import { filterTargetsForImages } from "./vision.js";
 import {
   bridgeProtocol,
   buildBridgeRequest,
@@ -330,7 +331,22 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 404, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  const selection = selectTargetsForProtocol(pinned.targets, protocol, requestedModel);
+  // A request carrying an image only goes to models listed in VISION_MODELS.
+  // An explicit pin (Playground) is the operator's choice, so it is left alone.
+  const vision = pinned.pinned
+    ? { filtered: false, targets: pinned.targets }
+    : filterTargetsForImages(pinned.targets, body, config.visionModels);
+  if (vision.filtered && vision.targets.length === 0) {
+    const message = "The request contains an image, but no configured target is listed in VISION_MODELS";
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,
+      outcome: "failed", errorType: "no_route", errorMessage: message, attempts
+    });
+    return json(res, 503, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
+  const selection = selectTargetsForProtocol(vision.targets, protocol, requestedModel);
   const bridgeCtx = bridgeKind === "codex"
     ? { customTools: customToolNames(body), inputTokens: estimateResponsesInputTokens(body) }
     : bridgeKind === "chat"

@@ -98,6 +98,8 @@ export function loadConfig(env = process.env) {
     maxBodyBytes: Math.max(1, Number(env.MAX_REQUEST_BODY_MB || 32)) * 1024 * 1024,
     connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
     retryableStatus: new Set(retryableValues),
+    // Models that accept image input. Empty = no vision-aware filtering.
+    visionModels: split(env.VISION_MODELS),
     providers
   };
 }

@@ -62,6 +62,15 @@ A provider needs:
 
 Configure them in `.env`.
 
+### Images (vision-aware routing)
+
+Many models are text-only and answer HTTP 400 to a request that carries an image.
+Set `VISION_MODELS` (comma-separated model ids, or `provider:model`) to the models
+that accept images. A request containing an image — in any client protocol — is
+then routed only to those models. With `VISION_MODELS` empty nothing is filtered.
+If an image arrives and no configured target is listed, the client gets
+`503 no_route`. Requests pinned with the `x-multi-ai-pin-*` headers are not filtered.
+
 Retryable statuses:
 
 ```text
