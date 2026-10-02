@@ -5,7 +5,7 @@
 Use:
 
 ```text
-http://127.0.0.1:8788/v1
+http://localhost:8788/v1
 ```
 
 This pattern can work with clients that support a custom OpenAI-compatible provider, including:
@@ -29,7 +29,7 @@ directly, and a Gemini provider through the router's translation bridge.
 Clients using the Anthropic Messages protocol should use:
 
 ```text
-http://127.0.0.1:8788
+http://localhost:8788
 ```
 
 ## Gemini-compatible
@@ -37,7 +37,7 @@ http://127.0.0.1:8788
 Clients using the Gemini `generateContent` protocol should use:
 
 ```text
-http://127.0.0.1:8788
+http://localhost:8788
 ```
 
 ### Tool choice through the bridge

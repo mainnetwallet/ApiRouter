@@ -27,10 +27,10 @@ npm start
 Default server:
 
 ```text
-http://127.0.0.1:8788
+http://localhost:8788
 ```
 
-Open `http://127.0.0.1:8788` for the control panel.
+Open `http://localhost:8788` for the control panel.
 
 ### Windows `Router` command
 
@@ -48,7 +48,7 @@ Router
 
 The launcher changes to the repository directory, installs dependencies if needed,
 builds the control panel if `ui/dist/index.html` is missing, opens the control panel
-in the browser, and starts the gateway on `127.0.0.1:8788`. If the panel has not been
+in the browser, and starts the gateway on `localhost:8788`. If the panel has not been
 built, that address serves a short page explaining how to build it — the
 gateway itself needs no build step and is unaffected.
 

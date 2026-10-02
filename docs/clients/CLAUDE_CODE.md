@@ -11,7 +11,7 @@ npm start
 Default:
 
 ```text
-http://127.0.0.1:8788
+http://localhost:8788
 ```
 
 ## Configure provider
@@ -29,7 +29,7 @@ AGENTROUTER_BASE_URL=https://agentrouter.org/
 PowerShell:
 
 ```powershell
-$env:ANTHROPIC_BASE_URL="http://127.0.0.1:8788"
+$env:ANTHROPIC_BASE_URL="http://localhost:8788"
 $env:ANTHROPIC_AUTH_TOKEN="YOUR_LOCAL_ROUTER_KEY"
 $env:ANTHROPIC_API_KEY=$null
 claude
@@ -73,7 +73,7 @@ The router selects only compatible Anthropic targets.
 ## Check
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8788/health
+Invoke-RestMethod http://localhost:8788/health
 ```
 
 ```bash
