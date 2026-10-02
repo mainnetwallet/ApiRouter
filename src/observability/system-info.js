@@ -29,7 +29,7 @@ export function describeSystem({ config, targets = [], monitor = null, startedAt
   return {
     service: "multi-ai-router",
     status: "ok",
-    address: `http://127.0.0.1:${config?.port ?? null}`,
+    address: `http://localhost:${config?.port ?? null}`,
     port: config?.port ?? null,
 
     runtime: runtimeName(),
