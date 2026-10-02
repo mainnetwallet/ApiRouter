@@ -554,7 +554,7 @@ export default function Playground() {
                 ) : null}
                 {hasImages && autoRoute ? (
                   <span className="tiny dim">
-                    Image attached: Auto Route only uses models listed in VISION_MODELS.
+                    Image attached: Auto Route only uses models listed in the <PROVIDER>_VISION_MODELS settings.
                   </span>
                 ) : null}
                 <div className="row">

@@ -2,11 +2,12 @@
  * Vision-aware routing.
  *
  * Many models on the configured providers are text-only and answer HTTP 400 as
- * soon as a request carries an image. When VISION_MODELS lists the models that
+ * soon as a request carries an image. When the <PROVIDER>_VISION_MODELS
+ * variables (GEMINI_VISION_MODELS, GROQ_VISION_MODELS, ...) list the models that
  * accept images, a request containing an image is only routed to those models,
  * so text-only models are never tried (and never logged as failed attempts).
  *
- * With VISION_MODELS empty nothing is filtered: behaviour is unchanged.
+ * With no vision models configured nothing is filtered: behaviour is unchanged.
  */
 
 const split = (value) => String(value || "").split(",").map((v) => v.trim()).filter(Boolean);
@@ -54,9 +55,10 @@ export function requestHasImage(body) {
 }
 
 /**
- * A VISION_MODELS entry is either a bare model id ("gemini-3.7-flash") or
- * "provider:model" ("cloudflare:@cf/qwen/qwen3.8-27b") to name one provider's
- * copy of a model. Matching is case-insensitive.
+ * A vision entry is "provider:model" ("cloudflare:@cf/qwen/qwen3.8-27b"), which
+ * is what the per-provider variables produce, or a bare model id
+ * ("gemini-3.7-flash") from the legacy global VISION_MODELS. Matching is
+ * case-insensitive.
  */
 export function isVisionTarget(target, visionModels) {
   const model = String(target?.model ?? "").toLowerCase();
@@ -69,7 +71,7 @@ export function isVisionTarget(target, visionModels) {
 
 /**
  * Narrows the candidate targets for a request.
- *   { filtered: false }                      nothing to do (no image / no VISION_MODELS)
+ *   { filtered: false }                      nothing to do (no image / no vision models configured)
  *   { filtered: true, targets }              only vision-capable targets remain
  * `targets` may be empty: the caller reports that as a clear no_route error.
  */

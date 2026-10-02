@@ -331,13 +331,13 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 404, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  // A request carrying an image only goes to models listed in VISION_MODELS.
+  // A request carrying an image only goes to models listed in the <PROVIDER>_VISION_MODELS variables.
   // An explicit pin (Playground) is the operator's choice, so it is left alone.
   const vision = pinned.pinned
     ? { filtered: false, targets: pinned.targets }
     : filterTargetsForImages(pinned.targets, body, config.visionModels);
   if (vision.filtered && vision.targets.length === 0) {
-    const message = "The request contains an image, but no configured target is listed in VISION_MODELS";
+    const message = "The request contains an image, but no configured target is listed in any <PROVIDER>_VISION_MODELS";
     recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,

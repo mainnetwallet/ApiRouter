@@ -78,7 +78,9 @@ function clearProviderEnv() {
     env[`${id}_API_KEYS`] = "";
     env[`${id}_MODELS`] = "";
     env[`${id}_BASE_URL`] = "";
+    env[`${id}_VISION_MODELS`] = "";
   }
+  env.VISION_MODELS = "";
   env.MULTIAI_ROUTER_API_KEYS = "";
   env.RETRY_STATUS_CODES = "";
   return env;

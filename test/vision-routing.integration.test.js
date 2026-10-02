@@ -62,3 +62,27 @@ test("image request with no configured vision target gets a clear 503", async (t
   assert.equal(res.status, 503);
   assert.equal(text.apiRequests.length, 0);
 });
+
+test("per-provider *_VISION_MODELS route an image only to those providers", async (t) => {
+  const text = await startMockUpstream(() => ({ status: 200, body: chatReply("from-text") }));
+  const v1 = await startMockUpstream(() => ({ status: 429, body: { error: { message: "x" } } }));
+  const v2 = await startMockUpstream(() => ({ status: 200, body: chatReply("from-v2") }));
+  const router = await startRouter({
+    GROQ_API_KEYS: "k1", GROQ_MODELS: "text-model", GROQ_BASE_URL: text.baseUrl,
+    OPENROUTER_API_KEYS: "k2", OPENROUTER_MODELS: "vision-1", OPENROUTER_BASE_URL: v1.baseUrl,
+    OPENROUTER_VISION_MODELS: "vision-1",
+    MISTRAL_API_KEYS: "k3", MISTRAL_MODELS: "vision-2", MISTRAL_BASE_URL: v2.baseUrl,
+    MISTRAL_VISION_MODELS: "vision-2"
+  });
+  t.after(async () => { await router.close(); await text.close(); await v1.close(); await v2.close(); });
+
+  const res = await router.request("/v1/messages", postJson({ ...withImage, model: "vision-1" }));
+  assert.equal(res.status, 200);
+  assert.equal(text.apiRequests.length, 0, "provider without a vision list is skipped for images");
+  assert.equal(v1.apiRequests.length, 1);
+  assert.equal(v2.apiRequests.length, 1);
+
+  const plain = await router.request("/v1/messages", postJson({ ...textOnly, model: "text-model" }));
+  assert.equal(plain.status, 200);
+  assert.equal(text.apiRequests.length, 1, "text requests still reach every provider");
+});

@@ -67,6 +67,18 @@ export function buildTargets(providers) {
   return targets;
 }
 
+/**
+ * Vision models, read from one `<PROVIDER>_VISION_MODELS` variable per provider
+ * (GEMINI_VISION_MODELS, GROQ_VISION_MODELS, ...). Each entry is scoped to its
+ * provider as `provider:model`, so the same model id on another provider is not
+ * affected. The old global VISION_MODELS is still read for existing setups.
+ */
+export function readVisionModels(env = process.env) {
+  const scoped = PROVIDER_IDS.flatMap((id) =>
+    split(env[id.toUpperCase() + "_VISION_MODELS"]).map((model) => `${id}:${model}`));
+  return [...scoped, ...split(env.VISION_MODELS)];
+}
+
 export function loadConfig(env = process.env) {
   const providers = {};
   for (const id of PROVIDER_IDS) {
@@ -98,8 +110,9 @@ export function loadConfig(env = process.env) {
     maxBodyBytes: Math.max(1, Number(env.MAX_REQUEST_BODY_MB || 32)) * 1024 * 1024,
     connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
     retryableStatus: new Set(retryableValues),
-    // Models that accept image input. Empty = no vision-aware filtering.
-    visionModels: split(env.VISION_MODELS),
+    // Models that accept image input, as provider-scoped entries. Empty = no
+    // vision-aware filtering.
+    visionModels: readVisionModels(env),
     providers
   };
 }

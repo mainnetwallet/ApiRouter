@@ -65,11 +65,14 @@ Configure them in `.env`.
 ### Images (vision-aware routing)
 
 Many models are text-only and answer HTTP 400 to a request that carries an image.
-Set `VISION_MODELS` (comma-separated model ids, or `provider:model`) to the models
-that accept images. A request containing an image — in any client protocol — is
-then routed only to those models. With `VISION_MODELS` empty nothing is filtered.
-If an image arrives and no configured target is listed, the client gets
-`503 no_route`. Requests pinned with the `x-multi-ai-pin-*` headers are not filtered.
+Set a vision list per provider: `GEMINI_VISION_MODELS`, `GROQ_VISION_MODELS`,
+`CLOUDFLARE_VISION_MODELS`, and so on (comma-separated model ids). A request
+containing an image — in any client protocol — is then routed only to those
+models, each scoped to its own provider. Every listed model must also be in that
+provider's `*_MODELS`; one that is not is ignored. With all of them empty nothing
+is filtered. If an image arrives and no configured target is listed, the client
+gets `503 no_route`. Requests pinned with the `x-multi-ai-pin-*` headers are not
+filtered. The old global `VISION_MODELS` is still read, for existing setups.
 
 Retryable statuses:
 

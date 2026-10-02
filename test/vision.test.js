@@ -39,3 +39,29 @@ test("provider:model entries are scoped to that provider and ids are case-insens
   assert.equal(isVisionTarget(t("groq", "Qwen3.8-27B"), ["qwen3.8-27b"]), true);
   assert.deepEqual(parseVisionModels(" a , b ,,"), ["a", "b"]);
 });
+
+import { readVisionModels, loadConfig } from "../src/config.js";
+
+test("per-provider *_VISION_MODELS become provider-scoped entries", () => {
+  const env = {
+    GEMINI_VISION_MODELS: "gemini-3.7-flash, gemini-3.6-flash",
+    GROQ_VISION_MODELS: "qwen/qwen3.8-27b",
+    CLOUDFLARE_VISION_MODELS: "@cf/qwen/qwen3.8-27b"
+  };
+  assert.deepEqual(readVisionModels(env), [
+    "gemini:gemini-3.7-flash", "gemini:gemini-3.6-flash",
+    "groq:qwen/qwen3.8-27b", "cloudflare:@cf/qwen/qwen3.8-27b"
+  ]);
+  assert.deepEqual(loadConfig(env).visionModels, readVisionModels(env));
+});
+
+test("a provider's vision list does not leak onto the same model id elsewhere", () => {
+  const visionModels = readVisionModels({ GROQ_VISION_MODELS: "shared-model" });
+  assert.equal(isVisionTarget({ provider: "groq", model: "shared-model" }, visionModels), true);
+  assert.equal(isVisionTarget({ provider: "openrouter", model: "shared-model" }, visionModels), false);
+});
+
+test("no vision variables means no filtering; legacy VISION_MODELS still works", () => {
+  assert.deepEqual(readVisionModels({}), []);
+  assert.deepEqual(readVisionModels({ VISION_MODELS: "a,b" }), ["a", "b"]);
+});
