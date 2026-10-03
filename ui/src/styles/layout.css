@@ -67,6 +67,7 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  flex: none;
 }
 
 /* --- Sidebar -------------------------------------------------------------- */
@@ -143,6 +144,9 @@
 
 .main {
   grid-area: main;
+  /* Containing block for absolutely positioned descendants (the sr-only table
+     captions), so they are clipped here instead of widening the whole page. */
+  position: relative;
   overflow-y: auto;
   padding: var(--sp-4) var(--sp-5) var(--sp-10);
   min-width: 0;
@@ -261,8 +265,38 @@
   }
 
   .brand { display: none; }
-  .header { padding: 0 var(--sp-3); }
+  .header {
+    padding: 0 var(--sp-2) 0 var(--sp-2);
+    gap: var(--sp-2);
+    /* Leave room for a notch / status bar when the page runs edge to edge. */
+    padding-left: max(var(--sp-2), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--sp-2), env(safe-area-inset-right, 0px));
+  }
   .mobile-bar { display: flex; }
+
+  /* Five controls plus a title do not fit in 360px: the probe badge goes, and
+     the connection badge keeps its dot and tone but drops the long label. The
+     label stays in the accessibility tree and the title tooltip. */
+  .header__title { min-width: 0; flex: 1 1 auto; }
+  .header__spacer { display: none; }
+  .header__actions { gap: 2px; }
+  .header__probe { display: none; }
+  .header__conn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+  .header .badge { position: relative; padding: 4px 6px; margin-right: var(--sp-1); }
+  .header .btn--icon { width: 36px; height: 36px; }
+  .toasts {
+    left: var(--sp-3);
+    right: var(--sp-3);
+    bottom: calc(var(--sp-3) + env(safe-area-inset-bottom, 0px));
+    width: auto;
+  }
   .main { padding: var(--sp-3) var(--sp-3) var(--sp-10); }
 
   .sidebar {

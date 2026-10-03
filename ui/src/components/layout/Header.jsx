@@ -44,12 +44,13 @@ export function Header({ route, onOpenNav, onOpenSettings, theme, onToggleTheme 
               : `Gateway ${connection.label.toLowerCase()} at ${system?.address ?? "unknown address"}`
           }
         >
-          <span className="nowrap">
+          <span className="nowrap header__conn-label">
             {connection.state === "ok" ? "API connected" : connection.label}
           </span>
         </StatusBadge>
 
         {healthCounts ? (
+          <span className="header__probe">
           <StatusBadge
             tone={healthCounts.lastCycle?.outcomes?.failed > 0 ? "warn" : "neutral"}
             dot={false}
@@ -59,6 +60,7 @@ export function Header({ route, onOpenNav, onOpenSettings, theme, onToggleTheme 
               probe {formatRelativeTime(healthCounts.lastCycle?.completedAt)}
             </span>
           </StatusBadge>
+          </span>
         ) : null}
 
         <button
