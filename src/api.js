@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { describeHealth, rankTargets, HEALTH_STATES } from "./health.js";
+import { describeHealth, HEALTH_STATES } from "./health.js";
+import { routeOrderByPool } from "./routing-plan.js";
 import { describeConfig, describeEnvironment } from "./observability/config-view.js";
 import { describeRouting } from "./observability/router-preview.js";
 import { servableProtocols } from "./observability/route-select.js";
@@ -149,7 +150,9 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
   // --- /api/health -------------------------------------------------------
   function healthPayload(now = Date.now()) {
     const entries = describeAll(now);
-    const ranked = rankTargets(targets, now);
+    // The real route order per pool (priority first, then Provider -> Key ->
+    // Models); health only removes cooling targets. Not a health-score sort.
+    const ranked = routeOrderByPool(targets, config.priority, (target) => health.isAvailable(target, now));
 
     // Text and vision are reported separately as well as together. The combined
     // rollup answers "how is this provider doing overall"; the per-pool figures
@@ -334,7 +337,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
         protocol,
         pool,
         model: (searchParams.get("model") || "").trim(),
-        stickyTargetId: (searchParams.get("session") || "").trim() || null,
+        stickyTargetId: (searchParams.get("session") || "").trim() || null, // observability text only
         now
       })
     };

@@ -257,7 +257,7 @@ export default function Configuration() {
                 <dl className="dl dl--tight">
                   <dt className="dl__term">Behaviour</dt>
                   <dd className="dl__desc">
-                    Targets are tried in ranked order. A retryable failure cools that exact target
+                    Targets are tried in a fixed order (priority, then Provider → Key → Models). A retryable failure cools that exact target
                     down and routing continues to the next candidate.
                   </dd>
 
@@ -269,8 +269,8 @@ export default function Configuration() {
 
                   <dt className="dl__term">Sticky sessions</dt>
                   <dd className="dl__desc">
-                    A successful target becomes the session's preferred target. Clients may pin a
-                    session with <code>X-Multi-AI-Session-ID</code>.
+                    A successful target stays the session's first choice for 15 minutes (refreshed by
+                    each success), then routing falls back to priority and the normal order. Clients may group requests with <code>X-Multi-AI-Session-ID</code>.
                   </dd>
                 </dl>
               </div>

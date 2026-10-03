@@ -49,9 +49,31 @@ export class SessionStore {
   }
 }
 
+/** A sticky target stays preferred for 15 minutes after its last success. */
+export const STICKY_TTL_MS = 15 * 60 * 1000;
+
 export class RouteSession {
-  constructor({ targetId = null } = {}) {
+  constructor({ targetId = null, expiresAt = null, ttlMs = STICKY_TTL_MS } = {}) {
     this.targetId = targetId;
+    // Absolute deadline (ms epoch), checked at request time. No timer: nothing
+    // keeps the process alive and an idle session costs nothing.
+    this.expiresAt = Number.isFinite(expiresAt) ? expiresAt : null;
+    this.ttlMs = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : STICKY_TTL_MS;
+  }
+
+  /**
+   * The sticky target id, only while its TTL is active. An expired (or never
+   * timestamped) sticky is cleared and reported as absent, so the request
+   * routes Priority -> Normal and the expired target is never used again.
+   */
+  validTargetId(now = Date.now()) {
+    if (!this.targetId) return null;
+    if (this.expiresAt === null || !(now < this.expiresAt)) {
+      this.targetId = null;
+      this.expiresAt = null;
+      return null;
+    }
+    return this.targetId;
   }
 
   current(targets, health) {
@@ -69,8 +91,10 @@ export class RouteSession {
     return health.rank(targets)[0];
   }
 
-  saveSuccess(target, health) {
+  /** A success makes this target sticky and starts a fresh TTL from `now`. */
+  saveSuccess(target, health, now = Date.now()) {
     this.targetId = health.key(target);
+    this.expiresAt = now + this.ttlMs;
   }
 }
 
@@ -203,8 +227,12 @@ export async function withFallback(
  * request, a target (pool + provider + model + keyIndex, i.e. the health id)
  * is invoked at most once; a repeat is reported through `onSkip`, never called.
  * Targets cooling down in the shared health registry are skipped the same way.
- * Priority is not remembered: a failure only affects this request and whatever
- * cooldown the health registry itself decides on.
+ * A priority entry is one attempt: once one key of its `group` has been
+ * attempted, its remaining priority steps are dropped silently (those keys are
+ * tried later at their normal place in the plan). Priority is not remembered:
+ * a failure only affects this request and whatever cooldown the health
+ * registry itself decides on. The session's sticky target is recorded on
+ * success for observability only; it never influences the order.
  */
 async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip) {
   if (steps.length === 0) {
@@ -215,8 +243,11 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
 
   const attempted = new Set();
   const cooldownReported = new Set();
+  const attemptedGroups = new Set();
   const failures = [];
-  const allTargets = steps.map((step) => step.target);
+  // Unique targets only: a priority target also appears in the normal phase,
+  // and a sibling must be marked failed once, not once per appearance.
+  const allTargets = [...new Map(steps.map((step) => [health.key(step.target), step.target])).values()];
   let eligible = 0;
 
   const skip = (step, reason) => {
@@ -226,6 +257,9 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
   for (const step of steps) {
     const target = step.target;
     const id = health.key(target);
+
+    // One attempt per priority entry: its other keys are not priority steps.
+    if (step.phase === "priority" && attemptedGroups.has(step.group)) continue;
 
     if (attempted.has(id)) {
       skip(step, "already_attempted");
@@ -243,6 +277,7 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
 
     eligible += 1;
     attempted.add(id);
+    if (step.phase === "priority") attemptedGroups.add(step.group);
     const startedAt = Date.now();
 
     try {

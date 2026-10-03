@@ -24,7 +24,7 @@ import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
-import { buildRoutePlan } from "./routing-plan.js";
+import { buildRoutePlan, routeOrderByPool } from "./routing-plan.js";
 import { selectPool } from "./vision.js";
 import {
   bridgeProtocol,
@@ -154,7 +154,7 @@ function getSession(req, protocol, pool = TEXT_POOL) {
 
   let state = sessions.get(key);
   if (!state) {
-    state = sessions.set(key, { id, protocol, pool, session: new RouteSession() });
+    state = sessions.set(key, { id, protocol, pool, session: new RouteSession({ ttlMs: config.stickyTtlMs }) });
   }
 
   return { id, state };
@@ -398,14 +398,15 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "chat"
       ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true }
       : null;
-  // Priority -> Provider -> Key -> Models -> next Key -> next Provider, built
-  // from this request's own pool only. A pinned request is strict and never
+  // Sticky (valid TTL) -> Priority -> Provider -> Key -> Models -> next Key ->
+  // next Provider, built from this request's own pool only. A pinned request is strict and never
   // gets a priority phase.
   const routePlan = buildRoutePlan({
     targets: selection.selected,
     requestedModel,
     priority: pinned.pinned ? [] : (config.priority?.[pool] ?? []),
-    stickyTargetId: sessionInfo.state.session.targetId
+    // Sticky is a first phase, only while its TTL is valid; a pin is strict.
+    stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
   });
 
   if (selection.compatible.length === 0) {
@@ -746,7 +747,9 @@ const server = http.createServer(async (req, res) => {
   const pathname = url.pathname.replace(/\/{2,}/g, "/");
 
   if (req.method === "GET" && pathname === "/health") {
-    const ranked = rankTargets(targets).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
+    // Deterministic route order (priority, then Provider -> Key -> Models), not a
+    // health-score sort; cooling targets are excluded exactly as routing skips them.
+    const ranked = routeOrderByPool(targets, config.priority, (target) => healthRegistry.isAvailable(target)).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
     const health = describeHealth(targets);
     const inPool = (pool) => health.filter((entry) => entry.pool === pool);
     return json(res, 200, {

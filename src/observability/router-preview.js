@@ -1,5 +1,5 @@
 import { selectTargetsForProtocol } from "./route-select.js";
-import { buildRoutePlan } from "../routing-plan.js";
+import { buildRoutePlan, effectiveOrder } from "../routing-plan.js";
 
 /** Client protocols whose requests can be bridged to a non-native provider. */
 const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses", "gemini"]);
@@ -54,22 +54,14 @@ export function describeRouting({ targets = [], config, health, protocol, model 
   // it does when the plan is walked; it never reorders the plan.
   const priority = config?.priority?.[pool] ?? [];
   const plan = buildRoutePlan({ targets: selected, requestedModel: model, priority, stickyTargetId });
-  const phaseById = new Map();
-  for (const step of plan.steps) if (!phaseById.has(health.key(step.target))) phaseById.set(health.key(step.target), step.phase);
-
   const eligible = selected.filter((target) => health.isAvailable(target, now));
   const rankedIds = new Set(eligible.map((target) => health.key(target)));
   const ranked = eligible;
 
-  const seenOrder = new Set();
-  const order = plan.steps
-    .map((step) => step.target)
-    .filter((target) => {
-      const id = health.key(target);
-      if (seenOrder.has(id) || !rankedIds.has(id)) return false;
-      seenOrder.add(id);
-      return true;
-    });
+  // Exactly what the walker will attempt right now, and in which phase.
+  const effective = effectiveOrder(plan.steps, (target) => rankedIds.has(health.key(target)));
+  const order = effective.map((step) => step.target);
+  const phaseById = new Map(effective.map((step) => [health.key(step.target), step.phase]));
 
   /**
    * The reporting status of a target. Derived the same way for every list on
@@ -160,7 +152,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     },
     {
       key: "ranking",
-      label: "Ranking",
+      label: "Route order",
       detail: plan.priorityCount > 0
         ? `${plan.priorityCount} priority target(s) first, in PRIORITY_MODELS order; then Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets`
         : "no priority configured; Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets",
@@ -170,11 +162,11 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     {
       key: "sticky",
       label: "Session preference",
-      detail: stickyTargetId
-        ? order[0] && health.key(order[0]) === stickyTargetId
-          ? "session's sticky target is available and tried first"
-          : "session's sticky target is unavailable — falling back to ranking"
-        : "no session preference — highest ranked target wins",
+      detail: plan.sticky
+        ? "valid sticky target (15-minute TTL) is the first phase; priority and normal fallback follow unchanged"
+        : stickyTargetId
+          ? "the given sticky target does not apply to this request (other pool, not reachable, or a different explicit model)"
+          : "no valid sticky target; routing starts at priority, then normal fallback",
       state: "info"
     },
     {

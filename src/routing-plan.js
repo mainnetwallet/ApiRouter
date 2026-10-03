@@ -13,12 +13,24 @@ import { targetId } from "./health.js";
  *   FALLBACK phase   Provider -> Key -> Models (config order) -> next Key
  *                    -> next Provider. Each key restarts at its own first model.
  *
- * Targets already in the priority phase are NOT removed from the fallback
- * phase here; the walker skips them with an `already_attempted` record, which
- * is what keeps the skip visible in the request timeline.
+ *   STICKY phase    the session's last good target, only while its TTL is valid
+ *
+ * The normal fallback list is fully deterministic. Health, latency and
+ * previous successes never reorder it. Sticky is a separate leading phase and
+ * never edits that list; health only decides, while walking, whether a target
+ * is eligible right now.
+ *
+ * A priority entry (provider/model) is ONE attempt: its first eligible key, in
+ * key order. Its other keys are not part of the priority phase; they are tried
+ * at their normal place in the hierarchy. Priority steps therefore carry a
+ * `group`, and the walker takes only the first eligible step of each group.
+ *
+ * Targets already attempted in the priority phase are NOT removed from the
+ * fallback phase here; the walker skips them with an `already_attempted`
+ * record, which keeps the skip visible in the request timeline.
  */
 
-export const PHASES = Object.freeze({ PRIORITY: "priority", FALLBACK: "fallback" });
+export const PHASES = Object.freeze({ STICKY: "sticky", PRIORITY: "priority", FALLBACK: "fallback" });
 
 /**
  * Parses "gemini/G1,groq/GR2". The model keeps everything after the FIRST "/",
@@ -96,15 +108,17 @@ export function buildHierarchicalOrder(targets, requestedModel = "") {
 }
 
 /**
- * Resolves priority entries to concrete targets: provider + model + pool, with
- * every configured key of that provider (in key order) so key handling and
- * health stay per key. Entries that match nothing eligible are simply absent.
+ * Resolves priority entries to candidate targets: provider + model (+ the
+ * request's pool, because `targets` only ever holds that pool). Each entry
+ * yields its keys in key order as ONE group; the walker attempts the first
+ * eligible key of a group only. Entries matching nothing are simply absent.
  */
 export function resolvePriorityTargets(targets, priority = []) {
   const all = Array.isArray(targets) ? targets : [];
   const resolved = [];
   const seen = new Set();
   for (const entry of Array.isArray(priority) ? priority : []) {
+    const group = `${entry.provider}/${entry.model}`;
     const matches = all
       .filter((target) => target.provider === entry.provider && target.model === entry.model)
       .sort((a, b) => a.keyIndex - b.keyIndex);
@@ -112,7 +126,7 @@ export function resolvePriorityTargets(targets, priority = []) {
       const id = targetId(target);
       if (seen.has(id)) continue;
       seen.add(id);
-      resolved.push(target);
+      resolved.push({ target, group });
     }
   }
   return resolved;
@@ -122,29 +136,75 @@ export function resolvePriorityTargets(targets, priority = []) {
  * @param targets         protocol-reachable targets of the request's own pool
  * @param requestedModel  the client's model ("" when none)
  * @param priority        parsed priority entries (may be empty => no phase)
- * @param stickyTargetId  the session's last good target, if any
- * @returns {{ steps: Array<{target, phase}>, priorityCount: number }}
+ * @param stickyTargetId  the session's sticky target id, ALREADY checked against
+ *                        its TTL by the caller (RouteSession.validTargetId)
+ * @returns {{ steps: Array<{target, phase, group?}>, priorityCount: number, sticky: object|null }}
+ *
+ * Sticky is its own first phase. It is honoured only when it is a target of
+ * this request's pool/protocol (so another pool's or a stale id is ignored)
+ * and does not override an explicit model choice: when the client names a
+ * configured model, only a sticky target serving that model qualifies.
+ * Its later appearance in the priority/normal phases is skipped by the walker
+ * as already attempted; the normal list itself is never reordered.
  */
 export function buildRoutePlan({ targets = [], requestedModel = "", priority = [], stickyTargetId = null } = {}) {
-  const priorityTargets = resolvePriorityTargets(targets, priority);
-  const normal = buildHierarchicalOrder(targets, requestedModel);
+  const all = Array.isArray(targets) ? targets : [];
+  const priorityEntries = resolvePriorityTargets(all, priority);
+  const normal = buildHierarchicalOrder(all, requestedModel);
 
-  // Precedence: pin (handled by the caller) > priority > sticky > hierarchy.
-  // The sticky target is promoted to the head of the normal phase, but only
-  // when it belongs to the first provider tier, so an available exact model
-  // still outranks a sticky different-model fallback.
-  if (stickyTargetId && normal.length > 0) {
-    const index = normal.findIndex((target) => targetId(target) === stickyTargetId);
-    const firstProvider = normal[0].provider;
-    if (index > 0 && normal[index].provider === firstProvider) {
-      const [sticky] = normal.splice(index, 1);
-      normal.unshift(sticky);
-    }
+  let sticky = null;
+  if (stickyTargetId) {
+    const candidate = all.find((target) => targetId(target) === stickyTargetId) ?? null;
+    const named = typeof requestedModel === "string" ? requestedModel : "";
+    const modelConfigured = Boolean(named) && all.some((target) => target.model === named);
+    if (candidate && (!modelConfigured || candidate.model === named)) sticky = candidate;
   }
 
   const steps = [
-    ...priorityTargets.map((target) => ({ target, phase: PHASES.PRIORITY })),
+    ...(sticky ? [{ target: sticky, phase: PHASES.STICKY }] : []),
+    ...priorityEntries.map(({ target, group }) => ({ target, phase: PHASES.PRIORITY, group })),
     ...normal.map((target) => ({ target, phase: PHASES.FALLBACK }))
   ];
-  return { steps, priorityCount: priorityTargets.length };
+  return { steps, priorityCount: new Set(priorityEntries.map((entry) => entry.group)).size, sticky };
+}
+
+/**
+ * The order a request would actually attempt right now, given which targets
+ * are eligible. Pure; the walker applies the same rules dynamically.
+ *   - sticky leads when present and eligible
+ *   - per priority group, only the first eligible key is a priority attempt
+ *   - the group's other keys appear later, as normal fallback
+ *   - an ineligible target is left out; a target is listed once
+ */
+export function effectiveOrder(steps, isEligible = () => true) {
+  const order = [];
+  const usedGroups = new Set();
+  const listed = new Set();
+  for (const step of Array.isArray(steps) ? steps : []) {
+    const id = targetId(step.target);
+    if (listed.has(id) || !isEligible(step.target)) continue;
+    if (step.phase === PHASES.PRIORITY) {
+      if (usedGroups.has(step.group)) continue;
+      usedGroups.add(step.group);
+    }
+    listed.add(id);
+    order.push(step);
+  }
+  return order;
+}
+
+/**
+ * The deterministic order for a mixed target list, one pool at a time, as the
+ * router would walk it for a request that names no model. Used by the health
+ * endpoints so "ranked" is the real route order, not a health-score sort.
+ */
+export function routeOrderByPool(targets, priorityByPool = {}, isEligible = () => true) {
+  const all = Array.isArray(targets) ? targets : [];
+  const out = [];
+  for (const pool of ["text", "vision"]) {
+    const inPool = all.filter((target) => (target.pool ?? "text") === pool);
+    const { steps } = buildRoutePlan({ targets: inPool, priority: priorityByPool?.[pool] ?? [] });
+    out.push(...effectiveOrder(steps, isEligible).map((step) => step.target));
+  }
+  return out;
 }

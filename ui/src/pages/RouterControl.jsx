@@ -27,10 +27,11 @@ import { formatLatency, protocolLabel, providerLabel, EMPTY } from "../lib/forma
  *   1. a protocol-specific bridge selector picks the reachable targets —
  *      `selectBridgeTargets` (Anthropic), `selectCodexTargets` (Responses),
  *      `selectChatTargets` (Chat) or `selectGeminiTargets` (Gemini);
- *   2. `fallbackGroups` splits those into the requested model's targets and
- *      the different-model fallbacks, in the order they will be walked;
- *   3. health score and the session's sticky target order the targets *inside*
- *      each group, never across the boundary.
+ *   2. `buildRoutePlan` orders them: the session's valid sticky target, then
+ *      priority targets, then Provider -> Key -> Models (a requested model
+ *      leads its provider's chain);
+ *   3. health only removes cooling targets; the normal list is never reordered
+ *      by health score or by the sticky target.
  *
  * The frontend performs no routing arithmetic of its own — it cannot, because
  * it has no copy of the rule to drift out of date.
@@ -242,8 +243,8 @@ export default function RouterControl() {
                 </div>
               </div>
               <p className="tiny dim" style={{ marginTop: "var(--sp-2)" }}>
-                A session id shows how the sticky-target step reorders the fallback chain. Without
-                one you are seeing the decision a fresh client receives.
+                Pass a sticky target id to see the sticky phase: it is tried first (15-minute TTL),
+                then priority and the normal fallback, which are never reordered.
               </p>
             </div>
           </div>

@@ -259,7 +259,9 @@ interleaved), and the first success stops the request. **Empty or unset means no
 priority phase**: routing goes directly to the normal fallback. Use
 `TEXT_PRIORITY_MODELS` / `VISION_PRIORITY_MODELS` to give each pool its own list;
 entries only match the pool being routed, so there is never text-to-vision or
-vision-to-text fallback. Pinned requests ignore priority.
+vision-to-text fallback. Pinned requests ignore priority and sticky.
+
+A session's last successful target stays sticky for 15 minutes (refreshed by each success) and is tried before priority; once it expires, or fails, routing goes Priority → Normal fallback.
 
 After priority, the normal fallback is key-scoped: **Provider -> Key -> Models ->
 next Key -> Models -> next Provider**. Each key restarts at its provider's first

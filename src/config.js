@@ -106,6 +106,9 @@ export function loadConfig(env = process.env) {
     maxBodyBytes: Math.max(1, Number(env.MAX_REQUEST_BODY_MB || 32)) * 1024 * 1024,
     connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
     retryableStatus: new Set(retryableValues),
+    // Sticky target lifetime after a success: 15 minutes (STICKY_TTL_MS only
+    // exists so tests can use a short real-clock TTL).
+    stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 15 * 60 * 1000,
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,

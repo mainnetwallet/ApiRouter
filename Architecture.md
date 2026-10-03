@@ -34,8 +34,8 @@ AI Provider
 4. Configured provider/model/key combinations are expanded into independent targets.
 5. Targets incompatible with the client protocol are excluded.
 6. The request's pool (TEXT or VISION) is decided; only that pool's targets are used, never the other.
-7. A route plan is built (see "Priority and Key-Scoped Fallback"): optional priority targets first, then Provider -> Key -> Models.
-8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped.
+7. A route plan is built (see "Priority and Key-Scoped Fallback"): a valid sticky target, then optional priority targets, then Provider -> Key -> Models.
+8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. 401/402/403 also cool the same key's sibling models (they describe the key, not the model); other keys and providers are unaffected.
 9. The router calls targets sequentially.
 10. Retryable failures put the exact target into cooldown and move routing forward.
 11. A successful target becomes the session's sticky target.
@@ -49,14 +49,18 @@ differs.
 
 ```text
 REQUEST -> TEXT pool | VISION pool (never mixed)
+  STICKY phase     the session's last successful target, only while its 15-minute TTL is valid
   PRIORITY phase   PRIORITY_MODELS entries, exact env order (optional)
   NORMAL fallback  Provider -> Key -> Models -> next Key -> Models -> next Provider
 ```
 
+Sticky is a separate leading phase. It never edits the normal fallback list.
+
 - `PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3` (or `TEXT_PRIORITY_MODELS` /
   `VISION_PRIORITY_MODELS`, which override it for their pool). Empty = no
-  priority phase and no extra work. A priority entry expands to that
-  provider+model on each of the provider's keys, in key order.
+  priority phase and no extra work. A priority entry is ONE attempt: that
+  provider+model on its first eligible key (key order). Its other keys are tried
+  later, at their normal place in the hierarchy.
 - Normal fallback is **not** flattened. For every key, the provider's models run
   in configured order before the next key starts, and each key restarts at its
   first model (`K1: G1,G2,G3,G4` then `K2: G1,G2,G3,G4`). A requested model that
@@ -70,10 +74,17 @@ REQUEST -> TEXT pool | VISION pool (never mixed)
   default 15 minutes) and no longer reorders the plan. Priority has no state of
   its own, so a failed priority target is tried again on the next request once
   its cooldown has elapsed.
-- Precedence: pin (strict, no priority) > priority > sticky session > hierarchy.
-  The sticky target is promoted to the head of the normal phase only within the
-  first provider tier, so it can neither beat priority nor beat an available
-  exact-model provider.
+- Precedence: pin (strict: no sticky, no priority) > sticky > priority > normal.
+  Every success stores `provider + key + model` as the session's sticky target
+  with `expiresAt = now + 15 min` (a timestamp checked at request time, no timer;
+  `RouteSession.validTargetId`). Sticky is honoured only while valid, only for a
+  target of the request's own pool and protocol, never over cooldown, and not
+  over an explicit configured model the sticky target does not serve. If the
+  sticky target fails, routing continues with priority, then normal; a target is
+  never attempted twice in one request. The next success replaces the sticky and
+  restarts the TTL. Text and vision (and each client protocol) keep separate
+  sticky state. Health score and latency never reorder anything;
+  `/health` and `/api/health` `ranked` list the real route order.
 - Every real attempt is logged with its `phase` (`priority` | `fallback`); no
   keys, headers, prompts or bodies are stored.
 - Fallback is strictly sequential, with no cap on the number of attempts other
@@ -225,7 +236,7 @@ If absent, the router creates a UUID and returns:
 x-multi-ai-session-id: <session-id>
 ```
 
-A successful target becomes the session's preferred target. If it later fails with a retryable error, routing continues to the next available target.
+A successful target becomes the session's sticky target for 15 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, routing continues with priority, then the normal fallback. See "Priority and Key-Scoped Fallback".
 
 ## Security
 

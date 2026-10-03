@@ -82,6 +82,11 @@ test("GET /api/health reports summary, targets, ranking and the monitor", async 
   assert.deepEqual(body.states.sort(), ["cooldown", "failed", "healthy", "unknown"]);
   assert.ok(body.monitor === null || typeof body.monitor === "object");
   assert.equal(body.ranked[0].rank, 1);
+  // "ranked" is the deterministic route order (key-major), with real fields.
+  assert.deepEqual(
+    body.ranked.map((r) => `${r.provider}/${r.model}/${r.keyIndex}`),
+    ["groq/model-a/0", "groq/model-b/0", "groq/model-a/1", "groq/model-b/1"]
+  );
 
   for (const key of ["provider", "model", "keyIndex", "status", "score", "latencyMs", "successes", "failures"]) {
     assert.ok(key in body.targets[0], `health target missing "${key}"`);

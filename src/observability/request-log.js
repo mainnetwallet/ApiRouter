@@ -27,9 +27,9 @@ const MAX_PENDING = 200;
 function normalizeAttempts(list) {
   return (Array.isArray(list) ? list : []).map((attempt, index) => ({
     index: index + 1,
-    // "priority" | "fallback" | null (older callers); and whether this row was
+    // "sticky" | "priority" | "fallback" | null (older callers); and whether this row was
     // skipped without a network call (cooldown / already attempted).
-    phase: attempt?.phase === "priority" || attempt?.phase === "fallback" ? attempt.phase : null,
+    phase: attempt?.phase === "sticky" || attempt?.phase === "priority" || attempt?.phase === "fallback" ? attempt.phase : null,
     skipped: attempt?.skipped === true,
     skipReason: attempt?.skipped === true && typeof attempt?.skipReason === "string" ? attempt.skipReason : null,
     provider: attempt?.provider ?? null,

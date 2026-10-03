@@ -249,7 +249,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
       {heading}
 
       <div className="metrics section">
-        <MetricCard label="In chain" value={chain.length} icon="layers" hint="eligible, ranked" />
+        <MetricCard label="In chain" value={chain.length} icon="layers" hint="eligible, in route order" />
         <MetricCard label="Skipped" value={unavailable.length} tone={unavailable.length > 0 ? "warn" : null} icon="clock" hint="in cooldown" />
         <MetricCard
           label="Recent fallbacks"
@@ -267,7 +267,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
                 {poolLabel(pool)} chain for {protocolLabel(activeProtocol)}
               </span>
               <div className="panel__actions">
-                <span className="tiny dim">highest health score first</span>
+                <span className="tiny dim">fixed route order</span>
               </div>
             </div>
             <div className="panel__body">
@@ -370,9 +370,11 @@ function HowFallbackWorks() {
           <li>The request enters exactly one pool: text, or vision for image requests.</li>
           <li>Targets that cannot speak the client's protocol are removed.</li>
           <li>Targets inside a cooldown window are removed.</li>
-          <li>The rest are ranked by health score, then provider, model and key index.</li>
-          <li>The session's sticky target, if still eligible, is tried first.</li>
-          <li>Each target is tried in order until one succeeds.</li>
+          <li>The session's sticky target (last success, valid for 15 minutes) is tried first, if it is eligible.</li>
+          <li>Then priority targets (PRIORITY_MODELS), in their configured order, one attempt per entry.</li>
+          <li>The rest follow Provider → Key → Models: every model of a key runs in order before the next key, and each key restarts at its first model.</li>
+          <li>Sticky is a separate first step and never reorders the chain; health only skips cooling targets.</li>
+          <li>Each target is tried at most once per request, in order, until one succeeds.</li>
           <li>A retryable failure cools that exact target down and moves on — only within the same pool.</li>
         </ol>
       </div>
