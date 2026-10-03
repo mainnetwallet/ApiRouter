@@ -79,6 +79,7 @@ describe("format", () => {
     expect(providerLabel("nous")).toBe("Nous Portal");
     expect(providerLabel("pollinations")).toBe("Pollinations");
     expect(providerLabel("siliconflow")).toBe("SiliconFlow");
+    expect(providerLabel("modelscope")).toBe("ModelScope");
     expect(providerLabel(null)).toBe(EMPTY);
   });
 

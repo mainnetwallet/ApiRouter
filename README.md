@@ -193,6 +193,28 @@ SILICONFLOW_VISION_BASE_URL=https://api.siliconflow.cn/v1
   SiliconFlow joins the normal fallback chain like any other provider.
 - Free-model availability and limits may change; confirm them in the current SiliconFlow catalog.
 
+### ModelScope
+
+```env
+MODELSCOPE_API_KEYS=
+MODELSCOPE_MODELS=deepseek-ai/DeepSeek-V4.1-Flash,Qwen/Qwen3.8-Flash-Next,ZhipuAI/GLM-5.3,ZhipuAI/GLM-5.3-Flash,Qwen/Qwen3.8-27B,moonshotai/Kimi-K3
+MODELSCOPE_BASE_URL=https://api-inference.modelscope.cn/v1
+
+MODELSCOPE_VISION_API_KEYS=
+MODELSCOPE_VISION_MODELS=deepseek-ai/DeepSeek-V4.1-Flash,Qwen/Qwen3.8-Flash-Next,ZhipuAI/GLM-5.3-Flash,Qwen/Qwen3.8-27B,moonshotai/Kimi-K3,stepfun-ai/Step-3.7-Flash
+MODELSCOPE_VISION_BASE_URL=https://api-inference.modelscope.cn/v1
+```
+
+- Provider ID: `modelscope` (shown as **ModelScope**). OpenAI-compatible; the base URL already contains `/v1`
+  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
+- Text requests use `MODELSCOPE_MODELS` and `MODELSCOPE_API_KEYS`; image requests use only
+  `MODELSCOPE_VISION_MODELS` and `MODELSCOPE_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
+- A model receives images only if it is listed in the vision pool; the router keeps no per-model capability data.
+- Keys and models are comma-separated; every key x model pair is a target, in the configured order, and
+  ModelScope joins the normal fallback chain like any other provider.
+- ModelScope API-Inference is quota-based. Free availability, quotas and the model list can change, so check
+  your account's current limits and the live model catalog; nothing here promises unlimited free usage.
+
 Retryable statuses:
 
 ```text
