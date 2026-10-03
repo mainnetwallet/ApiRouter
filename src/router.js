@@ -231,8 +231,11 @@ export async function withFallback(
  * attempted, its remaining priority steps are dropped silently (those keys are
  * tried later at their normal place in the plan). Priority is not remembered:
  * a failure only affects this request and whatever cooldown the health
- * registry itself decides on. The session's sticky target is recorded on
- * success for observability only; it never influences the order.
+ * registry itself decides on. Every success is recorded on the session as its
+ * sticky target (provider + key + model, via the health id). The sticky target
+ * leads the NEXT request of that same session as the plan's first phase; this
+ * walker never reorders anything itself, and the record is per session, never
+ * global.
  */
 async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip) {
   if (steps.length === 0) {

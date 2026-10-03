@@ -263,6 +263,8 @@ vision-to-text fallback. Pinned requests ignore priority and sticky.
 
 A session's last successful target stays sticky for 15 minutes (refreshed by each success) and is tried before priority; once it expires, or fails, routing goes Priority → Normal fallback.
 
+Stickiness is **per session** (`X-Multi-AI-Session-ID`; reuse the `x-multi-ai-session-id` response header) and remembers the exact `provider + key + model`, not just the model name. Another session never inherits it, text and vision keep separate sticky targets, and a success never reorders `PRIORITY_MODELS`: a new session always starts at the first configured priority entry. A sticky success ends the request (no priority/fallback call), and a target is never called twice in one request. Example with `PRIORITY_MODELS=groq/A1,openrouter/B1`: request #1 runs `priority groq/A1/key1 → 200`, so request #2 of the same session runs `sticky groq/A1/key1 → 200` and stops; if the sticky call fails, request #2 continues `priority groq/A1 (next key) → priority openrouter/B1 → fallback`.
+
 After priority, the normal fallback is key-scoped: **Provider -> Key -> Models ->
 next Key -> Models -> next Provider**. Each key restarts at its provider's first
 model, and a target already tried in the same request is skipped. See

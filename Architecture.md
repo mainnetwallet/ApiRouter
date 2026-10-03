@@ -236,7 +236,7 @@ If absent, the router creates a UUID and returns:
 x-multi-ai-session-id: <session-id>
 ```
 
-A successful target becomes the session's sticky target for 15 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, routing continues with priority, then the normal fallback. See "Priority and Key-Scoped Fallback".
+A successful target becomes the session's sticky target for 15 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, routing continues with priority, then the normal fallback. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders `PRIORITY_MODELS` or the normal fallback list.
 
 ## Security
 
