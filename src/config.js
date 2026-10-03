@@ -1,7 +1,7 @@
 import { providerProtocols } from "./adapters.js";
 
 const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529];
-const PROVIDER_IDS = ["agentrouter", "gemini", "groq", "huggingface", "mistral", "openrouter", "cerebras", "cloudflare", "sambanova", "cohere", "zai", "vercel", "opencode", "nvidia", "nous", "pollinations"];
+const PROVIDER_IDS = ["agentrouter", "gemini", "groq", "huggingface", "mistral", "openrouter", "cerebras", "cloudflare", "sambanova", "cohere", "zai", "vercel", "opencode", "nvidia", "nous", "pollinations", "siliconflow"];
 
 const split = (value) => String(value || "").split(",").map((v) => v.trim()).filter(Boolean);
 
@@ -35,7 +35,6 @@ function applyCloudflareAccounts(provider, env, prefix = "CLOUDFLARE") {
   provider.accountIds = accountIds;
   provider.baseUrls = provider.apiKeys.map((_, keyIndex) =>
     resolveCloudflareBaseUrl(env[`${prefix}_BASE_URL`], accountFor(keyIndex)));
-  // First usable URL, for the "is this provider configured / what does it point at" views.
   provider.baseUrl = provider.baseUrls.find(Boolean) || resolveCloudflareBaseUrl(env[`${prefix}_BASE_URL`], accountIds[0]);
 }
 
@@ -45,20 +44,12 @@ export function isProviderConfigured(provider) {
 
 export const VISION_POOL = "vision";
 
-/**
- * Builds the routable targets of one pool.
- *   buildTargets(config.providers)                      text pool (default)
- *   buildTargets(config.visionProviders, VISION_POOL)   vision pool
- * Vision targets carry `pool: "vision"` and their own `id`, so a vision model
- * never shares health state with the same model id in the text pool.
- */
 export function buildTargets(providers, pool = "text") {
   const targets = [];
   for (const [providerId, provider] of Object.entries(providers)) {
     if (!isProviderConfigured(provider)) continue;
     for (const model of provider.models) {
       for (let keyIndex = 0; keyIndex < provider.apiKeys.length; keyIndex += 1) {
-        // Cloudflare keys each have their own account, hence their own URL.
         const baseUrl = Array.isArray(provider.baseUrls) ? provider.baseUrls[keyIndex] : provider.baseUrl;
         if (!baseUrl) continue;
         targets.push({
@@ -77,13 +68,6 @@ export function buildTargets(providers, pool = "text") {
   return targets;
 }
 
-/**
- * Reads one provider pool from the environment.
- *   text pool    GEMINI_API_KEYS / GEMINI_BASE_URL / GEMINI_MODELS
- *   vision pool  GEMINI_VISION_API_KEYS / GEMINI_VISION_BASE_URL / GEMINI_VISION_MODELS
- * The vision pool is completely separate: its own keys, its own base URL and
- * its own model list. Cloudflare uses CLOUDFLARE_VISION_ACCOUNT_IDS.
- */
 export function readProviders(env, { vision = false } = {}) {
   const providers = {};
   for (const id of PROVIDER_IDS) {
@@ -113,17 +97,10 @@ export function loadConfig(env = process.env) {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
     port: Number(env.PORT || 8788),
     timeoutMs: Number(env.REQUEST_TIMEOUT_MS || 120000),
-    // Streaming requests should get response headers within seconds. If a
-    // provider hangs, give up on it quickly and fall back instead of waiting
-    // for the full REQUEST_TIMEOUT_MS.
-    // Largest client request body the router accepts. Claude Code resends the
-    // whole conversation (including pasted images) each turn, so 10 MB is easily
-    // exceeded; 32 MB matches Anthropic's own limit.
     maxBodyBytes: Math.max(1, Number(env.MAX_REQUEST_BODY_MB || 32)) * 1024 * 1024,
     connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
     retryableStatus: new Set(retryableValues),
     providers,
-    // Separate pool for image requests: own keys, own base URLs, own models.
     visionProviders
   };
 }
