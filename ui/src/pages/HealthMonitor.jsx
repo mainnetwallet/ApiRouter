@@ -4,6 +4,7 @@ import { DataTable } from "../components/ui/DataTable.jsx";
 import { FilterBar, FilterSelect } from "../components/ui/FilterBar.jsx";
 import { SearchInput } from "../components/ui/SearchInput.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
+import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
 import { MetricCard } from "../components/ui/MetricCard.jsx";
@@ -15,7 +16,10 @@ import { Icon } from "../components/ui/Icon.jsx";
 import { HealthDistribution } from "../components/charts/Charts.jsx";
 import { useHealth } from "../context/HealthContext.jsx";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
-import { HEALTH_STATUSES, filterTargets, findTarget, normalizeHealthPayload, providerOptions } from "../lib/targets.js";
+import {
+  HEALTH_STATUSES, filterTargets, findTarget, normalizeHealthPayload, providerOptions, summarizeTargets
+} from "../lib/targets.js";
+import { poolLabel } from "../lib/pools.js";
 import { sortRows } from "../lib/table.js";
 import {
   formatCountdown, formatDateTime, formatDuration, formatNumber,
@@ -42,31 +46,22 @@ export default function HealthMonitor() {
     lastUpdatedAt, refreshing, autoRefresh, setAutoRefresh
   } = useHealth();
 
-  const [search, setSearch] = useState("");
-  const [provider, setProvider] = useState(null);
-  const [status, setStatus] = useState(null);
-  const [sort, setSort] = useState({ key: "status", direction: "asc" });
   const [selectedId, setSelectedId] = useState(null);
-
-  const debouncedSearch = useDebouncedValue(search, 220);
 
   // Narrowed once: a missing `summary`, a null target or a partial response
   // must not reach a property access in the table.
   const view = useMemo(() => normalizeHealthPayload(health), [health]);
-  const { rows, summary } = view;
+  const { rows } = view;
 
   const transitions = useHealthTransitions(rows);
 
-  const providers = useMemo(() => providerOptions(rows), [rows]);
-
-  const filtered = useMemo(
-    () => sortRows(
-      filterTargets(rows, { provider, status, search: debouncedSearch }),
-      COLUMN_ACCESSORS,
-      sort
-    ),
-    [rows, provider, status, debouncedSearch, sort]
-  );
+  // The two pools are routed, probed and ranked independently, so every figure
+  // below is built from one pool's rows. The payload's combined `summary` is
+  // deliberately unused: nothing on this page is the sum of text and vision.
+  const byPool = useMemo(() => ({
+    text: rows.filter((row) => row.pool === "text"),
+    vision: rows.filter((row) => row.pool === "vision")
+  }), [rows]);
 
   const selected = useMemo(() => findTarget(rows, selectedId), [rows, selectedId]);
 
@@ -121,90 +116,146 @@ export default function HealthMonitor() {
 
       <AutoRefreshIndicator autoRefresh={autoRefresh} lastUpdatedAt={lastUpdatedAt} />
 
-      <section className="section">
-        <div className="metrics">
-          <MetricCard label="Total targets" value={formatNumber(summary.total)} icon="box" hint="provider + model + key" />
-          <MetricCard label="Healthy" value={formatNumber(summary.healthy)} tone={summary.healthy > 0 ? "ok" : null} icon="check" />
-          <MetricCard label="Failed" value={formatNumber(summary.failed)} tone={summary.failed > 0 ? "danger" : null} icon="alert" />
-          <MetricCard label="Cooldown" value={formatNumber(summary.cooldown)} tone={summary.cooldown > 0 ? "warn" : null} icon="clock" />
-          <MetricCard label="Unknown" value={formatNumber(summary.unknown)} tone={summary.unknown > 0 ? "warn" : null} icon="info" hint="never observed" />
-          <MetricCard
-            label="Average latency"
-            value={summary.averageLatencyMs === null ? null : formatNumber(summary.averageLatencyMs) + " ms"}
-            icon="gauge"
-            hint="measured targets only"
-          />
-        </div>
-      </section>
-
-      <section className="section">
-        <HealthDistribution counts={summary} />
-      </section>
-
       <MonitorStatus monitor={view.monitor} />
 
-      <div className="panel section">
-        <div className="panel__header">
-          <span className="panel__title">Target Health</span>
-          <div className="panel__actions">
-            <span className="tiny dim nowrap">score and cooldown are the router's own</span>
-          </div>
-        </div>
-
-        <FilterBar
-          actions={
-            <span className="tiny dim nowrap">
-              {filtered.length} of {rows.length} targets
-            </span>
-          }
-        >
-          <div className="field filter-bar__search">
-            <label className="field__label" htmlFor="health-search">Search</label>
-            <SearchInput
-              id="health-search"
-              value={search}
-              onChange={setSearch}
-              label="Search targets"
-              placeholder="Model, provider or reason…"
-            />
-          </div>
-          <FilterSelect label="Provider" value={provider} onChange={setProvider} options={providers} />
-          <FilterSelect label="Status" value={status} onChange={setStatus} options={HEALTH_STATUSES} />
-        </FilterBar>
-
-        <DataTable
-          columns={COLUMNS}
-          rows={filtered}
-          sort={sort}
-          onSortChange={(next) => setSort(next)}
-          rowKey={(row) => row.id}
-          onRowClick={(row) => setSelectedId(row.id)}
-          isSelected={(row) => row.id === selectedId}
-          caption="Routing targets and their observed health"
-          emptyState={
-            rows.length === 0 ? (
-              <EmptyState title="No routing targets" icon="server">
-                A provider becomes routable once it has API keys, models and a base URL configured.
-              </EmptyState>
-            ) : (
-              <EmptyState title="No targets match these filters" icon="filter">
-                <button
-                  type="button"
-                  className="btn btn--sm"
-                  onClick={() => { setSearch(""); setProvider(null); setStatus(null); }}
-                >
-                  Clear filters
-                </button>
-              </EmptyState>
-            )
-          }
+      {POOL_ORDER.map((pool) => (
+        <PoolHealthSection
+          key={pool}
+          pool={pool}
+          rows={byPool[pool]}
+          transitions={transitions.filter((transition) => transition.pool === pool)}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
         />
-      </div>
-
-      <HealthTransitions transitions={transitions} />
+      ))}
 
       <TargetDrawer target={selected} onClose={() => setSelectedId(null)} />
     </div>
+  );
+}
+
+const POOL_ORDER = ["text", "vision"];
+
+/**
+ * Everything for ONE pool: its own cards, distribution bar, filters, target
+ * table and observed transitions. Filter and sort state is local, so filtering
+ * the text table never touches the vision one.
+ */
+function PoolHealthSection({ pool, rows, transitions, selectedId, onSelect }) {
+  const [search, setSearch] = useState("");
+  const [provider, setProvider] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [sort, setSort] = useState({ key: "status", direction: "asc" });
+
+  const debouncedSearch = useDebouncedValue(search, 220);
+
+  const summary = useMemo(() => summarizeTargets(rows), [rows]);
+  const providers = useMemo(() => providerOptions(rows), [rows]);
+
+  const filtered = useMemo(
+    () => sortRows(
+      filterTargets(rows, { provider, status, search: debouncedSearch }),
+      COLUMN_ACCESSORS,
+      sort
+    ),
+    [rows, provider, status, debouncedSearch, sort]
+  );
+
+  const idPrefix = `health-${pool}`;
+
+  return (
+    <section className="section" aria-labelledby={`${idPrefix}-title`}>
+      <div className="section__header">
+        <h2 id={`${idPrefix}-title`} className="section__title row" style={{ gap: 8 }}>
+          <PoolBadge pool={pool} />
+          {poolLabel(pool)} pool
+        </h2>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="panel">
+          <EmptyState title={`No ${pool} targets`} icon="server">
+            {pool === "vision"
+              ? "No vision provider is configured. Image requests will fail until one is set up."
+              : "A provider becomes routable once it has API keys, models and a base URL configured."}
+          </EmptyState>
+        </div>
+      ) : (
+        <>
+          <div className="metrics">
+            <MetricCard label="Total targets" value={formatNumber(summary.total)} icon="box" hint="provider + model + key" />
+            <MetricCard label="Healthy" value={formatNumber(summary.healthy)} tone={summary.healthy > 0 ? "ok" : null} icon="check" />
+            <MetricCard label="Failed" value={formatNumber(summary.failed)} tone={summary.failed > 0 ? "danger" : null} icon="alert" />
+            <MetricCard label="Cooldown" value={formatNumber(summary.cooldown)} tone={summary.cooldown > 0 ? "warn" : null} icon="clock" />
+            <MetricCard label="Unknown" value={formatNumber(summary.unknown)} tone={summary.unknown > 0 ? "warn" : null} icon="info" hint="never observed" />
+            <MetricCard
+              label="Average latency"
+              value={summary.averageLatencyMs === null ? null : formatNumber(summary.averageLatencyMs) + " ms"}
+              icon="gauge"
+              hint="measured targets only"
+            />
+          </div>
+
+          <div className="section">
+            <HealthDistribution counts={summary} />
+          </div>
+
+          <div className="panel section">
+            <div className="panel__header">
+              <span className="panel__title">{poolLabel(pool)} target health</span>
+              <div className="panel__actions">
+                <span className="tiny dim nowrap">score and cooldown are the router's own</span>
+              </div>
+            </div>
+
+            <FilterBar
+              actions={
+                <span className="tiny dim nowrap">
+                  {filtered.length} of {rows.length} targets
+                </span>
+              }
+            >
+              <div className="field filter-bar__search">
+                <label className="field__label" htmlFor={`${idPrefix}-search`}>Search</label>
+                <SearchInput
+                  id={`${idPrefix}-search`}
+                  value={search}
+                  onChange={setSearch}
+                  label={`Search ${pool} targets`}
+                  placeholder="Model, provider or reason…"
+                />
+              </div>
+              <FilterSelect label="Provider" value={provider} onChange={setProvider} options={providers} />
+              <FilterSelect label="Status" value={status} onChange={setStatus} options={HEALTH_STATUSES} />
+            </FilterBar>
+
+            <DataTable
+              columns={COLUMNS}
+              rows={filtered}
+              sort={sort}
+              onSortChange={(next) => setSort(next)}
+              rowKey={(row) => row.id}
+              onRowClick={(row) => onSelect(row.id)}
+              isSelected={(row) => row.id === selectedId}
+              caption={`${poolLabel(pool)} routing targets and their observed health`}
+              emptyState={
+                <EmptyState title="No targets match these filters" icon="filter">
+                  <button
+                    type="button"
+                    className="btn btn--sm"
+                    onClick={() => { setSearch(""); setProvider(null); setStatus(null); }}
+                  >
+                    Clear filters
+                  </button>
+                </EmptyState>
+              }
+            />
+          </div>
+
+          <HealthTransitions pool={pool} transitions={transitions} />
+        </>
+      )}
+    </section>
   );
 }
 
@@ -437,11 +488,12 @@ function TargetDrawer({ target, onClose }) {
       open={Boolean(target)}
       onClose={onClose}
       title={target?.model ?? ""}
-      subtitle={target ? `${providerLabel(target.provider)} · key ${target.keyIndex}` : null}
+      subtitle={target ? `${poolLabel(target.pool)} · ${providerLabel(target.provider)} · key ${target.keyIndex}` : null}
     >
       {target ? (
         <div className="stack" style={{ gap: "var(--sp-4)" }}>
           <div className="row row--wrap">
+            <PoolBadge pool={target.pool} />
             <HealthBadge status={target.status} />
             <StatusBadge tone="neutral" dot={false}>
               {target.protocols.map(protocolLabel).join(", ") || "no protocol"}
@@ -449,6 +501,9 @@ function TargetDrawer({ target, onClose }) {
           </div>
 
           <dl className="dl">
+            <dt className="dl__term">Pool</dt>
+            <dd className="dl__desc"><PoolBadge pool={target.pool} /></dd>
+
             <dt className="dl__term">Provider</dt>
             <dd className="dl__desc">{providerLabel(target.provider)}</dd>
 
@@ -586,6 +641,7 @@ function useHealthTransitions(targets) {
         changes.push({
           id: `${target.id}-${Date.now()}`,
           at: Date.now(),
+          pool: target.pool,
           target: `${target.provider} / ${target.model} / key ${target.keyIndex}`,
           from: prior,
           to: target.status,
@@ -603,11 +659,11 @@ function useHealthTransitions(targets) {
   return transitions;
 }
 
-function HealthTransitions({ transitions }) {
+function HealthTransitions({ pool, transitions }) {
   return (
     <div className="panel">
       <div className="panel__header">
-        <span className="panel__title">Health transitions</span>
+        <span className="panel__title">{poolLabel(pool)} health transitions</span>
         <div className="panel__actions">
           <span className="tiny dim nowrap">observed by this panel since it was opened</span>
         </div>
