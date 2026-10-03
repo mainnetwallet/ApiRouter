@@ -150,6 +150,27 @@ NOUS_VISION_MODELS=stepfun/step-3.7-flash:free
 - Several keys are comma-separated and become independent fallback targets.
 - Vision requests never fall back to the Nous text pool; if `NOUS_VISION_API_KEYS` is empty, image requests return `503 no_vision_route`.
 
+### Pollinations
+
+```env
+POLLINATIONS_API_KEYS=
+POLLINATIONS_MODELS=
+POLLINATIONS_BASE_URL=https://gen.pollinations.ai/v1
+
+POLLINATIONS_VISION_API_KEYS=
+POLLINATIONS_VISION_MODELS=
+POLLINATIONS_VISION_BASE_URL=https://gen.pollinations.ai/v1
+```
+
+- Provider ID: `pollinations`. OpenAI-compatible; the base URL already contains `/v1`
+  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
+- Text requests use `POLLINATIONS_MODELS`; image requests use only `POLLINATIONS_VISION_MODELS`
+  and `POLLINATIONS_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
+- Model ids are sent exactly as configured, including `community/owner/model` ids.
+- Pollinations bills usage in Pollen, and model availability, prices and access rules change.
+  The router does not check whether a configured model is free: confirm each model's price and
+  image-input support in the current Pollinations catalog (`GET /v1/models`) before relying on it.
+
 Retryable statuses:
 
 ```text

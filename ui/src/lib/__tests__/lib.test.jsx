@@ -77,6 +77,7 @@ describe("format", () => {
     expect(providerLabel("opencode")).toBe("OpenCode Zen");
     expect(providerLabel("nvidia")).toBe("NVIDIA Build");
     expect(providerLabel("nous")).toBe("Nous Portal");
+    expect(providerLabel("pollinations")).toBe("Pollinations");
     expect(providerLabel(null)).toBe(EMPTY);
   });
 
