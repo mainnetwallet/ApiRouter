@@ -495,6 +495,28 @@ test("modelCatalogue joins health targets with request usage", () => {
   assert.equal(catalogue[0].successRate, 2 / 3);
 });
 
+test("modelCatalogue keeps usage separate when one model is in both pools", () => {
+  const base = { provider: "gemini", model: "m", keyIndex: 0, protocols: ["gemini"], status: "healthy", score: 80, successes: 1, failures: 0, latencyMs: 50, consecutiveFailures: 0, lastStatus: 200, lastReason: "ok", cooldownUntil: 0, updatedAt: "2026-01-01T00:00:00.000Z" };
+  const catalogue = modelCatalogue(
+    [
+      { ...base, id: "gemini:m:key-0", pool: "text" },
+      { ...base, id: "vision:gemini:m:key-0", pool: "vision" }
+    ],
+    [
+      { finalProvider: "gemini", finalModel: "m", pool: "text", outcome: "success" },
+      { finalProvider: "gemini", finalModel: "m", pool: "text", outcome: "success" },
+      { finalProvider: "gemini", finalModel: "m", pool: "vision", outcome: "failed" }
+    ]
+  );
+
+  const text = catalogue.find((row) => row.pool === "text");
+  const vision = catalogue.find((row) => row.pool === "vision");
+  assert.equal(text.requests, 2);
+  assert.equal(text.requestFailures, 0);
+  assert.equal(vision.requests, 1);
+  assert.equal(vision.requestFailures, 1);
+});
+
 test("resolveRange maps presets and falls back to one hour", () => {
   assert.equal(resolveRange("5m").rangeMs, 5 * 60 * 1000);
   assert.equal(resolveRange("7d").rangeMs, 7 * 24 * 60 * 60 * 1000);

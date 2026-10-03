@@ -133,7 +133,9 @@ export function modelCatalogue(healthEntries = [], logEntries = []) {
 
   for (const entry of logEntries) {
     if (!entry.finalProvider || !entry.finalModel) continue;
-    const key = `${entry.finalProvider}\u0000${entry.finalModel}`;
+    // Pool is part of the key: the same provider + model can sit in both the
+    // text and vision pools, and their request counts must not be merged.
+    const key = `${entry.pool ?? "text"}\u0000${entry.finalProvider}\u0000${entry.finalModel}`;
     if (!byProviderModel.has(key)) byProviderModel.set(key, { requests: 0, failures: 0 });
     const row = byProviderModel.get(key);
     row.requests += 1;
@@ -141,7 +143,7 @@ export function modelCatalogue(healthEntries = [], logEntries = []) {
   }
 
   return healthEntries.map((entry) => {
-    const usage = byProviderModel.get(`${entry.provider}\u0000${entry.model}`) ?? {
+    const usage = byProviderModel.get(`${entry.pool ?? "text"}\u0000${entry.provider}\u0000${entry.model}`) ?? {
       requests: 0,
       failures: 0
     };

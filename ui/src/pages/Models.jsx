@@ -4,6 +4,7 @@ import { DataTable } from "../components/ui/DataTable.jsx";
 import { FilterBar, FilterSelect } from "../components/ui/FilterBar.jsx";
 import { SearchInput } from "../components/ui/SearchInput.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
+import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
 import { MetricCard } from "../components/ui/MetricCard.jsx";
@@ -15,6 +16,7 @@ import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
 import { getModels } from "../api/models.js";
 import { filterChoices, filterTargets, findTarget, isRoutable, normalizeModelPayload } from "../lib/targets.js";
+import { poolLabel } from "../lib/pools.js";
 import { sortRows } from "../lib/table.js";
 import {
   formatDateTime, formatNumber, formatPercent,
@@ -36,6 +38,7 @@ export default function Models() {
   const models = useApi(getModels, { intervalMs: 15_000 });
 
   const [search, setSearch] = useState("");
+  const [pool, setPool] = useState(null);
   const [provider, setProvider] = useState(null);
   const [protocol, setProtocol] = useState(null);
   const [status, setStatus] = useState(null);
@@ -54,22 +57,30 @@ export default function Models() {
 
   const filtered = useMemo(
     () => sortRows(
-      filterTargets(rows, { provider, protocol, status, search: debouncedSearch }),
+      filterTargets(rows, { provider, protocol, status, pool, search: debouncedSearch }),
       COLUMN_ACCESSORS,
       sort
     ),
-    [rows, provider, protocol, status, debouncedSearch, sort]
+    [rows, provider, protocol, status, pool, debouncedSearch, sort]
   );
 
   const selected = useMemo(() => findTarget(rows, selectedId), [rows, selectedId]);
 
-  const activeFilterCount = [provider, protocol, status, debouncedSearch].filter(Boolean).length;
+  const activeFilterCount = [pool, provider, protocol, status, debouncedSearch].filter(Boolean).length;
+
+  // Counted per pool and never added together: the text and vision pools are
+  // separate configuration, so each gets its own figure.
+  const poolCounts = useMemo(() => {
+    const counts = { text: 0, vision: 0 };
+    for (const row of rows) counts[row.pool] += 1;
+    return counts;
+  }, [rows]);
 
   if (models.loading && !models.data) {
     return (
       <div className="page">
         <PageHeader title="Models" description="Model catalogue with health, protocol and usage" />
-        <MetricSkeleton count={5} />
+        <MetricSkeleton count={7} />
         <div className="panel"><div className="panel__body"><TableSkeleton rows={10} label="Loading models" /></div></div>
       </div>
     );
@@ -99,6 +110,18 @@ export default function Models() {
             value={formatNumber(summary.total)}
             icon="box"
             hint="provider + model + key targets"
+          />
+          <MetricCard
+            label="Text targets"
+            value={formatNumber(poolCounts.text)}
+            icon="box"
+            hint="text pool only"
+          />
+          <MetricCard
+            label="Vision targets"
+            value={formatNumber(poolCounts.vision)}
+            icon="box"
+            hint="vision pool only"
           />
           <MetricCard
             label="Healthy"
@@ -149,6 +172,12 @@ export default function Models() {
             />
           </div>
 
+          <FilterSelect
+            label="Pool"
+            value={pool}
+            onChange={setPool}
+            options={choices.pools.map((value) => ({ value, label: poolLabel(value) }))}
+          />
           <FilterSelect label="Provider" value={provider} onChange={setProvider} options={choices.providers} />
           <FilterSelect
             label="Protocol"
@@ -177,7 +206,7 @@ export default function Models() {
                 <button
                   type="button"
                   className="btn btn--sm"
-                  onClick={() => { setSearch(""); setProvider(null); setProtocol(null); setStatus(null); }}
+                  onClick={() => { setSearch(""); setPool(null); setProvider(null); setProtocol(null); setStatus(null); }}
                 >
                   Clear filters
                 </button>
@@ -193,6 +222,7 @@ export default function Models() {
 }
 
 const COLUMN_ACCESSORS = {
+  pool: (row) => row.pool,
   provider: (row) => row.provider,
   model: (row) => row.model,
   protocol: (row) => row.protocols[0] ?? "",
@@ -204,6 +234,13 @@ const COLUMN_ACCESSORS = {
 };
 
 const COLUMNS = [
+  {
+    key: "pool",
+    header: "Pool",
+    sortable: true,
+    get: (row) => row.pool,
+    render: (row) => <PoolBadge pool={row.pool} />
+  },
   {
     key: "provider",
     header: "Provider",
@@ -298,11 +335,12 @@ function ModelDrawer({ model, onClose }) {
       open={Boolean(model)}
       onClose={onClose}
       title={model?.model ?? ""}
-      subtitle={model ? `${providerLabel(model.provider)} · key ${model.keyIndex}` : null}
+      subtitle={model ? `${poolLabel(model.pool)} · ${providerLabel(model.provider)} · key ${model.keyIndex}` : null}
     >
       {model ? (
         <div className="stack" style={{ gap: "var(--sp-4)" }}>
           <div className="row row--wrap">
+            <PoolBadge pool={model.pool} />
             <HealthBadge status={model.status} />
             <StatusBadge tone="neutral" dot={false}>
               {model.protocols.map(protocolLabel).join(", ") || "no protocol"}
@@ -310,6 +348,9 @@ function ModelDrawer({ model, onClose }) {
           </div>
 
           <dl className="dl">
+            <dt className="dl__term">Pool</dt>
+            <dd className="dl__desc"><PoolBadge pool={model.pool} /></dd>
+
             <dt className="dl__term">Provider</dt>
             <dd className="dl__desc">{providerLabel(model.provider)}</dd>
 
