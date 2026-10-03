@@ -150,14 +150,18 @@ export function resolvePriorityTargets(targets, priority = []) {
  */
 export function buildRoutePlan({ targets = [], requestedModel = "", priority = [], stickyTargetId = null } = {}) {
   const all = Array.isArray(targets) ? targets : [];
-  const priorityEntries = resolvePriorityTargets(all, priority);
+  const named = typeof requestedModel === "string" ? requestedModel : "";
+  // An explicit model the pool actually serves is the client's choice: neither
+  // sticky nor priority may put a target of a DIFFERENT model ahead of it.
+  // (A model nobody here serves is auto-routed and keeps the full plan.)
+  const modelConfigured = Boolean(named) && all.some((target) => target.model === named);
+  const priorityEntries = resolvePriorityTargets(all, priority)
+    .filter(({ target }) => !modelConfigured || target.model === named);
   const normal = buildHierarchicalOrder(all, requestedModel);
 
   let sticky = null;
   if (stickyTargetId) {
     const candidate = all.find((target) => targetId(target) === stickyTargetId) ?? null;
-    const named = typeof requestedModel === "string" ? requestedModel : "";
-    const modelConfigured = Boolean(named) && all.some((target) => target.model === named);
     if (candidate && (!modelConfigured || candidate.model === named)) sticky = candidate;
   }
 

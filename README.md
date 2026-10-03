@@ -263,7 +263,7 @@ and all their keys have failed or cooled down does the normal fallback start. **
 priority phase**: routing goes directly to the normal fallback. Use
 `TEXT_PRIORITY_MODELS` / `VISION_PRIORITY_MODELS` to give each pool its own list;
 entries only match the pool being routed, so there is never text-to-vision or
-vision-to-text fallback. Pinned requests ignore priority and sticky.
+vision-to-text fallback. Pinned requests ignore priority and sticky. A pinned success is not remembered as the session's sticky target. If a client names a model this pool serves, only priority entries of that model apply, so a priority entry of a different model never outranks the requested one.
 
 A session's last successful target stays sticky for 15 minutes (refreshed by each success) and is tried before priority; once it expires, or fails, routing goes Priority → Normal fallback.
 

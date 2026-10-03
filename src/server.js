@@ -536,7 +536,9 @@ async function proxy(req, res, protocol, pathname) {
         } finally { clearTimeout(timer); }
       },
       config.retryableStatus,
-      sessionInfo.state.session,
+      // A pin is a one-off override (e.g. the Playground testing a key): its
+      // success must not become the session's sticky target for normal traffic.
+      pinned.pinned ? new RouteSession({ ttlMs: config.stickyTtlMs }) : sessionInfo.state.session,
       pinned.pinned ? pinnedHealth : healthRegistry,
       {
         plan: routePlan.steps,

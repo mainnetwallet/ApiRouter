@@ -79,6 +79,9 @@ Sticky is a separate leading phase. It never edits the normal fallback list.
   its own, so a failed priority target is tried again on the next request once
   its cooldown has elapsed.
 - Precedence: pin (strict: no sticky, no priority) > sticky > priority > normal.
+  A pin's success is never remembered as the session's sticky target, and an
+  explicit model the pool serves is honoured first: only priority entries of
+  that model apply, so a priority entry of a different model cannot outrank it.
   Every success stores `provider + key + model` as the session's sticky target
   with `expiresAt = now + 15 min` (a timestamp checked at request time, no timer;
   `RouteSession.validTargetId`). Sticky is honoured only while valid, only for a

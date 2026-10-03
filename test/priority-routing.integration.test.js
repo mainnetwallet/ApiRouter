@@ -14,6 +14,9 @@ const ok = (text) => ({
 const fail = (status = 429) => ({ status, body: { error: { message: "nope" } } });
 const IMAGE = { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } };
 const textBody = { model: "A1", max_tokens: 8, messages: [{ role: "user", content: "hi" }] };
+// No explicit model: these tests exercise the priority phase itself. (An explicit configured model is
+// served first and only matching priority entries apply; see test/audit-fixes.integration.test.js.)
+const autoRouted = { max_tokens: 8, messages: textBody.messages };
 
 /** groq (2 keys, A1,A2) + openrouter (1 key, B1,B2); `decide(provider, model, key)` scripts each call. */
 async function rig(t, decide, extraEnv = {}) {
@@ -48,7 +51,7 @@ test("empty PRIORITY_MODELS: normal key-scoped fallback, no priority rows", asyn
 
 test("priority interleaves providers in env order and stops on first success", async (t) => {
   const { router, calls } = await rig(t, () => ok("prio"), { PRIORITY_MODELS: "openrouter/B2,groq/A1" });
-  const res = await router.request("/v1/chat/completions", postJson(textBody));
+  const res = await router.request("/v1/chat/completions", postJson(autoRouted));
   assert.equal(res.status, 200);
   assert.deepEqual(calls, ["openrouter/B2/o1"], "no further upstream call after the first priority success");
   assert.equal(res.headers.get("x-multi-ai-provider"), "openrouter");
@@ -60,7 +63,7 @@ test("priority failures fall through to normal fallback; repeats are logged as s
     (p, m) => (p === "openrouter" && m === "B2" ? fail() : p === "groq" && m === "A1" ? fail(503) : ok("late")),
     { PRIORITY_MODELS: "openrouter/B2,groq/A1" }
   );
-  const res = await router.request("/v1/chat/completions", postJson(textBody));
+  const res = await router.request("/v1/chat/completions", postJson(autoRouted));
   assert.equal(res.status, 200);
   assert.equal(new Set(calls).size, calls.length, "no target is called twice in one request");
   // Priority: B2 (its only key), then ALL keys of groq/A1 (g1, g2). Normal: groq k1 chain A1(skip) A2 -> serves.
