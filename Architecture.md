@@ -58,9 +58,13 @@ Sticky is a separate leading phase. It never edits the normal fallback list.
 
 - `PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3` (or `TEXT_PRIORITY_MODELS` /
   `VISION_PRIORITY_MODELS`, which override it for their pool). Empty = no
-  priority phase and no extra work. A priority entry is ONE attempt: that
-  provider+model on its first eligible key (key order). Its other keys are tried
-  later, at their normal place in the hierarchy.
+  priority phase and no extra work. A priority entry is one
+  provider/model GROUP: every eligible key of it is attempted in key order
+  (`G1/key1, G1/key2, G1/key3`) until one succeeds, and only when all of them
+  fail or cool down does the walk advance to the next configured entry
+  (`groq/Q1` keys, then `gemini/G2` keys). The same exact target is never
+  called twice in a request, so priority targets met again in the normal
+  fallback are skipped as already attempted.
 - Normal fallback is **not** flattened. For every key, the provider's models run
   in configured order before the next key starts, and each key restarts at its
   first model (`K1: G1,G2,G3,G4` then `K2: G1,G2,G3,G4`). A requested model that

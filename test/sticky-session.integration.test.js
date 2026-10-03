@@ -63,7 +63,7 @@ test("2: sticky failure -> priority (sticky itself not repeated) -> next priorit
   down.add("groq/A1");
   calls.length = 0;
   assert.equal((await send(router, sid("s-2"))).status, 200);
-  // sticky a1 fails; priority group groq/A1 then takes its NEXT key (a2, a different exact target); then B1.
+  // sticky a1 fails (not repeated); priority group groq/A1 continues with its other key a2; then B1.
   assert.deepEqual(calls, ["groq/A1/a1", "groq/A1/a2", "openrouter/B1/b1"]);
   const rows = phases(await lastRequest(router));
   assert.equal(rows[0], "sticky:groq/A1/0:503");
@@ -87,8 +87,8 @@ test("3b: after a later priority entry succeeds for one session, other sessions 
   const { router, calls } = await rig(t, (p, m) => (a1Rejects && p === "groq" && m === "A1" ? fail(400) : ok()), {
     PRIORITY_MODELS: "groq/A1,openrouter/B1,mistral/C1"
   });
-  await send(router, sid("promo-1"));                    // A1 rejects, B1 succeeds -> sticky for promo-1 only
-  assert.deepEqual(calls, ["groq/A1/a1", "openrouter/B1/b1"]);
+  await send(router, sid("promo-1"));                    // every A1 key rejects, B1 succeeds -> sticky for promo-1 only
+  assert.deepEqual(calls, ["groq/A1/a1", "groq/A1/a2", "openrouter/B1/b1"]);
   a1Rejects = false;
   calls.length = 0;
   await send(router, sid("promo-1"));
@@ -186,4 +186,14 @@ test("8: pools are isolated - a text sticky is never used for a vision request",
   // No vision target is configured, so the request never reaches the text pool's sticky target.
   assert.equal(res.status, 503);
   assert.deepEqual(calls, [], "the text sticky target is not called for a vision request");
+});
+
+test("model-centric priority over HTTP: every key of the entry, then stop; the winning key becomes sticky", async (t) => {
+  const { router, calls } = await rig(t, (p, m, k) => (p === "groq" && k === "a1" ? fail(503) : ok()), { PRIORITY_MODELS: "groq/A1,openrouter/B1" });
+  assert.equal((await send(router, sid("mc"))).status, 200);
+  assert.deepEqual(calls, ["groq/A1/a1", "groq/A1/a2"], "key a2 is tried before any other priority entry; openrouter/B1 is never called");
+  calls.length = 0;
+  assert.equal((await send(router, sid("mc"))).status, 200);
+  assert.deepEqual(calls, ["groq/A1/a2"], "next same-session request: exactly the remembered key");
+  assert.equal(phases(await lastRequest(router))[0], "sticky:groq/A1/1:200");
 });

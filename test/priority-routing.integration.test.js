@@ -63,13 +63,13 @@ test("priority failures fall through to normal fallback; repeats are logged as s
   const res = await router.request("/v1/chat/completions", postJson(textBody));
   assert.equal(res.status, 200);
   assert.equal(new Set(calls).size, calls.length, "no target is called twice in one request");
-  // Priority: one attempt each (first key). Normal: groq k1 chain A1(skip) A2 -> serves.
-  assert.deepEqual(calls, ["openrouter/B2/o1", "groq/A1/g1", "groq/A2/g1"]);
+  // Priority: B2 (its only key), then ALL keys of groq/A1 (g1, g2). Normal: groq k1 chain A1(skip) A2 -> serves.
+  assert.deepEqual(calls, ["openrouter/B2/o1", "groq/A1/g1", "groq/A1/g2", "groq/A2/g1"]);
 
   const entry = await lastRequest(router);
   const rows = entry.attempts.map((a) => `${a.phase}:${a.provider}/${a.model}/${a.keyIndex}:${a.skipped ? "skipped" : a.status}`);
   assert.deepEqual(rows, [
-    "priority:openrouter/B2/0:429", "priority:groq/A1/0:503",
+    "priority:openrouter/B2/0:429", "priority:groq/A1/0:503", "priority:groq/A1/1:503",
     "fallback:groq/A1/0:skipped", "fallback:groq/A2/0:200"
   ]);
   assert.equal(entry.attemptCount, calls.length, "skipped rows are not counted as upstream attempts");

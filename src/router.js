@@ -227,9 +227,9 @@ export async function withFallback(
  * request, a target (pool + provider + model + keyIndex, i.e. the health id)
  * is invoked at most once; a repeat is reported through `onSkip`, never called.
  * Targets cooling down in the shared health registry are skipped the same way.
- * A priority entry is one attempt: once one key of its `group` has been
- * attempted, its remaining priority steps are dropped silently (those keys are
- * tried later at their normal place in the plan). Priority is not remembered:
+ * A priority entry is one provider/model group: ALL of its eligible keys are
+ * attempted, in key order, before the walk advances to the next configured
+ * entry. Priority is not remembered:
  * a failure only affects this request and whatever cooldown the health
  * registry itself decides on. Every success is recorded on the session as its
  * sticky target (provider + key + model, via the health id). The sticky target
@@ -246,7 +246,6 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
 
   const attempted = new Set();
   const cooldownReported = new Set();
-  const attemptedGroups = new Set();
   const failures = [];
   // Unique targets only: a priority target also appears in the normal phase,
   // and a sibling must be marked failed once, not once per appearance.
@@ -260,9 +259,6 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
   for (const step of steps) {
     const target = step.target;
     const id = health.key(target);
-
-    // One attempt per priority entry: its other keys are not priority steps.
-    if (step.phase === "priority" && attemptedGroups.has(step.group)) continue;
 
     if (attempted.has(id)) {
       skip(step, "already_attempted");
@@ -280,7 +276,6 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
 
     eligible += 1;
     attempted.add(id);
-    if (step.phase === "priority") attemptedGroups.add(step.group);
     const startedAt = Date.now();
 
     try {

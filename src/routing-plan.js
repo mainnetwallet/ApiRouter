@@ -20,10 +20,10 @@ import { targetId } from "./health.js";
  * never edits that list; health only decides, while walking, whether a target
  * is eligible right now.
  *
- * A priority entry (provider/model) is ONE attempt: its first eligible key, in
- * key order. Its other keys are not part of the priority phase; they are tried
- * at their normal place in the hierarchy. Priority steps therefore carry a
- * `group`, and the walker takes only the first eligible step of each group.
+ * A priority entry (provider/model) is one GROUP: every key that serves it, in
+ * key order, is a priority step. The walker exhausts a group (each eligible
+ * key, until one succeeds) before it advances to the next configured entry.
+ * Priority steps keep their `group` so the entry boundary stays visible.
  *
  * Targets already attempted in the priority phase are NOT removed from the
  * fallback phase here; the walker skips them with an `already_attempted`
@@ -110,8 +110,9 @@ export function buildHierarchicalOrder(targets, requestedModel = "") {
 /**
  * Resolves priority entries to candidate targets: provider + model (+ the
  * request's pool, because `targets` only ever holds that pool). Each entry
- * yields its keys in key order as ONE group; the walker attempts the first
- * eligible key of a group only. Entries matching nothing are simply absent.
+ * yields its keys in key order as ONE group; the walker attempts every
+ * eligible key of a group before advancing to the next configured entry.
+ * Entries matching nothing are simply absent.
  */
 export function resolvePriorityTargets(targets, priority = []) {
   const all = Array.isArray(targets) ? targets : [];
@@ -172,21 +173,15 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
  * The order a request would actually attempt right now, given which targets
  * are eligible. Pure; the walker applies the same rules dynamically.
  *   - sticky leads when present and eligible
- *   - per priority group, only the first eligible key is a priority attempt
- *   - the group's other keys appear later, as normal fallback
+ *   - every eligible key of a priority group is a priority attempt, in key order
  *   - an ineligible target is left out; a target is listed once
  */
 export function effectiveOrder(steps, isEligible = () => true) {
   const order = [];
-  const usedGroups = new Set();
   const listed = new Set();
   for (const step of Array.isArray(steps) ? steps : []) {
     const id = targetId(step.target);
     if (listed.has(id) || !isEligible(step.target)) continue;
-    if (step.phase === PHASES.PRIORITY) {
-      if (usedGroups.has(step.group)) continue;
-      usedGroups.add(step.group);
-    }
     listed.add(id);
     order.push(step);
   }

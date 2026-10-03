@@ -76,13 +76,15 @@ test("single-key provider moves to the next provider without inventing a key", a
   assert.deepEqual(calls, ["fallback:gemini/G1/k1", "fallback:gemini/G2/k1", "fallback:groq/GR1/k1"]);
 });
 
-test("priority runs in exact env order, interleaving providers, one attempt per entry, stops on first success", async () => {
+test("priority runs in exact env order; each entry tries ALL its keys before the next entry; stops on first success", async () => {
   const priority = parsePriorityModels("gemini/G1,groq/GR2,gemini/G3");
   const first = await run({ priority });
   assert.deepEqual(first.calls, ["priority:gemini/G1/k1"], "stops immediately; no Groq or second Gemini call");
 
   const second = await run({ priority, fail: (t) => t.provider === "gemini" && t.model === "G1" });
-  assert.deepEqual(second.calls, ["priority:gemini/G1/k1", "priority:groq/GR2/k1"], "G1 on key 2 is NOT a priority attempt");
+  assert.deepEqual(second.calls, [
+    "priority:gemini/G1/k1", "priority:gemini/G1/k2", "priority:gemini/G1/k3", "priority:groq/GR2/k1"
+  ], "every G1 key is exhausted before groq/GR2 is touched");
   assert.equal(second.result.provider, "groq");
 });
 
@@ -90,16 +92,22 @@ test("all priority fail: normal fallback skips exactly the attempted targets (sp
   const priority = parsePriorityModels("gemini/G1,groq/GR2,gemini/G3");
   const { calls, skips } = await run({ priority, fail: () => true });
   assert.equal(new Set(calls.map((c) => c.split(":")[1])).size, calls.length, "no target is called twice");
-  assert.deepEqual(calls.slice(0, 3), ["priority:gemini/G1/k1", "priority:groq/GR2/k1", "priority:gemini/G3/k1"]);
+  assert.deepEqual(calls.slice(0, 9), [
+    "priority:gemini/G1/k1", "priority:gemini/G1/k2", "priority:gemini/G1/k3",
+    "priority:groq/GR2/k1", "priority:groq/GR2/k2", "priority:groq/GR2/k3",
+    "priority:gemini/G3/k1", "priority:gemini/G3/k2", "priority:gemini/G3/k3"
+  ]);
   const normal = calls.filter((c) => c.startsWith("fallback:"));
-  // Gemini key 1: G1 SKIP, G2, G3 SKIP, G4. Key 2 restarts at G1 and DOES try it.
-  assert.deepEqual(normal.slice(0, 5), [
-    "fallback:gemini/G2/k1", "fallback:gemini/G4/k1", "fallback:gemini/G1/k2", "fallback:gemini/G2/k2", "fallback:gemini/G3/k2"
+  // Every G1 and G3 key was already attempted, so only G2 and G4 remain per Gemini key.
+  assert.deepEqual(normal.slice(0, 6), [
+    "fallback:gemini/G2/k1", "fallback:gemini/G4/k1", "fallback:gemini/G2/k2", "fallback:gemini/G4/k2",
+    "fallback:gemini/G2/k3", "fallback:gemini/G4/k3"
   ]);
   assert.deepEqual(skips.filter((s) => s.startsWith("fallback:gemini")).slice(0, 2), [
     "fallback:gemini/G1/k1:already_attempted", "fallback:gemini/G3/k1:already_attempted"
   ]);
   assert.ok(skips.includes("fallback:groq/GR2/k1:already_attempted"));
+  assert.ok(skips.includes("fallback:groq/GR2/k3:already_attempted"));
   assert.equal(calls.length, 24, "every target exactly once");
 });
 
@@ -146,7 +154,9 @@ test("vision pool: only vision targets are planned, with the same algorithm", as
   const visionTargets = buildTargets({ gemini: provider(["v1", "v2"], ["GV1", "GV2"]) }, VISION_POOL);
   const { calls } = await run({ targets: visionTargets, priority: parsePriorityModels("gemini/GV2,gemini/G1"), fail: () => true });
   assert.ok(calls.every((c) => /GV[12]/.test(c)), "text model G1 can never be reached from the vision pool");
-  assert.deepEqual(calls.slice(0, 2), ["priority:gemini/GV2/k1", "fallback:gemini/GV1/k1"]);
+  assert.deepEqual(calls.slice(0, 4), [
+    "priority:gemini/GV2/k1", "priority:gemini/GV2/k2", "fallback:gemini/GV1/k1", "fallback:gemini/GV1/k2"
+  ]);
   assert.equal(new Set(calls).size, 4);
 });
 
@@ -201,15 +211,15 @@ test("routing preview shows the plan the proxy walks, with phases", async () => 
 
   const plain = describeRouting({ targets, config, health, protocol: "openai-chat", model: "" });
   assert.equal(plain.priorityTargets, 2);
-  assert.deepEqual(plain.fallbackOrder.slice(0, 4).map((c) => `${c.phase}:${c.provider}/${c.model}/${c.keyIndex}`), [
-    "priority:groq/GR2/0", "priority:gemini/G3/0", "fallback:gemini/G1/0", "fallback:gemini/G2/0"
+  assert.deepEqual(plain.fallbackOrder.slice(0, 5).map((c) => `${c.phase}:${c.provider}/${c.model}/${c.keyIndex}`), [
+    "priority:groq/GR2/0", "priority:groq/GR2/1", "priority:groq/GR2/2", "priority:gemini/G3/0", "priority:gemini/G3/1"
   ]);
   const live = await run({ priority: config.priority.text, fail: () => true });
   assert.deepEqual(plain.fallbackOrder.map((c) => `${c.phase}:${c.provider}/${c.model}/k${c.keyIndex + 1}`), live.calls);
 
   const withSticky = describeRouting({ targets, config, health, protocol: "openai-chat", model: "", stickyTargetId: stickyId });
   assert.deepEqual(withSticky.fallbackOrder.slice(0, 3).map((c) => `${c.phase}:${c.provider}/${c.model}/${c.keyIndex}`), [
-    "sticky:gemini/G4/2", "priority:groq/GR2/0", "priority:gemini/G3/0"
+    "sticky:gemini/G4/2", "priority:groq/GR2/0", "priority:groq/GR2/1"
   ]);
 });
 
@@ -226,7 +236,7 @@ test("TEXT_ and VISION_PRIORITY_MODELS are independent and keep their order", ()
   assert.deepEqual(readPriority(env, "vision").map((e) => `${e.provider}/${e.model}`), ["groq/v1", "gemini/v2"]);
 });
 
-test("priority uses the first ELIGIBLE key; the cooled key is skipped and logged", async () => {
+test("priority skips a cooled key (logged) and uses the next eligible key of the same entry", async () => {
   const priority = parsePriorityModels("gemini/G1");
   const health = new HealthRegistry({ cooldownMs: 900000 });
   const g1k1 = textTargets().find((t) => t.provider === "gemini" && t.model === "G1" && t.keyIndex === 0);
@@ -241,7 +251,9 @@ test("no normal-fallback target ever precedes a priority target", async () => {
   const firstFallback = calls.findIndex((c) => c.startsWith("fallback:"));
   assert.ok(calls.slice(0, firstFallback).every((c) => c.startsWith("priority:")));
   assert.ok(calls.slice(firstFallback).every((c) => c.startsWith("fallback:")));
-  assert.deepEqual(calls.slice(0, 2), ["priority:groq/GR4/k1", "priority:gemini/G2/k1"]);
+  assert.deepEqual(calls.slice(0, 4), [
+    "priority:groq/GR4/k1", "priority:groq/GR4/k2", "priority:groq/GR4/k3", "priority:gemini/G2/k1"
+  ]);
 });
 
 test("K x M: one target per key and model, key-major deterministic order", () => {
@@ -273,8 +285,7 @@ test("routeOrderByPool is the deterministic order and ignores health score", () 
   const last = targets.at(-1);
   for (let i = 0; i < 5; i += 1) health.markSuccess(last, {}, Date.now() + i);
   const order = routeOrderByPool(targets, { text: parsePriorityModels("groq/GR2") }, (t) => health.isAvailable(t));
-  assert.equal(label(order[0]), "groq/GR2/k1");
-  assert.equal(label(order[1]), "gemini/G1/k1");
+  assert.deepEqual(order.slice(0, 4).map(label), ["groq/GR2/k1", "groq/GR2/k2", "groq/GR2/k3", "gemini/G1/k1"]);
   assert.notEqual(label(order[0]), label(last));
 });
 
@@ -419,8 +430,12 @@ test("C: sticky fails -> priority 1 -> priority 2 -> normal fallback, with no re
   const session = new RouteSession();
   stick(session, pick("groq", "GR3"));
   const { calls, skips } = await request(session, { priority: PRIO, fail: () => true });
-  assert.deepEqual(calls.slice(0, 3), ["sticky:groq/GR3/k1", "priority:gemini/G1/k1", "priority:groq/GR2/k1"]);
-  assert.equal(phaseOf(calls[3]), "fallback");
+  assert.deepEqual(calls.slice(0, 7), [
+    "sticky:groq/GR3/k1",
+    "priority:gemini/G1/k1", "priority:gemini/G1/k2", "priority:gemini/G1/k3",
+    "priority:groq/GR2/k1", "priority:groq/GR2/k2", "priority:groq/GR2/k3"
+  ]);
+  assert.equal(phaseOf(calls[7]), "fallback");
   assert.equal(calls.length, 24, "every target exactly once");
   assert.equal(new Set(calls.map((c) => c.split(":")[1])).size, 24);
   assert.ok(skips.includes("fallback:groq/GR3/k1:already_attempted"), "failed sticky is not retried in the same request");
@@ -493,8 +508,11 @@ test("H: after sticky expiry priority is NOT skipped: P1 -> P2 -> normal", async
   const session = new RouteSession();
   stick(session, pick("groq", "GR3"), T0);
   const { calls } = await request(session, { now: T0 + 16 * MIN, priority: PRIO, fail: () => true });
-  assert.deepEqual(calls.slice(0, 2), ["priority:gemini/G1/k1", "priority:groq/GR2/k1"]);
-  assert.equal(phaseOf(calls[2]), "fallback");
+  assert.deepEqual(calls.slice(0, 6), [
+    "priority:gemini/G1/k1", "priority:gemini/G1/k2", "priority:gemini/G1/k3",
+    "priority:groq/GR2/k1", "priority:groq/GR2/k2", "priority:groq/GR2/k3"
+  ]);
+  assert.equal(phaseOf(calls[6]), "fallback");
   assert.ok(calls.every((c) => !c.startsWith("sticky:")));
 });
 
