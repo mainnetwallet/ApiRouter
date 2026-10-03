@@ -599,15 +599,19 @@ export default function Playground() {
                   id="pg-prompt"
                   className="textarea"
                   rows={3}
-                  placeholder="Ask something…  (Ctrl+Enter to send, paste or drop images)"
+                  placeholder="Ask something…  (Enter to send, Shift+Enter for a new line, paste or drop images)"
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
                   onPaste={onPaste}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                      event.preventDefault();
-                      void send();
-                    }
+                    if (event.key !== "Enter") return;
+                    // Enter sends; Shift+Enter keeps its newline. Ctrl/Cmd+Enter
+                    // still sends too. An Enter that confirms an IME candidate
+                    // (Bengali, Japanese, ...) is composition, not a send.
+                    if (event.nativeEvent?.isComposing || event.keyCode === 229) return;
+                    if (event.shiftKey && !(event.ctrlKey || event.metaKey)) return;
+                    event.preventDefault();
+                    if (!busy) void send();
                   }}
                 />
                 {hasImages ? (
