@@ -55,6 +55,17 @@
   --neutral-bg: rgba(125, 139, 158, 0.13);
   --neutral-border: rgba(125, 139, 158, 0.3);
 
+  /* Routing pools. Pool is an identity, not a status, so these are separate from
+     the status colours above. Cyan/blue reads as TEXT, purple/magenta as VISION,
+     and the two are never interchangeable. */
+  --pool-text: #3fc6e0;
+  --pool-text-bg: rgba(63, 198, 224, 0.12);
+  --pool-text-border: rgba(63, 198, 224, 0.38);
+
+  --pool-vision: #b06ce8;
+  --pool-vision-bg: rgba(176, 108, 232, 0.12);
+  --pool-vision-border: rgba(176, 108, 232, 0.4);
+
   /* Spacing, 4px base. */
   --sp-1: 4px;
   --sp-2: 8px;
@@ -139,6 +150,15 @@
   --neutral: #5b6878;
   --neutral-bg: rgba(91, 104, 120, 0.1);
   --neutral-border: rgba(91, 104, 120, 0.28);
+
+  /* Darker pool hues so the labels stay legible on white. */
+  --pool-text: #0f7f96;
+  --pool-text-bg: rgba(15, 127, 150, 0.09);
+  --pool-text-border: rgba(15, 127, 150, 0.32);
+
+  --pool-vision: #7a35b8;
+  --pool-vision-bg: rgba(122, 53, 184, 0.09);
+  --pool-vision-border: rgba(122, 53, 184, 0.32);
 
   --shadow-overlay: 0 8px 28px rgba(15, 23, 35, 0.16);
 }
