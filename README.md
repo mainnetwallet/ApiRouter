@@ -131,6 +131,25 @@ NVIDIA_VISION_BASE_URL=https://integrate.api.nvidia.com/v1
 - Keys and models are comma-separated; every key x model pair is a target, in the configured order.
 - Free endpoint availability and limits may change, and real access needs a valid NVIDIA API key.
 
+### Nous Portal
+
+```env
+NOUS_API_KEYS=
+NOUS_BASE_URL=https://inference-api.nousresearch.com/v1
+NOUS_MODELS=poolside/laguna-s-2.1:free,stepfun/step-3.7-flash:free,meituan/longcat-2.5-preview:free,inclusionai/ling-3.0-flash-fin:free,meituan/longcat-2.0:free,poolside/laguna-xs-2.1:free,inclusionai/ling-3.0-flash-sante:free,upstage/solar-pro4:free
+
+NOUS_VISION_API_KEYS=
+NOUS_VISION_BASE_URL=https://inference-api.nousresearch.com/v1
+NOUS_VISION_MODELS=stepfun/step-3.7-flash:free
+```
+
+- Provider ID: `nous`. Nous Portal is OpenAI-compatible at `https://inference-api.nousresearch.com/v1`.
+- The text pool is ordered for coding/agent fallback: Laguna S 2.1 → Step 3.7 Flash → LongCat 2.5 Preview → Ling 3.0 Flash Fin → LongCat 2.0 → Laguna XS 2.1 → Ling 3.0 Flash Sante → Solar Pro 4.
+- The vision pool is separate and currently uses **Step 3.7 Flash**, which supports native image input as well as coding/agent workflows.
+- Free routes use the `:free` model IDs. Nous says the Free plan provides free models only, with standard rate limits and $0 monthly credits; availability can change.
+- Several keys are comma-separated and become independent fallback targets.
+- Vision requests never fall back to the Nous text pool; if `NOUS_VISION_API_KEYS` is empty, image requests return `503 no_vision_route`.
+
 Retryable statuses:
 
 ```text
