@@ -63,6 +63,13 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
               <dt className="dl__term">Protocol</dt>
               <dd className="dl__desc">{protocolLabel(entry.protocol)}</dd>
 
+              <dt className="dl__term">Routing pool</dt>
+              <dd className="dl__desc">
+                <StatusBadge tone={entry.pool === "vision" ? "info" : "neutral"} dot={false}>
+                  {(entry.pool ?? "text").toUpperCase()}
+                </StatusBadge>
+              </dd>
+
               <dt className="dl__term">Requested model</dt>
               <dd className="dl__desc mono">{entry.requestedModel ?? <span className="dim">auto route</span>}</dd>
 
@@ -95,6 +102,7 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
               <ErrorState
                 error={new ApiError({
                   status: entry.httpStatus,
+                  type: entry.errorType,
                   message: entry.errorMessage
                 })}
                 title={failureLabel(classifyFailure(entry))}

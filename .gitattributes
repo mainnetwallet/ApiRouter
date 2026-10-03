@@ -1,0 +1,17 @@
+# Normalize line endings to LF in the working tree.
+#
+# The repository ships tests that read `.env.example` as text and assert on
+# exact lines (`test/nvidia-provider.test.js`, `test/pollinations-provider.test.js`,
+# ...). A Windows checkout with `core.autocrlf=true` rewrites those lines to
+# CRLF, which makes the assertions fail for a reason that has nothing to do with
+# the code. Declaring the policy here keeps every checkout identical.
+* text=auto eol=lf
+
+# Keep binary assets untouched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

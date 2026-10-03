@@ -257,14 +257,19 @@ test("the router probes GET {base}/models with the target's key", async (t) => {
   assert.equal(seen[0].headers.authorization, "Bearer pk1");
 });
 
-test("a text-only model id is never sent for an image request", async (t) => {
+test("an image request naming a text-only model is rejected, not widened", async (t) => {
   const { text, vision, router } = await rig(t);
-  // "deepseek" exists only in the text pool; the image must still go to a vision target.
+  // "deepseek" exists only in the text pool: the client asked for a model that
+  // cannot see the image, so the request is refused rather than silently
+  // answered by a different model.
   const res = await router.request("/v1/chat/completions", postJson(imageChat("deepseek")));
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.error.type, "model_not_vision_capable");
+  assert.equal(body.error.model, "deepseek");
+  assert.equal(body.error.required_capability, "vision");
   assert.equal(text.apiRequests.length, 0);
-  assert.ok(vision.apiRequests.length >= 1);
-  assert.ok(vision.apiRequests.every((r) => VISION.includes(r.body.model)));
+  assert.equal(vision.apiRequests.length, 0);
 });
 
 test("pinning pollinations and a vision key serves an image from exactly that vision target", async (t) => {

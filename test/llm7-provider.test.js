@@ -267,10 +267,25 @@ test("a multi-turn conversation containing an image stays in the vision pool wit
     { role: "assistant", content: "a cat" },
     { role: "user", content: "and now?" }
   ];
-  const res = await router.request("/v1/chat/completions", postJson({ model: "GLM-5.3-Flash", messages }));
+  const res = await router.request("/v1/chat/completions", postJson({ model: "kimi-k3", messages }));
   assert.equal(res.status, 200);
   assert.equal(text.apiRequests.length, 0);
   assert.deepEqual(vision.apiRequests[0].body.messages, messages);
+});
+
+test("an image request naming a text-only model is rejected with a capability error", async (t) => {
+  const { text, vision, router } = await rig(t);
+  // The client named a model that cannot see the image. Widening would answer
+  // with a different model than it asked for, so the request is refused.
+  const res = await router.request("/v1/chat/completions", postJson(imageChat(TEXT_ONLY)));
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.error.type, "model_not_vision_capable");
+  assert.equal(body.error.model, TEXT_ONLY);
+  assert.equal(body.error.required_capability, "vision");
+  // Nothing was dialled in either pool.
+  assert.equal(text.apiRequests.length, 0);
+  assert.equal(vision.apiRequests.length, 0);
 });
 
 test("multi-turn text history reaches LLM7 intact", async (t) => {

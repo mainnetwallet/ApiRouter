@@ -18,11 +18,35 @@ import { formatLatency, formatPercent, formatRelativeTime, protocolLabel, provid
 /**
  * Providers.
  *
- * The drawer answers "is this provider set up correctly?" using only values
- * the gateway is willing to expose: base URL, model list, protocol support,
- * and a *count* of configured keys. There is no code path that reads key
- * material into the browser, so nothing here can leak one.
+ * Text and vision are two independent routing pools, so they are presented as
+ * two tables rather than one merged list: a provider healthy for text and
+ * failing for vision must be able to say exactly that, and the models, keys and
+ * base URLs behind each pool are different configuration.
+ *
+ * The drawer answers "is this provider set up correctly?" using only values the
+ * gateway is willing to expose: base URL, model lists, protocol support and a
+ * *count* of configured keys. There is no code path that reads key material
+ * into the browser, so nothing here can leak one.
  */
+
+const POOL_LABEL = Object.freeze({ text: "Text", vision: "Vision" });
+
+/** ✓/✗ badges for the two capabilities, derived from configuration by the backend. */
+function CapabilityBadges({ capabilities }) {
+  const text = capabilities?.text === true;
+  const vision = capabilities?.vision === true;
+  return (
+    <div className="row row--wrap" style={{ gap: "var(--sp-1)" }}>
+      <StatusBadge tone={text ? "ok" : "neutral"} dot={false}>
+        <span aria-hidden="true">{text ? "✓" : "✗"}</span> Text
+      </StatusBadge>
+      <StatusBadge tone={vision ? "info" : "neutral"} dot={false}>
+        <span aria-hidden="true">{vision ? "✓" : "✗"}</span> Vision
+      </StatusBadge>
+    </div>
+  );
+}
+
 export default function Providers() {
   const { generation } = useConnection();
   const {
@@ -36,18 +60,36 @@ export default function Providers() {
     intervalMs: 10_000,
     deps: [generation]
   });
-  const providers = providerData?.providers ?? [];
-  const targets = useMemo(
-    () => providers.flatMap((provider) => provider.targets ?? []),
-    [providers]
-  );
-  const [selectedId, setSelectedId] = useState(null);
+
+  const textProviders = providerData?.providers ?? [];
+  const visionProviders = providerData?.visionProviders ?? [];
+
+  // One entry per pool, each rendered as its own table under its own heading.
+  const groups = useMemo(() => ([
+    {
+      pool: "text",
+      title: "Text providers",
+      description: "Serve ordinary text requests. Separate keys, base URLs and models from the vision pool.",
+      rows: textProviders
+    },
+    {
+      pool: "vision",
+      title: "Vision providers",
+      description: "Serve requests carrying an image. An image request never falls back into the text pool.",
+      rows: visionProviders
+    }
+  ]), [textProviders, visionProviders]);
+
+  // { id, pool }: the same provider can have a row in both tables, and the two
+  // rows describe different configuration.
+  const [selection, setSelection] = useState(null);
   const [sort, setSort] = useState({ key: "provider", direction: "asc" });
 
-  const selected = useMemo(
-    () => (providers ?? []).find((provider) => provider.id === selectedId) ?? null,
-    [providers, selectedId]
-  );
+  const selected = useMemo(() => {
+    if (!selection) return null;
+    const rows = selection.pool === "vision" ? visionProviders : textProviders;
+    return rows.find((provider) => provider.id === selection.id) ?? null;
+  }, [selection, textProviders, visionProviders]);
 
   const columns = useMemo(() => [
     {
@@ -61,6 +103,13 @@ export default function Providers() {
           <div className="tiny dim mono">{row.envPrefix}_*</div>
         </div>
       )
+    },
+    {
+      key: "capabilities",
+      header: "Capabilities",
+      sortable: true,
+      get: (row) => `${row.capabilities?.text ? "T" : ""}${row.capabilities?.vision ? "V" : ""}`,
+      render: (row) => <CapabilityBadges capabilities={row.capabilities} />
     },
     {
       key: "status",
@@ -134,7 +183,7 @@ export default function Providers() {
     }
   ], []);
 
-  if (loading && !providers) {
+  if (loading && !providerData) {
     return (
       <div className="page">
         <PageHeader title="Providers" description="Configured providers, credentials and per-provider health" />
@@ -155,45 +204,73 @@ export default function Providers() {
 
       {error ? <ErrorState error={error} onRetry={reload} compact /> : null}
 
-      <section className="section">
-        <HealthDistribution counts={{
-          healthy: (providers ?? []).reduce((sum, p) => sum + p.health.healthy, 0),
-          cooldown: (providers ?? []).reduce((sum, p) => sum + p.health.cooldown, 0),
-          failed: (providers ?? []).reduce((sum, p) => sum + p.health.failed, 0),
-          unknown: (providers ?? []).reduce((sum, p) => sum + p.health.unknown, 0)
-        }} />
-      </section>
+      {groups.map((group) => (
+        <section className="section" key={group.pool}>
+          <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>
+            {group.title}
+            <span className="tiny dim" style={{ marginLeft: "var(--sp-2)", fontWeight: 400 }}>
+              {group.description}
+            </span>
+          </div>
 
-      <div className="panel">
-        <DataTable
-          columns={columns}
-          rows={providers ?? []}
-          sort={sort}
-          onSortChange={setSort}
-          rowKey={(row) => row.id}
-          onRowClick={(row) => setSelectedId(row.id)}
-          caption="All known providers and their routing targets"
-          emptyState={<EmptyState title="No providers" icon="server" />}
-        />
-      </div>
+          <div className="panel" style={{ marginBottom: "var(--sp-3)" }}>
+            <div className="panel__body">
+              <HealthDistribution counts={{
+                healthy: group.rows.reduce((sum, p) => sum + p.health.healthy, 0),
+                cooldown: group.rows.reduce((sum, p) => sum + p.health.cooldown, 0),
+                failed: group.rows.reduce((sum, p) => sum + p.health.failed, 0),
+                unknown: group.rows.reduce((sum, p) => sum + p.health.unknown, 0)
+              }} />
+            </div>
+          </div>
+
+          <div className="panel">
+            <DataTable
+              columns={columns}
+              rows={group.rows}
+              sort={sort}
+              onSortChange={setSort}
+              rowKey={(row) => `${group.pool}:${row.id}`}
+              onRowClick={(row) => setSelection({ id: row.id, pool: group.pool })}
+              caption={`${group.title} and their ${group.pool} routing targets`}
+              emptyState={(
+                <EmptyState title={`No ${group.title.toLowerCase()}`} icon="server">
+                  {group.pool === "vision"
+                    ? "No vision pool is configured. Image requests will fail with 503 until one is."
+                    : "No text provider is configured."}
+                </EmptyState>
+              )}
+            />
+          </div>
+        </section>
+      ))}
 
       <ProviderDrawer
         provider={selected}
-        targets={(targets ?? []).filter((target) => target.provider === selected?.id)}
-        onClose={() => setSelectedId(null)}
+        onClose={() => setSelection(null)}
       />
     </div>
   );
 }
 
-function ProviderDrawer({ provider, targets, onClose }) {
+function ProviderDrawer({ provider, onClose }) {
+  // Model lists are separated by pool. An older gateway that predates the
+  // capability metadata still gets its single list shown for its own pool.
+  const textModels = Array.isArray(provider?.textModels)
+    ? provider.textModels
+    : provider?.pool === "text" ? provider?.models ?? [] : [];
+  const visionModels = Array.isArray(provider?.visionModels)
+    ? provider.visionModels
+    : provider?.pool === "vision" ? provider?.models ?? [] : [];
+  const targets = provider?.targets ?? [];
+
   return (
     <Drawer
       open={Boolean(provider)}
       onClose={onClose}
       wide
       title={provider ? providerLabel(provider.id) : ""}
-      subtitle={provider ? `${provider.envPrefix}_* environment variables` : null}
+      subtitle={provider ? `${POOL_LABEL[provider.pool] ?? "Text"} pool · ${provider.envPrefix}_* environment variables` : null}
     >
       {provider ? (
         <div className="stack" style={{ gap: "var(--sp-4)" }}>
@@ -201,6 +278,9 @@ function ProviderDrawer({ provider, targets, onClose }) {
             {provider.configured
               ? <StatusBadge tone="ok">configured</StatusBadge>
               : <StatusBadge tone="neutral">not configured</StatusBadge>}
+            <StatusBadge tone={provider.pool === "vision" ? "info" : "neutral"} dot={false}>
+              {POOL_LABEL[provider.pool] ?? "Text"} pool
+            </StatusBadge>
             <StatusBadge tone="info" dot={false}>{provider.targetCount} targets</StatusBadge>
             {provider.protocols.map((protocol) => (
               <StatusBadge key={protocol} tone="neutral" dot={false}>{protocolLabel(protocol)}</StatusBadge>
@@ -210,11 +290,37 @@ function ProviderDrawer({ provider, targets, onClose }) {
           {!provider.configured ? (
             <div className="notice notice--warn">
               <div>
-                This provider is incomplete and is excluded from routing. Missing:
+                This provider is incomplete and is excluded from the {POOL_LABEL[provider.pool] ?? "text"} pool. Missing:
                 {" "}<strong>{provider.missing.join(", ")}</strong>.
               </div>
             </div>
           ) : null}
+
+          <section>
+            <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>Capabilities</div>
+            <div className="row row--wrap" style={{ gap: "var(--sp-3)" }}>
+              <CapabilityBadges capabilities={provider.capabilities} />
+            </div>
+            <dl className="dl" style={{ marginTop: "var(--sp-3)" }}>
+              <dt className="dl__term">Text models</dt>
+              <dd className="dl__desc">
+                {textModels.length > 0
+                  ? <span className="mono tiny">{textModels.join(", ")}</span>
+                  : <span className="dim">none configured</span>}
+              </dd>
+
+              <dt className="dl__term">Vision models</dt>
+              <dd className="dl__desc">
+                {visionModels.length > 0
+                  ? <span className="mono tiny">{visionModels.join(", ")}</span>
+                  : <span className="dim">none configured</span>}
+              </dd>
+            </dl>
+            <p className="tiny dim" style={{ marginTop: "var(--sp-2)" }}>
+              Capabilities are derived from what is configured for each pool, never assumed from
+              the provider's name.
+            </p>
+          </section>
 
           <section>
             <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>Configuration</div>
@@ -241,13 +347,6 @@ function ProviderDrawer({ provider, targets, onClose }) {
                   </dd>
                 </>
               ) : null}
-
-              <dt className="dl__term">Models</dt>
-              <dd className="dl__desc">
-                {provider.models.length > 0
-                  ? <span className="mono tiny">{provider.models.join(", ")}</span>
-                  : <span className="dim">none configured</span>}
-              </dd>
             </dl>
           </section>
 
@@ -279,14 +378,14 @@ function ProviderDrawer({ provider, targets, onClose }) {
 
           <section>
             <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>
-              Targets ({targets.length})
+              {POOL_LABEL[provider.pool] ?? "Text"} targets ({targets.length})
             </div>
             {targets.length === 0 ? (
-              <span className="dim small">No targets — this provider is not routable.</span>
+              <span className="dim small">No targets — this provider is not routable in this pool.</span>
             ) : (
               <div className="table-wrap">
                 <table className="table table--compact">
-                  <caption className="sr-only">Per-target health for {provider.id}</caption>
+                  <caption className="sr-only">Per-target health for {provider.id} ({provider.pool} pool)</caption>
                   <thead>
                     <tr>
                       <th scope="col">Model</th>

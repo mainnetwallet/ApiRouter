@@ -1,5 +1,6 @@
 import { isProviderConfigured } from "../config.js";
 import { providerProtocols } from "../adapters.js";
+import { describeProviderCapabilities } from "../capabilities.js";
 
 /**
  * A safe, read-only projection of the router's configuration.
@@ -28,12 +29,21 @@ function configuredHeaderNames(provider) {
     .sort();
 }
 
-function describeProvider(id, provider, targets, pool = "text") {
+function describeProvider(id, provider, targets, pool = "text", capabilities = null) {
   const providerTargets = targets.filter((target) => target.provider === id && (target.pool ?? "text") === pool);
   const configured = isProviderConfigured(provider);
+  const caps = capabilities ?? {
+    capabilities: { text: pool === "text" && configured, vision: pool === "vision" && configured },
+    textModels: pool === "text" ? [...provider.models] : [],
+    visionModels: pool === "vision" ? [...provider.models] : []
+  };
 
   return {
     id,
+    // Which pool this row describes. The same provider is described once per
+    // pool it participates in, and the two rows are never merged: a provider
+    // healthy for text and failing for vision has to be able to say so.
+    pool,
     configured,
     // Why a provider is not routable, so the UI can say more than "off".
     missing: configured
@@ -45,6 +55,12 @@ function describeProvider(id, provider, targets, pool = "text") {
             ? (id === "cloudflare" ? "account ids (CLOUDFLARE_ACCOUNT_IDS)" : "base url")
             : null
         ].filter(Boolean),
+
+    // Capability metadata: what this provider can route, per pool, and with
+    // which models. Derived from configuration, never assumed.
+    capabilities: { ...caps.capabilities },
+    textModels: [...caps.textModels],
+    visionModels: [...caps.visionModels],
 
     baseUrl: provider.baseUrl || null,
     models: [...provider.models],
@@ -66,8 +82,10 @@ function describeProvider(id, provider, targets, pool = "text") {
 }
 
 export function describeConfig(config, targets = []) {
+  const capabilities = describeProviderCapabilities(config);
+
   const providers = Object.entries(config.providers).map(([id, provider]) =>
-    describeProvider(id, provider, targets)
+    describeProvider(id, provider, targets, "text", capabilities[id])
   );
 
   const configuredProviders = providers.filter((provider) => provider.configured);
@@ -84,18 +102,27 @@ export function describeConfig(config, targets = []) {
       retryableStatus: [...config.retryableStatus].sort((a, b) => a - b),
       strategy: "health-ranked with sticky session and automatic fallback",
       targetIdentity: "provider + model + keyIndex",
-      exactModelPreferred: true
+      exactModelPreferred: true,
+      // The two pools are routed independently; a request never crosses over.
+      pools: ["text", "vision"],
+      crossPoolFallback: "blocked"
     },
     providers,
     // Image requests use this separate pool (own keys, base URLs and models).
     visionProviders: Object.entries(config.visionProviders ?? {}).map(([id, provider]) =>
-      describeProvider(id, provider, targets, "vision")),
+      describeProvider(id, provider, targets, "vision", capabilities[id])),
+    // One entry per known provider, with both capabilities on one object.
+    capabilities: Object.values(capabilities),
     summary: {
       knownProviders: providers.length,
       configuredProviders: configuredProviders.length,
       unconfiguredProviders: providers.length - configuredProviders.length,
       configuredTargets: targets.filter((target) => (target.pool ?? "text") === "text").length,
-      configuredVisionTargets: targets.filter((target) => target.pool === "vision").length
+      configuredVisionTargets: targets.filter((target) => target.pool === "vision").length,
+      textCapableProviders: Object.values(capabilities).filter((c) => c.capabilities.text).length,
+      visionCapableProviders: Object.values(capabilities).filter((c) => c.capabilities.vision).length,
+      dualCapableProviders: Object.values(capabilities)
+        .filter((c) => c.capabilities.text && c.capabilities.vision).length
     }
   };
 }

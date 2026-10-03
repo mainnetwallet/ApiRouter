@@ -25,6 +25,9 @@ function describeCandidate(target, health, { rank = null, available, status }) {
     provider: target.provider,
     model: target.model,
     keyIndex: target.keyIndex,
+    // Every candidate belongs to exactly one pool. Carried explicitly so a
+    // reader never has to infer it from the id prefix.
+    pool: target.pool ?? "text",
     protocols: [...(target.protocols ?? [])],
     rank,
     available,
@@ -38,10 +41,11 @@ function describeCandidate(target, health, { rank = null, available, status }) {
   };
 }
 
-export function describeRouting({ targets = [], config, health, protocol, model = "", stickyTargetId = null, now = Date.now() } = {}) {
+export function describeRouting({ targets = [], config, health, protocol, model = "", stickyTargetId = null, now = Date.now(), pool = "text" } = {}) {
   const selection = selectTargetsForProtocol(targets, protocol, model);
   const { compatible, exact, selected, modelMatched } = selection;
   const bridged = BRIDGED_PROTOCOLS.has(protocol);
+  const poolLabel = pool === "vision" ? "VISION" : "TEXT";
 
   // The same grouping and the same ranking the proxy applies, so the order
   // shown here is the order the request will actually be attempted in.
@@ -84,6 +88,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
       provider: target.provider,
       model: target.model,
       keyIndex: target.keyIndex,
+      pool: target.pool ?? "text",
       protocols: [...(target.protocols ?? [])],
       reason: `does not support protocol "${protocol}"`
     }));
@@ -95,7 +100,9 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     {
       key: "received",
       label: "Incoming request",
-      detail: `${protocol} request`,
+      // The pool is decided before anything else and never changes: an image
+      // request is served by the vision pool or not at all.
+      detail: `${protocol} request · ${poolLabel} pool`,
       state: "info"
     },
     {
@@ -172,6 +179,8 @@ export function describeRouting({ targets = [], config, health, protocol, model 
 
   return {
     protocol,
+    pool,
+    poolLabel,
     requestedModel: selection.requestedModel,
     modelMatched,
     targetIdentity: "provider + model + keyIndex",

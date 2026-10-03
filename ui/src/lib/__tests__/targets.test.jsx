@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  filterChoices, filterTargets, findTarget, isRoutable, normalizeHealthPayload,
+  POOLS, filterChoices, filterTargets, findTarget, isRoutable, normalizeHealthPayload,
   normalizeModelPayload, normalizeTarget, providerOptions, summarizeTargets
 } from "../targets.js";
 import { sortRows } from "../table.js";
@@ -442,5 +442,34 @@ describe("each page reads the shape its endpoint sends", () => {
 
     expect(choices.providers).toEqual(["groq", "zai"]);
     expect(choices.protocols).toEqual(["anthropic", "openai-chat"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Routing pools
+// ---------------------------------------------------------------------------
+
+describe("pool separation in the view model", () => {
+  it("defaults a row with no pool to text and preserves an explicit vision pool", () => {
+    expect(normalizeTarget({ provider: "groq", model: "m" }).pool).toBe("text");
+    expect(normalizeTarget({ provider: "groq", model: "m", pool: "vision" }).pool).toBe("vision");
+    // An unknown pool value must not leak through to a badge.
+    expect(normalizeTarget({ provider: "groq", model: "m", pool: "sideways" }).pool).toBe("text");
+  });
+
+  it("filters by pool without disturbing the other filters", () => {
+    const rows = [
+      normalizeTarget({ provider: "groq", model: "t", pool: "text", protocols: ["openai-chat"] }),
+      normalizeTarget({ provider: "groq", model: "v", pool: "vision", protocols: ["openai-chat"] })
+    ];
+    expect(filterTargets(rows, { pool: "vision" }).map((row) => row.model)).toEqual(["v"]);
+    expect(filterTargets(rows, { pool: "text" }).map((row) => row.model)).toEqual(["t"]);
+    expect(filterTargets(rows)).toHaveLength(2);
+  });
+
+  it("offers both pools as choices even when a response omits them", () => {
+    // Filtering to an empty pool is legitimate, so the option stays selectable.
+    expect(filterChoices({ rows: [] }).pools).toEqual([...POOLS]);
+    expect(filterChoices({ filters: { pools: ["vision"] }, rows: [] }).pools).toEqual(["vision"]);
   });
 });

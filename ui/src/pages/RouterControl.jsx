@@ -12,6 +12,7 @@ import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useHealth } from "../context/HealthContext.jsx";
 import { getRoutingPreview } from "../api/router.js";
+import { POOLS } from "../lib/targets.js";
 import { formatLatency, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 
 /**
@@ -35,32 +36,42 @@ import { formatLatency, protocolLabel, providerLabel, EMPTY } from "../lib/forma
 export default function RouterControl() {
   const { targets: healthTargets } = useHealth();
 
-  const protocols = useMemo(() => {
-    const set = new Set();
-    for (const target of healthTargets) {
-      for (const protocol of target.protocols ?? []) set.add(protocol);
-    }
-    return [...set].sort();
-  }, [healthTargets]);
-
-  const models = useMemo(
-    () => [...new Set(healthTargets.map((target) => target.model))].sort(),
-    [healthTargets]
-  );
-
+  const [pool, setPool] = useState("text");
   const [protocol, setProtocol] = useState("");
   const [model, setModel] = useState("");
   const [session, setSession] = useState("");
 
-  // Default to the first available protocol once targets are known.
-  const activeProtocol = protocol || protocols[0] || "";
+  // Only this pool's targets are offered. The two pools have separate models,
+  // separate health and separate fallback chains, so a text model must never
+  // appear as a vision choice (or the other way round).
+  const poolTargets = useMemo(
+    () => healthTargets.filter((target) => (target.pool ?? "text") === pool),
+    [healthTargets, pool]
+  );
+
+  const protocols = useMemo(() => {
+    const set = new Set();
+    for (const target of poolTargets) {
+      for (const protocol of target.protocols ?? []) set.add(protocol);
+    }
+    return [...set].sort();
+  }, [poolTargets]);
+
+  const models = useMemo(
+    () => [...new Set(poolTargets.map((target) => target.model))].sort(),
+    [poolTargets]
+  );
+
+  // Fall back to the first protocol the selected pool actually serves, so a
+  // protocol chosen for one pool cannot carry over to the other as an error.
+  const activeProtocol = protocols.includes(protocol) ? protocol : (protocols[0] ?? "");
 
   const preview = useApi(
     ({ signal }) => getRoutingPreview(
-      { protocol: activeProtocol, model, session },
+      { protocol: activeProtocol, model, session, pool },
       { signal }
     ),
-    { deps: [activeProtocol, model, session], enabled: Boolean(activeProtocol) }
+    { deps: [activeProtocol, model, session, pool], enabled: Boolean(activeProtocol) }
   );
 
   const data = preview.data;
@@ -146,8 +157,8 @@ export default function RouterControl() {
       {!supportsProtocols ? (
         <div className="panel">
           <EmptyState title="No routable protocols" icon="route">
-            No provider is configured well enough to serve a request, so there is no routing
-            decision to show.
+            No provider is configured well enough to serve a request in the{" "}
+            <strong>{pool.toUpperCase()}</strong> pool, so there is no routing decision to show.
           </EmptyState>
         </div>
       ) : (
@@ -155,9 +166,28 @@ export default function RouterControl() {
           <div className="panel section">
             <div className="panel__header">
               <span className="panel__title">Simulate a request</span>
+              <div className="panel__actions">
+                <StatusBadge tone={pool === "vision" ? "info" : "neutral"} dot={false}>
+                  pool: {pool.toUpperCase()}
+                </StatusBadge>
+              </div>
             </div>
             <div className="panel__body">
               <div className="row row--wrap" style={{ alignItems: "flex-end", gap: "var(--sp-3)" }}>
+                <div className="field">
+                  <label className="field__label" htmlFor="router-pool">Routing pool</label>
+                  <select
+                    id="router-pool"
+                    className="select"
+                    value={pool}
+                    onChange={(event) => { setPool(event.target.value); setModel(""); }}
+                  >
+                    {POOLS.map((value) => (
+                      <option key={value} value={value}>{value.toUpperCase()}</option>
+                    ))}
+                  </select>
+                </div>
+
                 <div className="field">
                   <label className="field__label" htmlFor="router-protocol">Client protocol</label>
                   <select
@@ -249,6 +279,12 @@ export default function RouterControl() {
                     <div className="panel__body">
                       {data.selected ? (
                         <dl className="dl dl--tight">
+                          <dt className="dl__term">Pool</dt>
+                          <dd className="dl__desc">
+                            <StatusBadge tone={data.pool === "vision" ? "info" : "neutral"} dot={false}>
+                              {data.poolLabel ?? pool.toUpperCase()}
+                            </StatusBadge>
+                          </dd>
                           <dt className="dl__term">Provider</dt>
                           <dd className="dl__desc">{providerLabel(data.selected.provider)}</dd>
                           <dt className="dl__term">Model</dt>

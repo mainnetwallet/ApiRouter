@@ -151,6 +151,9 @@ export function modelCatalogue(healthEntries = [], logEntries = []) {
       provider: entry.provider,
       model: entry.model,
       keyIndex: entry.keyIndex,
+      // Which pool serves this row. A model configured for both pools appears
+      // once per pool, and the UI must be able to say which is which.
+      pool: entry.pool ?? "text",
       protocols: [...(entry.protocols ?? [])],
       status: entry.status,
       score: entry.score,
