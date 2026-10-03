@@ -8,8 +8,8 @@
  * reaches them, so text-only models are not tried (or logged as failures) for
  * images and vision keys are not spent on plain text.
  *
- * While no vision target is configured at all, nothing changes: images go
- * through the normal pool as before.
+ * While no vision target is configured, an image request fails with 503
+ * `no_vision_route`; it is never sent to the normal text pool.
  */
 
 const MESSAGE_FIELDS = ["messages", "input", "contents", "system", "systemInstruction", "system_instruction"];
@@ -52,13 +52,12 @@ export function requestHasImage(body) {
 
 /**
  * Picks the candidate pool for a request.
- *   { pool: "vision", targets }   image request, vision targets configured
- *   { pool: "text",   targets }   everything else (and images while no vision
- *                                 target is configured)
- * `targets` of the vision pool is never empty here: with no vision targets the
- * request stays on the text pool, so a caller only needs to guard the text pool.
+ *   { pool: "vision", targets }   any request that carries an image
+ *   { pool: "text",   targets }   every other request
+ * An image request NEVER gets text targets. When no vision target is configured,
+ * `targets` is empty and the caller answers 503 `no_vision_route`.
  */
 export function selectPool(body, { textTargets = [], visionTargets = [] } = {}) {
-  if (visionTargets.length > 0 && requestHasImage(body)) return { pool: "vision", targets: visionTargets };
+  if (requestHasImage(body)) return { pool: "vision", targets: visionTargets };
   return { pool: "text", targets: textTargets };
 }

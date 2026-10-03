@@ -73,11 +73,48 @@ test("vision targets use their own key and base URL", async (t) => {
   assert.match(JSON.stringify(v.apiRequests[0].headers), /vision-key/);
 });
 
-test("no vision pool configured: images keep using the normal pool", async (t) => {
+test("no vision pool configured: image request => 503 no_vision_route, text pool untouched", async (t) => {
   const text = await startMockUpstream(reply(200, "from-text"));
   const router = await startRouter({ GROQ_API_KEYS: "k1", GROQ_MODELS: "text-model", GROQ_BASE_URL: text.baseUrl });
   t.after(async () => { await router.close(); await text.close(); });
   const res = await router.request("/v1/messages", postJson(withImage));
+  assert.equal(res.status, 503);
+  assert.deepEqual(await res.json(), { error: { message: "No vision provider is configured", type: "no_vision_route" } });
+  assert.equal(text.apiRequests.length, 0, "an image request must never reach the text pool");
+});
+
+test("no_vision_route applies in every client protocol and to any text provider", async (t) => {
+  const text = await startMockUpstream(reply(200, "from-text"));
+  const router = await startRouter({ VERCEL_API_KEYS: "k1", VERCEL_MODELS: "m", VERCEL_BASE_URL: text.baseUrl });
+  t.after(async () => { await router.close(); await text.close(); });
+  const chatImage = { model: "m", messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }] };
+  const responsesImage = { model: "m", input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }] }] };
+  const geminiImage = { contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/png", data: "AAAA" } }] }] };
+  for (const [path, body] of [["/v1/chat/completions", chatImage], ["/v1/responses", responsesImage], ["/v1beta/models/m:generateContent", geminiImage]]) {
+    const res = await router.request(path, postJson(body));
+    assert.equal(res.status, 503, path);
+    assert.equal((await res.json()).error.type, "no_vision_route", path);
+  }
+  assert.equal(text.apiRequests.length, 0);
+});
+
+test("no vision pool: a text request still uses the text pool", async (t) => {
+  const text = await startMockUpstream(reply(200, "from-text"));
+  const router = await startRouter({ GROQ_API_KEYS: "k1", GROQ_MODELS: "text-model", GROQ_BASE_URL: text.baseUrl });
+  t.after(async () => { await router.close(); await text.close(); });
+  const res = await router.request("/v1/messages", postJson(textOnly));
   assert.equal(res.status, 200);
   assert.equal(text.apiRequests.length, 1);
+});
+
+test("vision pool configured: image selects the vision target, text selects the text target", async (t) => {
+  const { text, v1, router } = await setup(t, { vision1Status: 200 });
+  const img = await router.request("/v1/messages", postJson({ ...withImage, model: "vision-1" }));
+  assert.equal(img.status, 200);
+  assert.equal(v1.apiRequests.length, 1);
+  assert.equal(text.apiRequests.length, 0);
+  const txt = await router.request("/v1/messages", postJson({ ...textOnly, model: "text-model" }));
+  assert.equal(txt.status, 200);
+  assert.equal(text.apiRequests.length, 1);
+  assert.equal(v1.apiRequests.length, 1, "text request must not reach the vision pool");
 });

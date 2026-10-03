@@ -325,6 +325,15 @@ async function proxy(req, res, protocol, pathname) {
   // An image request is served only by the vision pool (own keys / base URLs /
   // models); every other request only by the text pool.
   const { pool, targets: poolTargets } = selectPool(body, { textTargets, visionTargets });
+  if (pool === VISION_POOL && poolTargets.length === 0) {
+    const message = "No vision provider is configured";
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,
+      outcome: "failed", errorType: "no_vision_route", errorMessage: message, attempts
+    });
+    return json(res, 503, { error: { message, type: "no_vision_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
   const pinned = pinTargets(poolTargets, pin, requestedModel);
   if (pinned.pinned && pinned.targets.length === 0) {
     const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;

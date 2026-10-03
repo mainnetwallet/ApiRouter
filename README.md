@@ -83,7 +83,9 @@ of a base URL. Nothing is shared with the normal `<PROVIDER>_API_KEYS` /
   targets, with the usual fallback between them.
 - A text request never reaches a vision target.
 - A vision provider is active once it has keys, models and a base URL.
-- While no vision provider is active at all, images use the normal pool as before.
+- While no vision provider is active, an image request fails with `503` and
+  `{"error":{"message":"No vision provider is configured","type":"no_vision_route"}}`.
+  It is never sent to the normal text pool, for any provider.
 - Requests pinned with the `x-multi-ai-pin-*` headers are matched inside the pool
   the request belongs to (vision pool for images, normal pool otherwise).
 

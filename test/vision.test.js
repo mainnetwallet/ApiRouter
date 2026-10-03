@@ -78,9 +78,19 @@ test("selectPool: images go only to the vision pool, text only to the text pool"
   assert.deepEqual(selectPool(TEXT_BODY, { textTargets, visionTargets }).targets, textTargets);
 });
 
-test("selectPool: with no vision target configured, images stay on the text pool (unchanged behaviour)", () => {
+test("selectPool: an image request never receives a text target", () => {
+  const textTargets = [{ provider: "groq", model: "t" }];
+  const visionTargets = [{ provider: "gemini", model: "v", pool: "vision" }];
+  for (const vt of [visionTargets, []]) {
+    const out = selectPool(IMAGE_BODY, { textTargets, visionTargets: vt });
+    assert.equal(out.targets.some((x) => textTargets.includes(x)), false);
+  }
+  assert.deepEqual(selectPool(TEXT_BODY, { textTargets, visionTargets: [] }).targets, textTargets);
+});
+
+test("selectPool: with no vision target configured, images get no targets (never the text pool)", () => {
   const textTargets = [{ provider: "groq", model: "t" }];
   const out = selectPool(IMAGE_BODY, { textTargets, visionTargets: [] });
-  assert.equal(out.pool, "text");
-  assert.deepEqual(out.targets, textTargets);
+  assert.equal(out.pool, "vision");
+  assert.deepEqual(out.targets, []);
 });

@@ -182,7 +182,7 @@ test("text mixed with an inline image becomes valid chat content parts", async (
   const { upstream, router } = await withRig(
     t,
     () => chatOk(),
-    (u) => ({ GROQ_API_KEYS: "k", GROQ_MODELS: "m", GROQ_BASE_URL: u.baseUrl })
+    (u) => ({ GROQ_VISION_API_KEYS: "k", GROQ_VISION_MODELS: "m", GROQ_VISION_BASE_URL: u.baseUrl })
   );
 
   await generate(router, "m", {
