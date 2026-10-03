@@ -76,6 +76,7 @@ describe("format", () => {
     expect(providerLabel("vercel")).toBe("Vercel AI Gateway");
     expect(providerLabel("opencode")).toBe("OpenCode Zen");
     expect(providerLabel("nvidia")).toBe("NVIDIA Build");
+    expect(providerLabel("nous")).toBe("Nous Portal");
     expect(providerLabel(null)).toBe(EMPTY);
   });
 
