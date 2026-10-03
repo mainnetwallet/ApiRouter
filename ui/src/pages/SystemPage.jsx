@@ -5,6 +5,7 @@ import { MetricSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
 import { CopyableId } from "../components/ui/CopyableId.jsx";
+import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { useSystemStatus } from "../context/SystemStatusContext.jsx";
 import { formatDateTime, formatDuration, formatNumber } from "../lib/format.js";
 
@@ -16,6 +17,8 @@ import { formatDateTime, formatDuration, formatNumber } from "../lib/format.js";
  * the underlying values only change on the server's own schedule, so polling
  * them faster would be pure waste.
  */
+const POOLS = ["text", "vision"];
+
 export default function SystemPage() {
   const { system, connection, loading, error, reload, refreshing, lastUpdatedAt } = useSystemStatus();
   const [, setTick] = useState(0);
@@ -31,7 +34,7 @@ export default function SystemPage() {
     return (
       <div className="page">
         <PageHeader title="System" description="Runtime, health monitor scheduling and process details" />
-        <MetricSkeleton count={6} />
+        <MetricSkeleton count={4} />
       </div>
     );
   }
@@ -78,13 +81,6 @@ export default function SystemPage() {
           />
           <MetricCard label="Uptime" value={formatDuration(uptimeMs)} icon="clock" small />
           <MetricCard
-            label="Providers loaded"
-            value={formatNumber(system.providers.configuredCount)}
-            hint={`${system.providers.loadedCount} touched in config`}
-            icon="box"
-          />
-          <MetricCard label="Configured targets" value={formatNumber(system.configuredTargets)} icon="layers" />
-          <MetricCard
             label="Health monitor"
             value={monitor?.enabled ? (monitor.running ? "running" : "idle") : "stopped"}
             hint={monitor ? `every ${formatDuration(monitor.intervalMs)}` : null}
@@ -100,6 +96,50 @@ export default function SystemPage() {
             small
           />
         </div>
+      </section>
+
+      <section className="section">
+        <div className="split split--2">
+          {POOLS.map((pool) => {
+            const data = system.pools?.[pool];
+            if (!data) return null;
+            return (
+              <div className="panel" key={pool}>
+                <div className="panel__header">
+                  <span className="panel__title"><PoolBadge pool={pool} /> pool</span>
+                </div>
+                <div className="panel__body">
+                  <div className="metrics">
+                    <MetricCard
+                      label="Providers loaded"
+                      value={formatNumber(data.providers.configuredCount)}
+                      hint={`${data.providers.loadedCount} touched in config`}
+                      icon="box"
+                    />
+                    <MetricCard label="Configured targets" value={formatNumber(data.configuredTargets)} icon="layers" />
+                  </div>
+                  {data.providers.loaded.length === 0 ? (
+                    <p className="dim small" style={{ marginTop: "var(--sp-3)" }}>
+                      No {pool} provider has any configuration set. Define an API key, model list and
+                      base URL to make one routable.
+                    </p>
+                  ) : (
+                    <div className="row row--wrap" style={{ gap: "var(--sp-2)", marginTop: "var(--sp-3)" }}>
+                      {data.providers.loaded.map((provider) => (
+                        <StatusBadge key={provider} tone="info" dot={false}>{provider}</StatusBadge>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <p className="tiny dim" style={{ marginTop: "var(--sp-2)" }}>
+          &ldquo;Loaded&rdquo; means the process read some configuration for it; a provider is
+          only <em>routable</em> when it also has models and a base URL. The two pools are
+          configured and routed independently.
+        </p>
       </section>
 
       <div className="split split--2 section">
@@ -195,34 +235,6 @@ export default function SystemPage() {
                   </dd>
                 </dl>
               )}
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel__header"><span className="panel__title">Providers loaded</span></div>
-            <div className="panel__body">
-              {system.providers.loaded.length === 0 ? (
-                <span className="dim small">
-                  No provider has any configuration set. Define an API key, model list and base URL
-                  to make one routable.
-                </span>
-              ) : (
-                <div className="row row--wrap" style={{ gap: "var(--sp-2)" }}>
-                  {system.providers.loaded.map((provider) => (
-                    <StatusBadge
-                      key={provider}
-                      tone={system.providers.loaded.includes(provider) ? "info" : "neutral"}
-                      dot={false}
-                    >
-                      {provider}
-                    </StatusBadge>
-                  ))}
-                </div>
-              )}
-              <p className="tiny dim" style={{ marginTop: "var(--sp-2)" }}>
-                &ldquo;Loaded&rdquo; means the process read some configuration for it; a provider is
-                only <em>routable</em> when it also has models and a base URL.
-              </p>
             </div>
           </div>
 

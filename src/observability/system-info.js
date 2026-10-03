@@ -17,6 +17,31 @@ export function processStartedAt(now = Date.now()) {
   return new Date(now - Math.round(process.uptime() * 1000)).toISOString();
 }
 
+const isRoutable = (provider) =>
+  provider.apiKeys.length > 0 && provider.models.length > 0 && Boolean(provider.baseUrl);
+const isTouched = (provider) =>
+  provider.apiKeys.length > 0 || provider.models.length > 0 || Boolean(provider.baseUrl);
+
+/**
+ * One pool's slice of the runtime report. Text and vision have their own keys,
+ * base URLs and models, so each is counted on its own and never merged.
+ */
+function describePool(providers = {}, targets = [], pool) {
+  const entries = Object.entries(providers);
+  const loaded = entries.filter(([, provider]) => isTouched(provider)).map(([id]) => id);
+
+  return {
+    pool,
+    providers: {
+      loaded,
+      loadedCount: loaded.length,
+      configuredCount: entries.filter(([, provider]) => isRoutable(provider)).length,
+      knownCount: entries.length
+    },
+    configuredTargets: targets.filter((target) => (target.pool ?? "text") === pool).length
+  };
+}
+
 export function describeSystem({ config, targets = [], monitor = null, startedAt = null, now = Date.now() } = {}) {
   const configuredProviders = Object.values(config?.providers ?? {}).filter(
     (provider) => provider.apiKeys.length > 0 && provider.models.length > 0 && provider.baseUrl
@@ -52,6 +77,13 @@ export function describeSystem({ config, targets = [], monitor = null, startedAt
     },
 
     configuredTargets: targets.length,
+
+    // The same figures split by routing pool. The totals above are kept for
+    // existing consumers; the System page renders these instead.
+    pools: {
+      text: describePool(config?.providers, targets, "text"),
+      vision: describePool(config?.visionProviders, targets, "vision")
+    },
 
     // Health-monitor status is supplied by the tracker in `monitor-state.js`,
     // which observes the real cycles rather than guessing at them.

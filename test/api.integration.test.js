@@ -139,6 +139,14 @@ test("GET /api/system reports runtime and monitor status", async (t) => {
   assert.equal(body.runtime, "node");
   assert.equal(body.nodeVersion, process.version);
   assert.equal(body.configuredTargets, 4);
+  assert.equal(
+    body.pools.text.configuredTargets + body.pools.vision.configuredTargets,
+    body.configuredTargets,
+    "per-pool target counts should add up to the total"
+  );
+  assert.equal(body.pools.text.pool, "text");
+  assert.equal(body.pools.vision.pool, "vision");
+  assert.ok(Array.isArray(body.pools.vision.providers.loaded));
   assert.ok(body.uptimeMs >= 0);
   assert.ok(body.pid > 0);
   assert.equal(body.telemetry.persistence, "in-memory");
