@@ -118,3 +118,31 @@ test("vision pool configured: image selects the vision target, text selects the 
   assert.equal(text.apiRequests.length, 1);
   assert.equal(v1.apiRequests.length, 1, "text request must not reach the vision pool");
 });
+
+test("/api/analytics?pool= scopes every figure to one pool and never mixes them", async (t) => {
+  const { router } = await setup(t, { vision1Status: 200 });
+  await router.request("/v1/messages", postJson({ ...textOnly, model: "text-model" }));
+  await router.request("/v1/messages", postJson({ ...textOnly, model: "text-model" }));
+  await router.request("/v1/messages", postJson({ ...withImage, model: "vision-1" }));
+
+  const get = async (query) => (await router.request(`/api/analytics?range=1h${query}`)).json();
+
+  const all = await get("");
+  assert.equal(all.pool, null);
+  assert.equal(all.sampleSize, 3);
+
+  const textOnlyView = await get("&pool=text");
+  assert.equal(textOnlyView.pool, "text");
+  assert.equal(textOnlyView.sampleSize, 2);
+  assert.deepEqual(textOnlyView.breakdowns.provider.map((row) => row.key), ["groq"]);
+
+  const visionView = await get("&pool=vision");
+  assert.equal(visionView.pool, "vision");
+  assert.equal(visionView.sampleSize, 1);
+  assert.equal(visionView.summary.total, 1);
+  assert.deepEqual(visionView.breakdowns.provider.map((row) => row.key), ["openrouter"]);
+
+  const bogus = await get("&pool=nonsense");
+  assert.equal(bogus.pool, null, "an unknown pool is ignored rather than emptying the page");
+  assert.equal(bogus.sampleSize, 3);
+});

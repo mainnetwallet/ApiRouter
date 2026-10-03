@@ -345,11 +345,18 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     const { label, rangeMs } = resolveRange(searchParams.get("range") || "1h", now);
     const buckets = Math.max(2, Math.min(Number(searchParams.get("buckets")) || 30, 120));
 
+    // Optional pool scope. Only "text" / "vision" narrow the figures; any other
+    // value is ignored (all traffic) so a typo cannot silently empty the page.
+    const requestedPool = (searchParams.get("pool") || "").trim().toLowerCase();
+    const pool = requestedPool === "text" || requestedPool === "vision" ? requestedPool : null;
+
     const start = now - rangeMs;
-    const entries = [...requestLog.entries.values()].filter((entry) => entry.receivedAt >= start);
+    const entries = [...requestLog.entries.values()].filter((entry) =>
+      entry.receivedAt >= start && (pool === null || (entry.pool ?? "text") === pool));
 
     return {
       generatedAt: new Date(now).toISOString(),
+      pool,
       range: { label, rangeMs, from: new Date(start).toISOString(), to: new Date(now).toISOString() },
       bucketMs: Math.floor(rangeMs / buckets),
       availableRanges: ["5m", "15m", "1h", "6h", "24h", "7d"],
