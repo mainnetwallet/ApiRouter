@@ -69,7 +69,7 @@ export async function startRouter(env = {}) {
 
 const PROVIDER_IDS = [
   "AGENTROUTER", "GEMINI", "GROQ", "HUGGINGFACE", "MISTRAL",
-  "OPENROUTER", "CEREBRAS", "CLOUDFLARE", "SAMBANOVA", "COHERE", "ZAI", "VERCEL"
+  "OPENROUTER", "CEREBRAS", "CLOUDFLARE", "SAMBANOVA", "COHERE", "ZAI", "VERCEL", "OPENCODE"
 ];
 
 function clearProviderEnv() {

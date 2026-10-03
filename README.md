@@ -101,6 +101,17 @@ of a base URL. Nothing is shared with the normal `<PROVIDER>_API_KEYS` /
 
 Free-model availability and quotas are controlled by Vercel and can change.
 
+### OpenCode Zen
+
+- Provider ID: `opencode`, OpenAI-compatible (`https://opencode.ai/zen/v1`; the base URL already
+  contains `/v1`, so requests go to `.../zen/v1/chat/completions` and health probes to `.../zen/v1/models`).
+- Text pool: `OPENCODE_API_KEYS`, `OPENCODE_BASE_URL`, `OPENCODE_MODELS` (order is the priority order).
+- Separate vision pool: `OPENCODE_VISION_API_KEYS`, `OPENCODE_VISION_BASE_URL`, `OPENCODE_VISION_MODELS`.
+  Without it, image requests fail with `503 no_vision_route`.
+- Several keys each become their own target; fallback, health, streaming and pin headers work as for every provider.
+
+Free-model availability is controlled by OpenCode and can change.
+
 Retryable statuses:
 
 ```text

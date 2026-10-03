@@ -74,6 +74,7 @@ describe("format", () => {
     expect(protocolLabel("gemini")).toBe("Gemini generateContent");
     expect(providerLabel("zai")).toBe("Z.ai");
     expect(providerLabel("vercel")).toBe("Vercel AI Gateway");
+    expect(providerLabel("opencode")).toBe("OpenCode Zen");
     expect(providerLabel(null)).toBe(EMPTY);
   });
 
