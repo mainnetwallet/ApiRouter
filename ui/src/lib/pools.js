@@ -33,13 +33,19 @@ export function poolBadgeClass(pool) {
   return pool === "vision" ? "pool-badge--vision" : "pool-badge--text";
 }
 
-/** Row filters above the matrix (spec §6). Keys are stable; labels are shown. */
+/**
+ * Row filters above the matrix (spec §6). Keys are stable; labels are shown.
+ *
+ * These are mutually exclusive capability *combinations* (text only / vision
+ * only / both). The ALL / TEXT / VISION pool view below already answers "can
+ * it serve this pool", so there is deliberately no "Vision Capable" or "No
+ * Vision" here — they would just repeat the pool view.
+ */
 export const MATRIX_FILTERS = Object.freeze([
   { key: "all", label: "All" },
   { key: "textOnly", label: "Text Only" },
-  { key: "visionCapable", label: "Vision Capable" },
-  { key: "both", label: "Both" },
-  { key: "noVision", label: "No Vision" }
+  { key: "visionOnly", label: "Vision Only" },
+  { key: "both", label: "Both" }
 ]);
 
 /** The ALL / TEXT / VISION view selector (spec §7). */
@@ -189,9 +195,8 @@ export function matchesMatrixFilter(row, filterKey = "all") {
 
   switch (filterKey) {
     case "textOnly": return text && !vision;
-    case "visionCapable": return vision;
+    case "visionOnly": return vision && !text;
     case "both": return text && vision;
-    case "noVision": return !vision;
     case "all":
     default: return true;
   }

@@ -164,25 +164,26 @@ describe("summarizePool", () => {
 });
 
 describe("matrix filtering", () => {
-  it("exposes the five capability filters and three pool views", () => {
+  it("exposes the four capability filters and three pool views", () => {
     expect(MATRIX_FILTERS.map((filter) => filter.key))
-      .toEqual(["all", "textOnly", "visionCapable", "both", "noVision"]);
+      .toEqual(["all", "textOnly", "visionOnly", "both"]);
     expect(POOL_VIEWS.map((view) => view.key)).toEqual(["all", "text", "vision"]);
   });
 
   it("matches each capability filter", () => {
     expect(matchesMatrixFilter({ capabilities: { text: true, vision: true } }, "textOnly")).toBe(false);
     expect(matchesMatrixFilter({ capabilities: { text: true, vision: false } }, "textOnly")).toBe(true);
-    expect(matchesMatrixFilter({ capabilities: { text: true, vision: false } }, "noVision")).toBe(true);
+    expect(matchesMatrixFilter({ capabilities: { text: false, vision: true } }, "textOnly")).toBe(false);
     expect(matchesMatrixFilter({ capabilities: { text: true, vision: true } }, "both")).toBe(true);
-    expect(matchesMatrixFilter({ capabilities: { text: false, vision: true } }, "visionCapable")).toBe(true);
+    expect(matchesMatrixFilter({ capabilities: { text: false, vision: true } }, "visionOnly")).toBe(true);
+    expect(matchesMatrixFilter({ capabilities: { text: true, vision: true } }, "visionOnly")).toBe(false);
   });
 
   it("filters rows by capability and by pool", () => {
     const rows = matrix();
     expect(filterMatrixRows(rows, { filterKey: "textOnly" }).map((r) => r.id)).toEqual(["groq"]);
     expect(filterMatrixRows(rows, { filterKey: "both" }).map((r) => r.id)).toEqual(["gemini"]);
-    expect(filterMatrixRows(rows, { filterKey: "noVision" }).map((r) => r.id)).toEqual(["groq"]);
+    expect(filterMatrixRows(rows, { filterKey: "visionOnly" }).map((r) => r.id)).toEqual(["llm7"]);
     expect(filterMatrixRows(rows, { pool: "text" }).map((r) => r.id)).toEqual(["gemini", "groq"]);
     expect(filterMatrixRows(rows, { pool: "vision" }).map((r) => r.id)).toEqual(["gemini", "llm7"]);
   });
