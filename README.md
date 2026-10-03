@@ -171,6 +171,28 @@ POLLINATIONS_VISION_BASE_URL=https://gen.pollinations.ai/v1
   The router does not check whether a configured model is free: confirm each model's price and
   image-input support in the current Pollinations catalog (`GET /v1/models`) before relying on it.
 
+### SiliconFlow
+
+```env
+SILICONFLOW_API_KEYS=
+SILICONFLOW_MODELS=Qwen/Qwen3.5-4B,XingChenAGI/Xing4.0-29B,THUDM/GLM-4-9B-0414,tencent/Hunyuan-MT-7B
+SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1
+
+SILICONFLOW_VISION_API_KEYS=
+SILICONFLOW_VISION_MODELS=Qwen/Qwen3.5-4B,PaddlePaddle/PaddleOCR-VL-1.5
+SILICONFLOW_VISION_BASE_URL=https://api.siliconflow.cn/v1
+```
+
+- Provider ID: `siliconflow` (shown as **SiliconFlow**). OpenAI-compatible; the base URL already contains `/v1`
+  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
+- Text requests use `SILICONFLOW_MODELS` and `SILICONFLOW_API_KEYS`; image requests use only
+  `SILICONFLOW_VISION_MODELS` and `SILICONFLOW_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
+- Capabilities are decided by pool membership: only the models listed in the vision pool receive images
+  (`Qwen/Qwen3.5-4B` and `PaddlePaddle/PaddleOCR-VL-1.5`); the other models are text-only.
+- Keys and models are comma-separated; every key x model pair is a target, in the configured order, and
+  SiliconFlow joins the normal fallback chain like any other provider.
+- Free-model availability and limits may change; confirm them in the current SiliconFlow catalog.
+
 Retryable statuses:
 
 ```text

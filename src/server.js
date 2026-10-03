@@ -152,7 +152,7 @@ function publicFailure(error) {
     model: item.target?.model,
     keyIndex: item.target?.keyIndex,
     status: item.status,
-    message: item.message
+    message: sanitizeMessage(item.message)
   }));
 }
 
