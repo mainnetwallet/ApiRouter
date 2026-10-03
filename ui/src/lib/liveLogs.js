@@ -175,6 +175,9 @@ export function buildRow(entry) {
     pending,
     ts: received,
     protocol: entry.protocol ?? null,
+    // Which routing pool served (or is serving) this call. Defaults to text so a
+    // gateway that predates the vision pool still renders correctly.
+    pool: entry.pool === "vision" ? "vision" : "text",
     requestedModel: optText(entry.requestedModel, 120),
     provider: target?.provider ?? null,
     model: target?.model ?? null,
@@ -276,7 +279,7 @@ export function ingestEvent(event, { floor = 0, maxSeq = 0 } = {}) {
 /** Text a search box matches against. Never includes anything but display fields. */
 function haystack(row) {
   return [
-    row.state, row.requestId, row.provider, row.model, row.protocol, row.requestedModel,
+    row.state, row.requestId, row.provider, row.model, row.protocol, row.pool, row.requestedModel,
     Number.isInteger(row.keyIndex) ? `key ${row.keyIndex}` : "",
     row.status, row.reason,
     ...(row.steps ?? []).flatMap((attempt) => [
@@ -288,14 +291,16 @@ function haystack(row) {
 
 /**
  * Apply the panel filters. `status` is "running", "success" or "failed";
- * "running" covers every row that has not finished yet.
+ * "running" covers every row that has not finished yet. `pool` is "text" or
+ * "vision" — text and vision calls are otherwise indistinguishable in the list.
  */
-export function filterRows(rows, { provider = null, status = null, search = "", requestId = "" } = {}) {
+export function filterRows(rows, { provider = null, status = null, search = "", requestId = "", pool = null } = {}) {
   const needle = String(search ?? "").trim().toLowerCase();
   const rid = String(requestId ?? "").trim().toLowerCase();
 
   return rows.filter((row) => {
     if (provider && row.provider !== provider) return false;
+    if (pool && row.pool !== pool) return false;
     if (status === "running" && !row.pending) return false;
     if (status === "success" && row.state !== STATE.SUCCESS) return false;
     if (status === "failed" && row.state !== STATE.FAILED) return false;

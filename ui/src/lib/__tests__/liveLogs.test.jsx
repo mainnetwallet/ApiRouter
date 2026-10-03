@@ -506,3 +506,32 @@ describe("copy logs as text", () => {
     expect(formatRowsAsText(null)).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Routing pool
+// ---------------------------------------------------------------------------
+
+describe("the log identifies the routing pool", () => {
+  it("defaults to text and preserves an explicit vision pool", () => {
+    expect(buildRow(finished()).pool).toBe("text");
+    expect(buildRow(finished({ pool: "vision" })).pool).toBe("vision");
+    // A gateway that never sends the field must not be mislabelled.
+    expect(buildRow(finished({ pool: "sideways" })).pool).toBe("text");
+  });
+
+  it("filters by pool and searches on it", () => {
+    const rows = [
+      buildRow(finished({ startSeq: 1, id: "t1", pool: "text" })),
+      buildRow(finished({ startSeq: 2, id: "v1", pool: "vision" }))
+    ];
+    expect(filterRows(rows, { pool: "vision" }).map((row) => row.requestId)).toEqual(["v1"]);
+    expect(filterRows(rows, { pool: "text" }).map((row) => row.requestId)).toEqual(["t1"]);
+    expect(filterRows(rows, { search: "vision" }).map((row) => row.requestId)).toEqual(["v1"]);
+    expect(filterRows(rows, {})).toHaveLength(2);
+  });
+
+  it("prints the pool in the copied transcript", () => {
+    expect(formatRowsAsText([buildRow(finished({ pool: "vision" }))])).toContain("VISION");
+    expect(formatRowsAsText([buildRow(finished())])).toContain("TEXT");
+  });
+});

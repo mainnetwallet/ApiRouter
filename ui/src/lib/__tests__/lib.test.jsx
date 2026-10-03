@@ -355,3 +355,51 @@ describe("table helpers", () => {
     expect(sortAriaValue({ key: "a", direction: "asc" }, "b")).toBe("none");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Pool-aware error taxonomy
+// ---------------------------------------------------------------------------
+
+describe("pool error taxonomy", () => {
+  it("reports a missing vision pool as a configuration problem, not a provider outage", () => {
+    const error = apiErrorFromResponse(503, {
+      error: { type: "no_vision_route", message: "No vision provider is configured" }
+    });
+    expect(error.category).toBe(CATEGORY.NO_VISION_ROUTE);
+    expect(error.label).toBe("No vision route");
+    expect(error.retryable).toBe(false);
+    expect(error.hint).toMatch(/_VISION_/);
+  });
+
+  it("explains a model that cannot process images and names it", () => {
+    const error = apiErrorFromResponse(400, {
+      error: {
+        type: "model_not_vision_capable",
+        model: "deepseek",
+        required_capability: "vision",
+        message: 'Vision request rejected: model "deepseek" is not configured for the vision pool'
+      }
+    });
+    expect(error.category).toBe(CATEGORY.CAPABILITY);
+    expect(error.retryable).toBe(false);
+    expect(error.model).toBe("deepseek");
+    expect(error.requiredCapability).toBe("vision");
+    expect(error.hint).toContain("deepseek");
+  });
+
+  it("classifies both pool failures distinctly from a generic 503", () => {
+    expect(classifyFailure({ httpStatus: 503, errorType: "no_vision_route" })).toBe("no vision route");
+    expect(classifyFailure({
+      httpStatus: 400, errorType: "model_not_vision_capable", errorMessage: "model x"
+    })).toBe("capability mismatch");
+    expect(failureLabel("no vision route")).toMatch(/vision/i);
+    expect(failureLabel("capability mismatch")).toMatch(/images/i);
+  });
+
+  it("never echoes a credential from a pool error message", () => {
+    const error = apiErrorFromResponse(400, {
+      error: { type: "model_not_vision_capable", model: "m", message: `bad ${SECRET}` }
+    });
+    expect(error.message).not.toContain(SECRET);
+  });
+});

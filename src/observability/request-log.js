@@ -7,6 +7,14 @@ export const OUTCOMES = Object.freeze({
   FAILED: "failed"
 });
 
+/** The routing pool a request was served from. Anything unrecognised is text. */
+export const POOLS = Object.freeze({
+  TEXT: "text",
+  VISION: "vision"
+});
+
+const normalizePool = (value) => (value === POOLS.VISION ? POOLS.VISION : POOLS.TEXT);
+
 /**
  * In-flight requests are kept apart from completed ones (`entries`), so
  * analytics, the model catalogue and the Requests page never see a request
@@ -98,6 +106,7 @@ export class RequestLog {
       id: entry.id ?? null,
       receivedAt: Number.isFinite(entry.receivedAt) ? entry.receivedAt : Date.now(),
       protocol: entry.protocol ?? null,
+      pool: normalizePool(entry.pool),
       requestedModel: sanitizeMessage(entry.requestedModel, { maxLength: 120 }),
       outcome: "pending",
       attempts: [],
@@ -175,6 +184,7 @@ export class RequestLog {
       receivedAt: entry.receivedAt ?? null,
       completedAt: entry.completedAt ?? null,
       protocol: entry.protocol ?? null,
+      pool: normalizePool(entry.pool),
       requestedModel: sanitizeMessage(entry.requestedModel, { maxLength: 120 }),
       autoRouted: entry.autoRouted === true,
       streamed: entry.streamed === true,
@@ -231,7 +241,7 @@ export class RequestLog {
    * `nextCursor` never sees a shifting window: new requests arriving
    * mid-pagination have higher sequence numbers and cannot reorder the page.
    */
-  list({ limit = 50, cursor = null, status = null, provider = null, protocol = null, outcome = null } = {}) {
+  list({ limit = 50, cursor = null, status = null, provider = null, protocol = null, outcome = null, pool = null } = {}) {
     const size = Math.max(1, Math.min(Number(limit) || 50, this.maxEntries));
 
     // `Number(null)` is 0, which would match every sequence number and return
@@ -245,6 +255,9 @@ export class RequestLog {
       if (outcome && entry.outcome !== outcome) return false;
       if (protocol && entry.protocol !== protocol) return false;
       if (provider && entry.finalProvider !== provider) return false;
+      // "text"/"vision" are the only pools; any other value is ignored rather
+      // than treated as an empty filter, so a typo cannot silently hide rows.
+      if ((pool === POOLS.TEXT || pool === POOLS.VISION) && entry.pool !== pool) return false;
       if (status && String(entry.httpStatus) !== String(status)) return false;
       return true;
     });

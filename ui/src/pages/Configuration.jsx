@@ -41,6 +41,31 @@ export default function Configuration() {
       )
     },
     {
+      key: "pool",
+      header: "Pool",
+      get: (row) => row.pool ?? "text",
+      render: (row) => (
+        <StatusBadge tone={row.pool === "vision" ? "info" : "neutral"} dot={false}>
+          {(row.pool ?? "text").toUpperCase()}
+        </StatusBadge>
+      )
+    },
+    {
+      key: "capabilities",
+      header: "Capabilities",
+      get: (row) => `${row.capabilities?.text ? "T" : ""}${row.capabilities?.vision ? "V" : ""}`,
+      render: (row) => (
+        <div className="row row--wrap" style={{ gap: "var(--sp-1)" }}>
+          <StatusBadge tone={row.capabilities?.text ? "ok" : "neutral"} dot={false}>
+            <span aria-hidden="true">{row.capabilities?.text ? "✓" : "✗"}</span> Text
+          </StatusBadge>
+          <StatusBadge tone={row.capabilities?.vision ? "info" : "neutral"} dot={false}>
+            <span aria-hidden="true">{row.capabilities?.vision ? "✓" : "✗"}</span> Vision
+          </StatusBadge>
+        </div>
+      )
+    },
+    {
       key: "configured",
       header: "Status",
       get: (row) => row.configured,
@@ -158,6 +183,24 @@ export default function Configuration() {
                   <dt className="dl__term">Exact model preferred</dt>
                   <dd className="dl__desc">{data.routing.exactModelPreferred ? "yes" : "no"}</dd>
 
+                  <dt className="dl__term">Routing pools</dt>
+                  <dd className="dl__desc">
+                    <div className="row row--wrap" style={{ gap: "var(--sp-1)" }}>
+                      {(data.routing.pools ?? ["text"]).map((pool) => (
+                        <StatusBadge key={pool} tone={pool === "vision" ? "info" : "neutral"} dot={false}>
+                          {pool.toUpperCase()}
+                        </StatusBadge>
+                      ))}
+                    </div>
+                  </dd>
+
+                  <dt className="dl__term">Cross-pool fallback</dt>
+                  <dd className="dl__desc">
+                    {data.routing.crossPoolFallback === "blocked"
+                      ? "blocked — an image request never falls back into the text pool"
+                      : (data.routing.crossPoolFallback ?? EMPTY)}
+                  </dd>
+
                   <dt className="dl__term"><code>RETRY_STATUS_CODES</code></dt>
                   <dd className="dl__desc">
                     <div className="row row--wrap" style={{ gap: "var(--sp-1)" }}>
@@ -256,6 +299,31 @@ export default function Configuration() {
 
           <div className="panel section">
             <div className="panel__header">
+              <span className="panel__title">Vision providers</span>
+              <div className="panel__actions">
+                <span className="tiny dim">
+                  {data.summary.configuredVisionTargets ?? 0} vision targets ·{" "}
+                  {data.summary.visionCapableProviders ?? 0} providers
+                </span>
+              </div>
+            </div>
+            <DataTable
+              columns={providerColumns}
+              rows={data.visionProviders ?? []}
+              rowKey={(row) => `vision:${row.id}`}
+              compact
+              caption="Effective vision-pool configuration"
+              emptyState={(
+                <EmptyState title="No vision pool configured" icon="server">
+                  Image requests fail with <code>503 no_vision_route</code> until a provider's
+                  _VISION_API_KEYS, _VISION_MODELS and _VISION_BASE_URL are set.
+                </EmptyState>
+              )}
+            />
+          </div>
+
+          <div className="panel section">
+            <div className="panel__header">
               <span className="panel__title">Environment</span>
               <div className="panel__actions">
                 <span className="tiny dim">names and presence only — never values</span>
@@ -305,6 +373,37 @@ export default function Configuration() {
                     {data.environment.providers.flatMap((entry) =>
                       entry.vars.map((variable) => (
                         <tr key={`${entry.provider}-${variable.name}`}>
+                          <td>{providerLabel(entry.provider)}</td>
+                          <td className="mono">{variable.name}</td>
+                          <td className="tiny dim">{variable.kind}</td>
+                          <td>
+                            {variable.configured
+                              ? <StatusBadge tone="ok" dot={false}>configured</StatusBadge>
+                              : <StatusBadge tone="neutral" dot={false}>not set</StatusBadge>}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="section__title" style={{ marginTop: "var(--sp-4)" }}>Vision provider variables</div>
+              <div className="table-wrap">
+                <table className="table table--compact">
+                  <caption className="sr-only">Vision provider environment variables</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Provider</th>
+                      <th scope="col">Variable</th>
+                      <th scope="col">Kind</th>
+                      <th scope="col">State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(data.environment.visionProviders ?? []).flatMap((entry) =>
+                      entry.vars.map((variable) => (
+                        <tr key={`vision-${entry.provider}-${variable.name}`}>
                           <td>{providerLabel(entry.provider)}</td>
                           <td className="mono">{variable.name}</td>
                           <td className="tiny dim">{variable.kind}</td>

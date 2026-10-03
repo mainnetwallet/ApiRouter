@@ -151,12 +151,23 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     const entries = describeAll(now);
     const ranked = rankTargets(targets, now);
 
+    // Text and vision are reported separately as well as together. The combined
+    // rollup answers "how is this provider doing overall"; the per-pool figures
+    // are what routing actually depends on, since each pool has its own health.
+    const textEntries = entries.filter((entry) => (entry.pool ?? "text") === "text");
+    const visionEntries = entries.filter((entry) => entry.pool === "vision");
+
     return {
       ok: true,
       generatedAt: new Date(now).toISOString(),
       service: "multi-ai-router",
       summary: summarizeHealth(entries),
+      poolSummary: {
+        text: summarizeHealth(textEntries),
+        vision: summarizeHealth(visionEntries)
+      },
       providers: providerRollup(entries),
+      visionProviders: providerRollup(visionEntries),
       targets: entries,
       ranked: ranked.map((target, index) => ({
         rank: index + 1,
@@ -164,6 +175,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
         provider: target.provider,
         model: target.model,
         keyIndex: target.keyIndex,
+        pool: target.pool ?? "text",
         protocols: [...(target.protocols ?? [])]
       })),
       monitor: monitor ? monitor.snapshot(now) : null,
@@ -173,12 +185,38 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
   }
 
   // --- /api/providers ----------------------------------------------------
+  /**
+   * The rollup a provider gets when it has no targets in a pool. Same shape as
+   * `providerRollup`, so the UI renders one table for both.
+   */
+  const emptyRollup = (provider) => ({
+    targets: 0,
+    healthy: 0,
+    cooldown: 0,
+    failed: 0,
+    unknown: 0,
+    successes: 0,
+    failures: 0,
+    successRate: null,
+    latencyMs: null,
+    lastUpdatedAt: null,
+    status: "unknown",
+    models: provider.models,
+    modelCount: provider.modelCount,
+    protocols: provider.protocols,
+    totalObservations: 0
+  });
+
   function providersPayload(now = Date.now()) {
     const allEntries = describeAll(now);
-    // Text providers and the separate vision pool are reported apart.
+    // Text providers and the separate vision pool are reported apart. Both the
+    // health rollup and the target list are computed per pool, so a vision
+    // failure can never be counted against a provider's text health (or the
+    // other way round).
     const entries = allEntries.filter((entry) => (entry.pool ?? "text") === "text");
     const visionEntries = allEntries.filter((entry) => entry.pool === "vision");
     const rollup = providerRollup(entries);
+    const visionRollup = providerRollup(visionEntries);
     const configView = describeConfig(config, targets);
     const byId = new Map(configView.providers.map((provider) => [provider.id, provider]));
 
@@ -186,23 +224,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       const healthRow = rollup.find((row) => row.provider === provider.id);
       return {
         ...provider,
-        health: healthRow ?? {
-          targets: 0,
-          healthy: 0,
-          cooldown: 0,
-          failed: 0,
-          unknown: 0,
-          successes: 0,
-          failures: 0,
-          successRate: null,
-          latencyMs: null,
-          lastUpdatedAt: null,
-          status: "unknown",
-          models: provider.models,
-          modelCount: provider.modelCount,
-          protocols: provider.protocols,
-          totalObservations: 0
-        },
+        health: healthRow ?? emptyRollup(provider),
         // Per-target detail is what the provider drawer renders.
         targets: entries.filter((entry) => entry.provider === provider.id)
       };
@@ -216,14 +238,20 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       generatedAt: new Date(now).toISOString(),
       summary: {
         ...configView.summary,
-        health: summarizeHealth(entries)
+        health: summarizeHealth(entries),
+        visionHealth: summarizeHealth(visionEntries)
       },
       providers,
-      // The separate vision pool (image requests only), per target.
-      visionProviders: configView.visionProviders.map((provider) => ({
-        ...provider,
-        targets: visionEntries.filter((entry) => entry.provider === provider.id)
-      })),
+      // The separate vision pool (image requests only), per target, with its
+      // own independent health rollup.
+      visionProviders: configView.visionProviders.map((provider) => {
+        const healthRow = visionRollup.find((row) => row.provider === provider.id);
+        return {
+          ...provider,
+          health: healthRow ?? emptyRollup(provider),
+          targets: visionEntries.filter((entry) => entry.provider === provider.id)
+        };
+      }),
       unconfiguredHealth: orphans
     };
   }
@@ -239,6 +267,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       filters: {
         providers: [...new Set(catalogue.map((model) => model.provider))].sort(),
         protocols: [...new Set(catalogue.flatMap((model) => model.protocols))].sort(),
+        pools: [...new Set(catalogue.map((model) => model.pool))].sort(),
         statuses: Object.values(HEALTH_STATES)
       },
       summary: summarizeHealth(entries)
@@ -246,31 +275,64 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
   }
 
   // --- /api/router/preview -----------------------------------------------
+  const POOLS = ["text", "vision"];
+
+  /**
+   * `pool` selects which routing pool to preview. Text is the default so every
+   * existing caller keeps working; `vision` previews the image-request pool,
+   * which has its own targets, its own health and its own fallback chain.
+   */
   function routerPreviewPayload(searchParams, now = Date.now()) {
     const protocol = (searchParams.get("protocol") || "").trim();
     if (!protocol) {
       return { error: "a protocol query parameter is required" };
     }
 
+    const requestedPool = (searchParams.get("pool") || "").trim().toLowerCase();
+    const pool = requestedPool || "text";
+    if (!POOLS.includes(pool)) {
+      return {
+        error: `unknown pool "${requestedPool}"`,
+        details: { pools: POOLS }
+      };
+    }
+
+    // The preview must run against the same target set the proxy would use for
+    // this pool — never the combined list, which could show a route the router
+    // would refuse to take.
+    const poolTargets = targets.filter((target) => (target.pool ?? "text") === pool);
+
+    if (poolTargets.length === 0) {
+      return {
+        status: 503,
+        type: pool === "vision" ? "no_vision_route" : "no_route",
+        error: pool === "vision"
+          ? "No vision provider is configured"
+          : "No provider is configured"
+      };
+    }
+
     // A client protocol is servable if any target can be reached for it —
     // natively, or through a bridge (so a chat client is servable by a
     // Gemini-only configuration).
-    const supported = servableProtocols(targets);
+    const supported = servableProtocols(poolTargets);
     if (!supported.has(protocol)) {
       return {
-        error: `protocol "${protocol}" is not served by any configured target`,
-        supported: [...supported].sort()
+        error: `protocol "${protocol}" is not served by any configured target in the ${pool} pool`,
+        details: { supported: [...supported].sort(), pool }
       };
     }
 
     return {
       generatedAt: new Date(now).toISOString(),
+      pools: POOLS,
       protocols: [...supported].sort(),
       ...describeRouting({
-        targets,
+        targets: poolTargets,
         config,
         health,
         protocol,
+        pool,
         model: (searchParams.get("model") || "").trim(),
         stickyTargetId: (searchParams.get("session") || "").trim() || null,
         now
@@ -305,6 +367,9 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
         provider: breakdown(entries, (entry) => entry.finalProvider),
         model: breakdown(entries, (entry) => entry.finalModel),
         protocol: breakdown(entries, (entry) => entry.protocol),
+        // Text and vision traffic are broken out so an image-routing problem is
+        // never averaged away by the (usually much larger) text volume.
+        pool: breakdown(entries, (entry) => entry.pool),
         outcome: breakdown(entries, (entry) => entry.outcome),
         errors: errorDistribution(entries),
         fallback: breakdown(
@@ -374,8 +439,8 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     if (pathname === "/api/router/preview" && req.method === "GET") {
       const payload = routerPreviewPayload(searchParams, now);
       if (payload.error) {
-        return fail(req, res, 400, payload.error, "invalid_request",
-          payload.supported ? { supported: payload.supported } : null);
+        return fail(req, res, payload.status || 400, payload.error, payload.type || "invalid_request",
+          payload.details || null);
       }
       return sendJson(req, res, 200, payload);
     }
@@ -410,6 +475,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
           status: searchParams.get("status"),
           provider: searchParams.get("provider"),
           protocol: searchParams.get("protocol"),
+          pool: searchParams.get("pool"),
           outcome: searchParams.get("outcome")
         }),
         // Requests still running, so the Live Logs view can show them before

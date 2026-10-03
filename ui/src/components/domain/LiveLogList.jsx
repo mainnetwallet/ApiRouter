@@ -120,6 +120,7 @@ function FallbackLink({ from }) {
 
 /** Time, state, protocol and request id: the top of every card. */
 function CardHead({ time, state, tone, live, request, outcome, row, rid, onSelectRequest }) {
+  const pool = row?.pool === "vision" ? "VISION" : "TEXT";
   return (
     <div className="livelog__card-head">
       <time className="livelog__time mono tabular">{formatClock(time)}</time>
@@ -128,6 +129,13 @@ function CardHead({ time, state, tone, live, request, outcome, row, rid, onSelec
         title={STATE_HINT[state]}
       >
         {state}
+      </span>
+      {/* Which pool served the call: text and vision are routed independently. */}
+      <span
+        className={`livelog__pool livelog__pool--${pool === "VISION" ? "vision" : "text"}`}
+        title={`${pool} routing pool`}
+      >
+        {pool}
       </span>
       <span className="livelog__sub dim mono" title={request}>{request}</span>
       <span className="livelog__outcome mono tabular">{outcome}</span>
@@ -252,6 +260,7 @@ export function formatRowsAsText(rows) {
     const head = [
       `[${formatClock(steps[0]?.startedAt ?? row.ts)}]`,
       row.state,
+      row.pool === "vision" ? "VISION" : "TEXT",
       clean(requestText(row)),
       row.requestId ? `id ${row.requestId}` : null,
       describeOutcome(row, row.ts) ? `total ${describeOutcome(row, row.ts)}` : null

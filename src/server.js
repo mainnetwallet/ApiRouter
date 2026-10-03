@@ -5,6 +5,12 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { loadConfig, buildTargets, VISION_POOL } from "./config.js";
 import {
+  TEXT_POOL,
+  capabilityErrorMessage,
+  modelPoolIndex,
+  validateModelForPool
+} from "./capabilities.js";
+import {
   describeHealth,
   rankTargets,
   healthRegistry,
@@ -57,6 +63,9 @@ const textTargets = buildTargets(config.providers);
 const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
 // Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
 const targets = [...textTargets, ...visionTargets];
+// Which pools each configured model id belongs to. Static for the process
+// lifetime (it comes from the environment), so it is built once.
+const modelCapabilities = modelPoolIndex(config);
 const sessions = new SessionStore();
 
 /**
@@ -133,14 +142,18 @@ function authorized(req) {
   return Boolean(token && config.routerApiKeys.includes(token));
 }
 
-function getSession(req, protocol) {
+function getSession(req, protocol, pool = TEXT_POOL) {
   const requested = String(req.headers["x-multi-ai-session-id"] || "").trim();
   const id = requested || createSessionId();
-  const key = protocol + ":" + id;
+  // Text and vision keep independent sticky targets. Sharing one entry would
+  // let a vision target's id sit in a text session (and vice versa), which is
+  // harmless today only because the id would not be found in the other pool's
+  // group — an accident, not a design. The pools get their own state.
+  const key = protocol + ":" + pool + ":" + id;
 
   let state = sessions.get(key);
   if (!state) {
-    state = sessions.set(key, { id, protocol, session: new RouteSession() });
+    state = sessions.set(key, { id, protocol, pool, session: new RouteSession() });
   }
 
   return { id, state };
@@ -276,8 +289,6 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, error.status || 400, { error: { message: error.message, type: "invalid_request_error" } });
   }
 
-  const sessionInfo = getSession(req, protocol);
-
   const geminiPathModel = protocol === "gemini"
     ? pathname.match(/^\/v1beta\/models\/([^:]+):(?:stream)?[Gg]enerateContent$/)?.[1] || ""
     : "";
@@ -286,6 +297,14 @@ async function proxy(req, res, protocol, pathname) {
   // A Gemini client selects streaming with the method name rather than a body
   // field, so both spellings have to be considered here.
   const wantsStream = body.stream === true || (protocol === "gemini" && isGeminiStream(pathname));
+
+  // The pool is decided from the request body before anything else, because it
+  // governs the session, the candidate targets and the capability rules for the
+  // whole request. An image request is served only by the vision pool (own
+  // keys / base URLs / models); every other request only by the text pool.
+  const { pool, targets: poolTargets } = selectPool(body, { textTargets, visionTargets });
+
+  const sessionInfo = getSession(req, protocol, pool);
 
   // Target selection is shared with the routing preview, so what the Router
   // page shows is the decision this function actually makes.
@@ -310,37 +329,61 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "gemini" ? geminiProtocol(target)
     : bridgeProtocol(target);
 
-  liveSeq = beginRequest({ id: sessionInfo.id, receivedAt, protocol, requestedModel });
+  liveSeq = beginRequest({ id: sessionInfo.id, receivedAt, protocol, pool, requestedModel });
 
   const pin = readPin(req);
   if (pin.error) {
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 400,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: "invalid_request_error", errorMessage: pin.error, attempts
     });
     return json(res, 400, { error: { message: pin.error, type: "invalid_request_error" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  // An image request is served only by the vision pool (own keys / base URLs /
-  // models); every other request only by the text pool.
-  const { pool, targets: poolTargets } = selectPool(body, { textTargets, visionTargets });
+  // Nothing in this pool at all. Reported before capability validation, because
+  // "no vision provider is configured" is the more useful answer than "that
+  // model is not a vision model" when both are true.
   if (pool === VISION_POOL && poolTargets.length === 0) {
     const message = "No vision provider is configured";
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
       outcome: "failed", errorType: "no_vision_route", errorMessage: message, attempts
     });
     return json(res, 503, { error: { message, type: "no_vision_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
+
+  // A model the router only knows as configured for the *other* pool is a
+  // capability mismatch: reject it clearly instead of silently routing the
+  // request to a different model than the client asked for. A model the router
+  // has never heard of is not a mismatch and keeps the existing
+  // widen-to-all-compatible-targets behaviour.
+  const capability = validateModelForPool(modelCapabilities, requestedModel, pool);
+  if (capability) {
+    const message = capabilityErrorMessage(capability);
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
+      outcome: "failed", errorType: capability.type, errorMessage: message, attempts
+    });
+    return json(res, 400, {
+      error: {
+        message,
+        type: capability.type,
+        model: capability.model,
+        required_capability: capability.required_capability
+      }
+    }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
   const pinned = pinTargets(poolTargets, pin, requestedModel);
   if (pinned.pinned && pinned.targets.length === 0) {
     const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;
     const message = `No configured target matches the pinned selection (${sanitizeMessage(where)})`;
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 404,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 404,
       outcome: "failed", errorType: "no_route", errorMessage: message, attempts
     });
     return json(res, 404, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
@@ -366,6 +409,7 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionInfo.id,
       receivedAt,
       protocol,
+      pool,
       requestedModel,
       httpStatus: 503,
       outcome: "failed",
@@ -514,6 +558,7 @@ async function proxy(req, res, protocol, pathname) {
         id: sessionId,
         receivedAt,
         protocol,
+        pool,
         requestedModel,
         autoRouted: !selection.modelMatched,
         streamed: wantsStream,
@@ -583,6 +628,7 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionId,
       receivedAt,
       protocol,
+      pool,
       requestedModel,
       autoRouted: !selection.modelMatched,
       streamed: !buffered && Boolean(result.upstream.body),
@@ -628,6 +674,7 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionInfo.id,
       receivedAt,
       protocol,
+      pool,
       requestedModel,
       autoRouted: !selection.modelMatched,
       attempts,
@@ -669,8 +716,25 @@ const server = http.createServer(async (req, res) => {
   const pathname = url.pathname.replace(/\/{2,}/g, "/");
 
   if (req.method === "GET" && pathname === "/health") {
-    const ranked = rankTargets(targets).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, protocols: target.protocols }));
-    return json(res, 200, { ok: true, service: "multi-ai-router", providers: PROVIDERS, configuredTargets: targets.length, health: describeHealth(targets), rankedTargets: ranked, retryableStatus: [...config.retryableStatus] });
+    const ranked = rankTargets(targets).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
+    const health = describeHealth(targets);
+    const inPool = (pool) => health.filter((entry) => entry.pool === pool);
+    return json(res, 200, {
+      ok: true,
+      service: "multi-ai-router",
+      providers: PROVIDERS,
+      configuredTargets: targets.length,
+      configuredTextTargets: textTargets.length,
+      configuredVisionTargets: visionTargets.length,
+      health,
+      // Per-pool counts, because the two pools fail independently.
+      pools: {
+        text: { targets: textTargets.length, health: inPool("text") },
+        vision: { targets: visionTargets.length, health: inPool("vision") }
+      },
+      rankedTargets: ranked,
+      retryableStatus: [...config.retryableStatus]
+    });
   }
 
   if (req.method === "GET" && pathname === "/v1/models") {

@@ -24,6 +24,8 @@ export const CATEGORY = Object.freeze({
   GATEWAY: "gateway",
   UNAVAILABLE: "unavailable",
   NO_ROUTE: "no-route",
+  NO_VISION_ROUTE: "no-vision-route",
+  CAPABILITY: "capability",
   MODEL: "model-unavailable",
   COOLDOWN: "cooldown",
   NETWORK: "network",
@@ -140,6 +142,40 @@ export function apiErrorFromResponse(status, envelope, { rawText = null } = {}) 
     return apiError;
   }
 
+  if (type === "no_vision_route") {
+    const apiError = new ApiError({
+      status,
+      type,
+      message: sanitizeText(error?.message) || "No vision provider is configured",
+      details: error?.details,
+      failures: error?.failures
+    });
+    apiError.category = CATEGORY.NO_VISION_ROUTE;
+    apiError.label = "No vision route";
+    apiError.retryable = false;
+    apiError.hint = "The request contains an image, but no vision pool is configured. Set a provider's _VISION_API_KEYS, _VISION_MODELS and _VISION_BASE_URL.";
+    return apiError;
+  }
+
+  if (type === "model_not_vision_capable") {
+    const apiError = new ApiError({
+      status,
+      type,
+      message: sanitizeText(error?.message) || "The requested model cannot process images",
+      details: error?.details,
+      failures: error?.failures
+    });
+    apiError.category = CATEGORY.CAPABILITY;
+    apiError.label = "Model cannot process images";
+    apiError.retryable = false;
+    apiError.model = error?.model ?? null;
+    apiError.requiredCapability = error?.required_capability ?? "vision";
+    apiError.hint = error?.model
+      ? `"${sanitizeText(error.model)}" is configured for text only. Use a vision model, or omit the model to let the router choose one.`
+      : "The requested model is configured for text only. Use a vision model, or omit the model to let the router choose one.";
+    return apiError;
+  }
+
   if (type === "authentication_error") {
     const apiError = new ApiError({
       status,
@@ -239,6 +275,8 @@ export function classifyFailure(entry) {
   const errorType = String(entry?.errorType ?? "").toLowerCase();
 
   if (errorType === "no_route") return "no route";
+  if (errorType === "no_vision_route") return "no vision route";
+  if (errorType === "model_not_vision_capable") return "capability mismatch";
   if (status === 401 || status === 403) return "authentication";
   if (status === 402) return "quota exhausted";
   if (status === 408 || status === 504) return "timeout";
@@ -264,6 +302,8 @@ export function failureLabel(category) {
     case "rate limited": return "Rate limiting";
     case "timeout": return "Timeout";
     case "no route": return "No route available";
+    case "no vision route": return "No vision route available";
+    case "capability mismatch": return "Model cannot process images";
     case "unavailable": return "Provider unavailable";
     case "network failure": return "Network failure";
     case "model unavailable": return "Model unavailable";
