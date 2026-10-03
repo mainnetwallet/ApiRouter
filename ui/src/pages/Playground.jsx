@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { PageHeader } from "../components/layout/PageHeader.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
+import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { Icon } from "../components/ui/Icon.jsx";
@@ -32,6 +33,12 @@ import { MAX_IMAGES, ACCEPTED_IMAGE_TYPES, imageProblem, readImageFile } from ".
  * Every protocol can reach every configured model — the gateway translates —
  * so the lists are not narrowed by protocol.
  */
+const POOL_MODES = Object.freeze([
+  { key: "auto", label: "Auto" },
+  { key: "text", label: "Text" },
+  { key: "vision", label: "Vision" }
+]);
+
 export default function Playground() {
   const catalog = useApi(getModels, { intervalMs: 30_000 });
   const toast = useToast();
@@ -46,7 +53,8 @@ export default function Playground() {
   );
 
   const [protocol, setProtocol] = useState("");
-  const [provider, setProvider] = useState("");
+  const [poolMode, setPoolMode] = useState("auto");
+  const [providerPick, setProvider] = useState("");
   const [model, setModel] = useState("");
   const [customModel, setCustomModel] = useState("");
   const [keyIndex, setKeyIndex] = useState("");
@@ -60,22 +68,44 @@ export default function Playground() {
 
   const activeProtocol = protocol || protocols[0] || "";
 
-  const providerOptions = useMemo(
-    () => [...new Set(models.map((entry) => entry.provider))].sort(),
-    [models]
+  const hasImages = images.length > 0;
+
+  // The gateway chooses the pool from the request itself: a body carrying an
+  // image goes to the vision pool, anything else to the text pool. "Auto"
+  // mirrors that; Text and Vision make the operator's intent explicit, and the
+  // provider / model / key lists below only ever offer that pool's targets.
+  const effectivePool = poolMode === "auto" ? (hasImages ? "vision" : "text") : poolMode;
+
+  const poolCounts = useMemo(() => {
+    const counts = { text: 0, vision: 0 };
+    for (const entry of models) counts[entry.pool === "vision" ? "vision" : "text"] += 1;
+    return counts;
+  }, [models]);
+
+  const poolModels = useMemo(
+    () => models.filter((entry) => (entry.pool === "vision" ? "vision" : "text") === effectivePool),
+    [models, effectivePool]
   );
 
+  const providerOptions = useMemo(
+    () => [...new Set(poolModels.map((entry) => entry.provider))].sort(),
+    [poolModels]
+  );
+
+  // A provider picked for one pool may not exist in the other; fall back to
+  // "any" instead of pinning a provider the active pool cannot reach.
+  const provider = providerOptions.includes(providerPick) ? providerPick : "";
+
   const modelOptions = useMemo(() => {
-    const scoped = provider ? models.filter((entry) => entry.provider === provider) : models;
+    const scoped = provider ? poolModels.filter((entry) => entry.provider === provider) : poolModels;
     return [...new Set(scoped.map((entry) => entry.model))].sort();
-  }, [models, provider]);
+  }, [poolModels, provider]);
 
   // With a provider chosen the model is always concrete: the first of that
   // provider's models until the operator picks another.
   // A hand-typed model id wins over the dropdown. It needs a provider, because a
   // custom id can only be called through a pinned provider's own credentials.
   const customId = provider ? customModel.trim() : "";
-  const hasImages = images.length > 0;
 
   const selectedModel = customId || (model && modelOptions.includes(model)
     ? model
@@ -85,18 +115,31 @@ export default function Playground() {
   const keyOptions = useMemo(() => {
     if (!provider) return [];
     const byIndex = new Map();
-    for (const entry of models) {
+    for (const entry of poolModels) {
       if (entry.provider !== provider) continue;
       if (selectedModel && !customId && entry.model !== selectedModel) continue;
       if (!Number.isInteger(entry.keyIndex) || byIndex.has(entry.keyIndex)) continue;
       byIndex.set(entry.keyIndex, entry.status);
     }
     return [...byIndex.entries()].sort((a, b) => a[0] - b[0]).map(([index, status]) => ({ index, status }));
-  }, [models, provider, selectedModel, customId]);
+  }, [poolModels, provider, selectedModel, customId]);
 
   const pinnedKey = keyIndex !== "" && keyOptions.some((option) => option.index === Number(keyIndex))
     ? Number(keyIndex)
     : null;
+
+  // Explicit pool choices must be honoured, and the gateway routes by image
+  // presence — so a request that would land in the other pool is blocked here
+  // rather than silently sent there.
+  const poolProblem =
+    poolMode === "text" && hasImages
+      ? "Remove the attached image to use the Text pool, or switch to Auto or Vision."
+      : poolMode === "vision" && !hasImages
+        ? "Attach an image to use the Vision pool — the gateway sends only image requests there."
+        : poolCounts[effectivePool] === 0
+          ? `No ${effectivePool} targets are configured${effectivePool === "vision" ? "; image requests will fail with 503" : ""}.`
+          : null;
+  const sendBlocked = poolMode !== "auto" && poolProblem !== null;
 
   const pickProvider = (value) => {
     setProvider(value);
@@ -134,6 +177,10 @@ export default function Playground() {
   const abortRef = useRef(null);
 
   const addImages = useCallback(async (fileList) => {
+    if (poolMode === "text") {
+      toast.error("Image not attached", { detail: "The Text pool takes no images. Switch to Auto or Vision." });
+      return;
+    }
     const files = Array.from(fileList ?? []);
     let count = images.length;
     const added = [];
@@ -151,7 +198,7 @@ export default function Playground() {
       }
     }
     if (added.length > 0) setImages((current) => [...current, ...added].slice(0, MAX_IMAGES));
-  }, [images.length, toast]);
+  }, [images.length, poolMode, toast]);
 
   const removeImage = (id) => setImages((current) => current.filter((image) => image.id !== id));
 
@@ -172,6 +219,7 @@ export default function Playground() {
   const send = useCallback(async () => {
     const text = prompt.trim();
     if (!text && images.length === 0) return;
+    if (sendBlocked) return;
     const attached = images;
 
     const startedAt = Date.now();
@@ -239,7 +287,8 @@ export default function Playground() {
         requestedModel: autoRoute ? null : selectedModel || null,
         pinnedProvider: !autoRoute && provider ? provider : null,
         pinnedKey: !autoRoute && provider ? pinnedKey : null,
-        autoRouted: autoRoute
+        autoRouted: autoRoute,
+        pool: effectivePool
       });
     } catch (error) {
       const cancelled = error?.kind === "abort";
@@ -260,7 +309,7 @@ export default function Playground() {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [prompt, images, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, toast]);
+  }, [prompt, images, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, sendBlocked, effectivePool, toast]);
 
   const cancel = () => abortRef.current?.abort();
 
@@ -318,6 +367,31 @@ export default function Playground() {
                 <input type="checkbox" checked={autoRoute} onChange={(event) => toggleAutoRoute(event.target.checked)} />
                 Auto Route — let the gateway pick the target
               </label>
+
+              <div className="field">
+                <span className="field__label" id="pg-pool-label">Pool</span>
+                <div className="chips" role="group" aria-labelledby="pg-pool-label">
+                  {POOL_MODES.map((mode) => (
+                    <button
+                      key={mode.key}
+                      type="button"
+                      className={`chip${poolMode === mode.key ? " is-active" : ""}${mode.key === "vision" ? " chip--vision" : mode.key === "text" ? " chip--text" : ""}`}
+                      aria-pressed={poolMode === mode.key}
+                      onClick={() => setPoolMode(mode.key)}
+                      disabled={busy}
+                    >
+                      {mode.label}{mode.key === "auto" ? "" : ` · ${poolCounts[mode.key]}`}
+                    </button>
+                  ))}
+                </div>
+                <span className="field__hint">
+                  {poolMode === "auto"
+                    ? `Auto — images go to the vision pool, everything else to text. Now: ${effectivePool}.`
+                    : poolMode === "text"
+                      ? "Text pool only. Image attachments are off."
+                      : "Vision pool only. Attach an image to send."}
+                </span>
+              </div>
 
               <div className="field">
                 <label className="field__label" htmlFor="pg-protocol">Protocol</label>
@@ -552,7 +626,10 @@ export default function Playground() {
                     ))}
                   </div>
                 ) : null}
-                {hasImages && autoRoute ? (
+                {poolMode !== "auto" && poolProblem ? (
+                  <span className="tiny" style={{ color: "var(--warn)" }}>{poolProblem}</span>
+                ) : null}
+                {hasImages && autoRoute && poolMode === "auto" ? (
                   <span className="tiny dim">
                     Image attached: Auto Route only uses the vision providers ({'<PROVIDER>_VISION_*'} settings).
                   </span>
@@ -573,7 +650,7 @@ export default function Playground() {
                     type="button"
                     className="btn"
                     onClick={() => fileInputRef.current?.click()}
-                    disabled={busy || images.length >= MAX_IMAGES}
+                    disabled={busy || poolMode === "text" || images.length >= MAX_IMAGES}
                     title={`Attach up to ${MAX_IMAGES} images`}
                   >
                     <Icon name="image" className="btn__icon" size={12} />
@@ -583,7 +660,7 @@ export default function Playground() {
                     type="button"
                     className="btn btn--primary"
                     onClick={send}
-                    disabled={busy || (prompt.trim().length === 0 && !hasImages)}
+                    disabled={busy || sendBlocked || (prompt.trim().length === 0 && !hasImages)}
                   >
                     <Icon name="play" className="btn__icon" size={12} />
                     Send
@@ -595,6 +672,7 @@ export default function Playground() {
                     </button>
                   ) : null}
                   <span className="tiny dim grow right">
+                    {`${effectivePool} · `}
                     {autoRoute
                       ? "auto route"
                       : provider
@@ -615,6 +693,9 @@ export default function Playground() {
                 <span className="dim small">Metadata appears here after the first request.</span>
               ) : (
                 <dl className="dl dl--tight">
+                  <dt className="dl__term">Pool</dt>
+                  <dd className="dl__desc">{meta.pool ? <PoolBadge pool={meta.pool} /> : <span className="dim">{EMPTY}</span>}</dd>
+
                   <dt className="dl__term">Selected provider</dt>
                   <dd className="dl__desc">
                     {meta.provider ? providerLabel(meta.provider) : <span className="dim">{EMPTY}</span>}
