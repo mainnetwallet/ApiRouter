@@ -4,6 +4,7 @@ import { RoutingGraph } from "../components/domain/RoutingGraph.jsx";
 import { DataTable } from "../components/ui/DataTable.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
+import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
@@ -13,6 +14,7 @@ import { useApi } from "../hooks/useApi.js";
 import { useHealth } from "../context/HealthContext.jsx";
 import { getRoutingPreview } from "../api/router.js";
 import { POOLS } from "../lib/targets.js";
+import { poolLabel } from "../lib/pools.js";
 import { formatLatency, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 
 /**
@@ -48,6 +50,12 @@ export default function RouterControl() {
     () => healthTargets.filter((target) => (target.pool ?? "text") === pool),
     [healthTargets, pool]
   );
+
+  const poolCounts = useMemo(() => {
+    const counts = { text: 0, vision: 0 };
+    for (const target of healthTargets) counts[(target.pool ?? "text") === "vision" ? "vision" : "text"] += 1;
+    return counts;
+  }, [healthTargets]);
 
   const protocols = useMemo(() => {
     const set = new Set();
@@ -154,11 +162,32 @@ export default function RouterControl() {
         }
       />
 
+      {/* Outside the conditional on purpose: a pool with no targets (vision is
+          often unconfigured) must not hide the switch, or the operator would
+          have no way back to the other pool. */}
+      <div className="row row--wrap section" style={{ gap: "var(--sp-3)" }}>
+        <span className="field__label">Routing pool</span>
+        <div className="chips" role="group" aria-label="Routing pool">
+          {POOLS.map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={`chip${pool === value ? " is-active" : ""}${value === "vision" ? " chip--vision" : " chip--text"}`}
+              aria-pressed={pool === value}
+              onClick={() => { setPool(value); setModel(""); }}
+            >
+              {poolLabel(value).toUpperCase()} · {poolCounts[value]} targets
+            </button>
+          ))}
+        </div>
+      </div>
+
       {!supportsProtocols ? (
         <div className="panel">
           <EmptyState title="No routable protocols" icon="route">
             No provider is configured well enough to serve a request in the{" "}
             <strong>{pool.toUpperCase()}</strong> pool, so there is no routing decision to show.
+            {pool === "vision" ? " Image requests will fail with 503 until a vision provider is set up." : ""}
           </EmptyState>
         </div>
       ) : (
@@ -167,27 +196,11 @@ export default function RouterControl() {
             <div className="panel__header">
               <span className="panel__title">Simulate a request</span>
               <div className="panel__actions">
-                <StatusBadge tone={pool === "vision" ? "info" : "neutral"} dot={false}>
-                  pool: {pool.toUpperCase()}
-                </StatusBadge>
+                <PoolBadge pool={pool} />
               </div>
             </div>
             <div className="panel__body">
               <div className="row row--wrap" style={{ alignItems: "flex-end", gap: "var(--sp-3)" }}>
-                <div className="field">
-                  <label className="field__label" htmlFor="router-pool">Routing pool</label>
-                  <select
-                    id="router-pool"
-                    className="select"
-                    value={pool}
-                    onChange={(event) => { setPool(event.target.value); setModel(""); }}
-                  >
-                    {POOLS.map((value) => (
-                      <option key={value} value={value}>{value.toUpperCase()}</option>
-                    ))}
-                  </select>
-                </div>
-
                 <div className="field">
                   <label className="field__label" htmlFor="router-protocol">Client protocol</label>
                   <select
@@ -281,9 +294,7 @@ export default function RouterControl() {
                         <dl className="dl dl--tight">
                           <dt className="dl__term">Pool</dt>
                           <dd className="dl__desc">
-                            <StatusBadge tone={data.pool === "vision" ? "info" : "neutral"} dot={false}>
-                              {data.poolLabel ?? pool.toUpperCase()}
-                            </StatusBadge>
+                            <PoolBadge pool={data.pool ?? pool} />
                           </dd>
                           <dt className="dl__term">Provider</dt>
                           <dd className="dl__desc">{providerLabel(data.selected.provider)}</dd>
