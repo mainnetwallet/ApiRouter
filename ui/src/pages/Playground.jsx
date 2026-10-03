@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "../components/layout/PageHeader.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
 import { PoolBadge } from "../components/ui/PoolBadge.jsx";
@@ -176,6 +176,34 @@ export default function Playground() {
   const [meta, setMeta] = useState(null);
   const abortRef = useRef(null);
 
+  // Phone layout: the request settings live in a bottom sheet. On a wide
+  // screen the same markup is a fixed side rail and this flag does nothing.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const transcriptRef = useRef(null);
+  const promptRef = useRef(null);
+
+  // Keep the newest message in view as the response streams in.
+  useEffect(() => {
+    const el = transcriptRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, meta]);
+
+  // The prompt box grows with its content, up to a cap, instead of showing a
+  // fixed three-row block that eats the phone screen.
+  useEffect(() => {
+    const el = promptRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [prompt]);
+
+  useEffect(() => {
+    if (!settingsOpen) return undefined;
+    const onKey = (event) => { if (event.key === "Escape") setSettingsOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [settingsOpen]);
+
   const addImages = useCallback(async (fileList) => {
     if (poolMode === "text") {
       toast.error("Image not attached", { detail: "The Text pool takes no images. Switch to Auto or Vision." });
@@ -336,8 +364,14 @@ export default function Playground() {
     );
   }
 
+  const routeSummary = autoRoute
+    ? "Auto route"
+    : provider
+      ? `${providerLabel(provider)}${pinnedKey !== null ? ` · key ${pinnedKey + 1}` : ""} · ${selectedModel}`
+      : selectedModel ? `Prefers ${selectedModel}` : "First available target";
+
   return (
-    <div className="page">
+    <div className="page page--playground">
       <PageHeader
         title="Playground"
         description="Send a real request through the gateway router"
@@ -349,18 +383,183 @@ export default function Playground() {
             className="btn"
             onClick={() => { setMessages([]); setMeta(null); }}
             disabled={busy || messages.length === 0}
+            aria-label="Clear transcript"
           >
             <Icon name="trash" className="btn__icon" size={12} />
-            Clear transcript
+            <span className="btn__label">Clear transcript</span>
           </button>
         }
       />
 
       <div className="playground">
-        <div className="panel">
-          <div className="panel__header">
-            <span className="panel__title">Request</span>
+        <section className="panel pg-chat" aria-label="Conversation">
+          <div className="pg-transcript" ref={transcriptRef} role="log" aria-live="polite">
+            {messages.length === 0 ? (
+              <EmptyState title="Nothing sent yet" icon="terminal">
+                Write a prompt below and send it. The request travels through the gateway&apos;s own
+                router, so health ranking, cooldown and fallback all apply.
+              </EmptyState>
+            ) : (
+              <div className="transcript">
+                {messages.map((message) => (
+                  <article
+                    key={message.id}
+                    className={`msg msg--${message.role}${message.error ? " msg--error" : ""}`}
+                  >
+                    {message.images?.length ? (
+                      <div className="msg__images">
+                        {message.images.map((image) => (
+                          <img key={image.id} className="msg__image" src={image.dataUrl} alt={image.name} />
+                        ))}
+                      </div>
+                    ) : null}
+                    {message.text || message.pending || (!message.error && !message.images?.length) ? (
+                      <div className="msg__body">
+                        {message.text}
+                        {message.pending ? <span className="stream-cursor" aria-label="streaming" /> : null}
+                        {!message.text && !message.pending && !message.error && !message.images?.length ? (
+                          <span className="dim">Provider returned an empty response.</span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {message.error ? <ErrorState error={message.error} compact /> : null}
+                  </article>
+                ))}
+              </div>
+            )}
+
+            {meta && !busy ? (
+              <div className="pg-meta">
+                {meta.error ? (
+                  <StatusBadge tone="danger" dot={false}>{meta.error.label ?? "Request failed"}</StatusBadge>
+                ) : (
+                  <>
+                    {meta.pool ? <PoolBadge pool={meta.pool} /> : null}
+                    <span className="mono pg-meta__target">
+                      {meta.provider ? providerLabel(meta.provider) : EMPTY} · {meta.model ?? EMPTY}
+                    </span>
+                    {meta.status ? (
+                      <StatusBadge tone={meta.status < 400 ? "ok" : "danger"} dot={false}>{meta.status}</StatusBadge>
+                    ) : null}
+                    <span>{formatLatency(meta.latencyMs)}</span>
+                    {Number.isFinite(meta.tokens) ? <span>{formatTokens(meta.tokens)}</span> : null}
+                  </>
+                )}
+              </div>
+            ) : null}
           </div>
+
+          <div className="pg-composer" onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
+            {hasImages ? (
+              <div className="attachments">
+                {images.map((image) => (
+                  <div key={image.id} className="attachment">
+                    <img className="attachment__thumb" src={image.dataUrl} alt={image.name} />
+                    <button
+                      type="button"
+                      className="attachment__remove"
+                      aria-label={`Remove ${image.name}`}
+                      onClick={() => removeImage(image.id)}
+                      disabled={busy}
+                    >×</button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {poolMode !== "auto" && poolProblem ? (
+              <span className="tiny" style={{ color: "var(--warn)" }}>{poolProblem}</span>
+            ) : null}
+            {hasImages && autoRoute && poolMode === "auto" ? (
+              <span className="tiny dim">
+                Image attached: Auto Route only uses the vision providers ({'<PROVIDER>_VISION_*'} settings).
+              </span>
+            ) : null}
+
+            <div className="pg-route">
+              <PoolBadge pool={effectivePool} />
+              <span className="pg-route__text" title={routeSummary}>{routeSummary}</span>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm pg-route__edit"
+                onClick={() => setSettingsOpen(true)}
+                aria-haspopup="dialog"
+              >
+                <Icon name="sliders" className="btn__icon" size={12} />
+                Settings
+              </button>
+            </div>
+
+            <div className="pg-input">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPTED_IMAGE_TYPES.join(",")}
+                multiple
+                hidden
+                onChange={(event) => {
+                  void addImages(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                className="btn pg-icon-btn"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={busy || poolMode === "text" || images.length >= MAX_IMAGES}
+                aria-label={`Attach image (up to ${MAX_IMAGES})`}
+                title={`Attach up to ${MAX_IMAGES} images`}
+              >
+                <Icon name="image" size={16} />
+              </button>
+              <label className="sr-only" htmlFor="pg-prompt">Prompt</label>
+              <textarea
+                id="pg-prompt"
+                ref={promptRef}
+                className="textarea"
+                rows={1}
+                placeholder="Ask something…"
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                onPaste={onPaste}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  // Enter sends; Shift+Enter keeps its newline. Ctrl/Cmd+Enter
+                  // still sends too. An Enter that confirms an IME candidate
+                  // (Bengali, Japanese, ...) is composition, not a send.
+                  if (event.nativeEvent?.isComposing || event.keyCode === 229) return;
+                  if (event.shiftKey && !(event.ctrlKey || event.metaKey)) return;
+                  event.preventDefault();
+                  if (!busy) void send();
+                }}
+              />
+              {busy ? (
+                <button type="button" className="btn btn--danger pg-icon-btn" onClick={cancel} aria-label="Cancel request">
+                  <Icon name="stop" size={14} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn--primary pg-icon-btn"
+                  onClick={send}
+                  disabled={sendBlocked || (prompt.trim().length === 0 && !hasImages)}
+                  aria-label="Send"
+                >
+                  <Icon name="play" size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <aside className="pg-rail" data-open={settingsOpen} aria-label="Request settings">
+          <button type="button" className="pg-rail__scrim" aria-label="Close settings" onClick={() => setSettingsOpen(false)} />
+          <div className="pg-rail__sheet">
+            <div className="pg-rail__head">
+              <span className="panel__title">Request settings</span>
+              <button type="button" className="btn btn--sm" onClick={() => setSettingsOpen(false)}>Done</button>
+            </div>
+            <div className="panel pg-settings">
+          <div className="panel__header"><span className="panel__title">Routing</span></div>
           <div className="panel__body">
             <div className="stack">
               <label className="checkbox">
@@ -370,7 +569,7 @@ export default function Playground() {
 
               <div className="field">
                 <span className="field__label" id="pg-pool-label">Pool</span>
-                <div className="chips" role="group" aria-labelledby="pg-pool-label">
+                <div className="chips chips--segmented" role="group" aria-labelledby="pg-pool-label">
                   {POOL_MODES.map((mode) => (
                     <button
                       key={mode.key}
@@ -391,18 +590,6 @@ export default function Playground() {
                       ? "Text pool only. Image attachments are off."
                       : "Vision pool only. Attach an image to send."}
                 </span>
-              </div>
-
-              <div className="field">
-                <label className="field__label" htmlFor="pg-protocol">Protocol</label>
-                <select
-                  id="pg-protocol"
-                  className="select"
-                  value={activeProtocol}
-                  onChange={(event) => setProtocol(event.target.value)}
-                >
-                  {protocols.map((value) => <option key={value} value={value}>{protocolLabel(value)}</option>)}
-                </select>
               </div>
 
               <div className="field">
@@ -491,6 +678,21 @@ export default function Playground() {
                 </div>
               ) : null}
 
+              <details className="pg-advanced">
+                <summary>Advanced: protocol, temperature, system prompt</summary>
+                <div className="stack">
+              <div className="field">
+                <label className="field__label" htmlFor="pg-protocol">Protocol</label>
+                <select
+                  id="pg-protocol"
+                  className="select"
+                  value={activeProtocol}
+                  onChange={(event) => setProtocol(event.target.value)}
+                >
+                  {protocols.map((value) => <option key={value} value={value}>{protocolLabel(value)}</option>)}
+                </select>
+              </div>
+
               <div className="row" style={{ gap: "var(--sp-3)" }}>
                 <div className="field grow">
                   <label className="field__label" htmlFor="pg-temperature">
@@ -532,165 +734,15 @@ export default function Playground() {
                   onChange={(event) => setSystemPrompt(event.target.value)}
                 />
               </div>
+                </div>
+              </details>
             </div>
           </div>
         </div>
 
-        <div className="stack">
           <div className="panel">
             <div className="panel__header">
-              <span className="panel__title">Transcript</span>
-              {busy ? (
-                <div className="panel__actions">
-                  <span className="row tiny dim" style={{ gap: 6 }}>
-                    <span className="spinner" aria-hidden="true" /> streaming
-                  </span>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="panel__body">
-              {messages.length === 0 ? (
-                <EmptyState title="Nothing sent yet" icon="terminal">
-                  Write a prompt below and send it. The request travels through the gateway's own
-                  router, so health ranking, cooldown and fallback all apply.
-                </EmptyState>
-              ) : (
-                <div className="transcript">
-                  {messages.map((message) => (
-                    <article
-                      key={message.id}
-                      className={`msg msg--${message.role}${message.error ? " msg--error" : ""}`}
-                    >
-                      <header className="msg__head">
-                        <Icon name={message.role === "user" ? "arrowRight" : "zap"} size={11} />
-                        {message.role === "user" ? "Prompt" : "Response"}
-                        {message.error ? <span style={{ marginLeft: "auto", color: "var(--danger)" }}>{message.error.label}</span> : null}
-                      </header>
-                      {message.images?.length ? (
-                        <div className="msg__images">
-                          {message.images.map((image) => (
-                            <img key={image.id} className="msg__image" src={image.dataUrl} alt={image.name} />
-                          ))}
-                        </div>
-                      ) : null}
-                      <div className="msg__body">
-                        {message.text}
-                        {message.pending ? <span className="stream-cursor" aria-label="streaming" /> : null}
-                        {!message.text && !message.pending && !message.error && !message.images?.length ? (
-                          <span className="dim">Provider returned an empty response.</span>
-                        ) : null}
-                      </div>
-                      {message.error ? (
-                        <div style={{ padding: "0 var(--sp-3) var(--sp-3)" }}>
-                          <ErrorState error={message.error} compact />
-                        </div>
-                      ) : null}
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="panel__footer">
-              <div className="composer grow" onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
-                <label className="sr-only" htmlFor="pg-prompt">Prompt</label>
-                <textarea
-                  id="pg-prompt"
-                  className="textarea"
-                  rows={3}
-                  placeholder="Ask something…  (Enter to send, Shift+Enter for a new line, paste or drop images)"
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  onPaste={onPaste}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter") return;
-                    // Enter sends; Shift+Enter keeps its newline. Ctrl/Cmd+Enter
-                    // still sends too. An Enter that confirms an IME candidate
-                    // (Bengali, Japanese, ...) is composition, not a send.
-                    if (event.nativeEvent?.isComposing || event.keyCode === 229) return;
-                    if (event.shiftKey && !(event.ctrlKey || event.metaKey)) return;
-                    event.preventDefault();
-                    if (!busy) void send();
-                  }}
-                />
-                {hasImages ? (
-                  <div className="attachments">
-                    {images.map((image) => (
-                      <div key={image.id} className="attachment">
-                        <img className="attachment__thumb" src={image.dataUrl} alt={image.name} />
-                        <button
-                          type="button"
-                          className="attachment__remove"
-                          aria-label={`Remove ${image.name}`}
-                          onClick={() => removeImage(image.id)}
-                          disabled={busy}
-                        >×</button>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                {poolMode !== "auto" && poolProblem ? (
-                  <span className="tiny" style={{ color: "var(--warn)" }}>{poolProblem}</span>
-                ) : null}
-                {hasImages && autoRoute && poolMode === "auto" ? (
-                  <span className="tiny dim">
-                    Image attached: Auto Route only uses the vision providers ({'<PROVIDER>_VISION_*'} settings).
-                  </span>
-                ) : null}
-                <div className="row">
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept={ACCEPTED_IMAGE_TYPES.join(",")}
-                    multiple
-                    hidden
-                    onChange={(event) => {
-                      void addImages(event.target.files);
-                      event.target.value = "";
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={busy || poolMode === "text" || images.length >= MAX_IMAGES}
-                    title={`Attach up to ${MAX_IMAGES} images`}
-                  >
-                    <Icon name="image" className="btn__icon" size={12} />
-                    Image
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn--primary"
-                    onClick={send}
-                    disabled={busy || sendBlocked || (prompt.trim().length === 0 && !hasImages)}
-                  >
-                    <Icon name="play" className="btn__icon" size={12} />
-                    Send
-                  </button>
-                  {busy ? (
-                    <button type="button" className="btn btn--danger" onClick={cancel}>
-                      <Icon name="stop" className="btn__icon" size={12} />
-                      Cancel
-                    </button>
-                  ) : null}
-                  <span className="tiny dim grow right">
-                    {`${effectivePool} · `}
-                    {autoRoute
-                      ? "auto route"
-                      : provider
-                        ? `pinned: ${providerLabel(provider)}${pinnedKey !== null ? ` · key ${pinnedKey + 1}` : ""} · ${selectedModel}`
-                        : selectedModel ? `prefers: ${selectedModel}` : "first available target"}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel__header">
-              <span className="panel__title">Result metadata</span>
+              <span className="panel__title">Last request</span>
             </div>
             <div className="panel__body">
               {!meta ? (
@@ -767,7 +819,8 @@ export default function Playground() {
               are shown only when the provider reports them — the gateway does not estimate.
             </span>
           </div>
-        </div>
+          </div>
+        </aside>
       </div>
     </div>
   );
