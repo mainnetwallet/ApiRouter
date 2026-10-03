@@ -80,6 +80,7 @@ describe("format", () => {
     expect(providerLabel("pollinations")).toBe("Pollinations");
     expect(providerLabel("siliconflow")).toBe("SiliconFlow");
     expect(providerLabel("modelscope")).toBe("ModelScope");
+    expect(providerLabel("llm7")).toBe("LLM7");
     expect(providerLabel(null)).toBe(EMPTY);
   });
 

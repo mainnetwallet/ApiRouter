@@ -563,8 +563,10 @@ async function proxy(req, res, protocol, pathname) {
     ) {
       try {
         const raw = Buffer.from(await result.upstream.arrayBuffer());
+        // The body is consumed now, so it must be forwarded from this buffer even
+        // when it is not valid JSON; only the usage lookup may fail.
         buffered = raw;
-        usage = extractUsage(JSON.parse(raw.toString("utf8")));
+        try { usage = extractUsage(JSON.parse(raw.toString("utf8"))); } catch { /* usage stays unreported */ }
       } catch {
         buffered = null;
       }
