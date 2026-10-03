@@ -1072,3 +1072,310 @@ button.livelog__rid:hover { color: var(--accent); text-decoration: underline; }
 
 /* Room for the whole model name now that the figures moved to the header. */
 .livelog__step .livelog__target { white-space: normal; overflow-wrap: anywhere; }
+
+/* --- Routing pools -------------------------------------------------------- */
+/*
+ * TEXT and VISION are independent routing pools, and the Dashboard exists to
+ * make that obvious. Pool is an identity rather than a status, so it gets its
+ * own tokens (cyan/blue = text, purple/magenta = vision) instead of borrowing
+ * the green/orange/red palette. The same provider can appear in both pools and
+ * the two blocks never share a number.
+ */
+
+.pool-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1.6;
+}
+
+.pool-badge--text { color: var(--pool-text); background: var(--pool-text-bg); border-color: var(--pool-text-border); }
+.pool-badge--vision { color: var(--pool-vision); background: var(--pool-vision-bg); border-color: var(--pool-vision-border); }
+
+/* Capability badges: the word always accompanies the mark, so an unsupported
+   pool is never conveyed by colour alone. */
+.cap-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  line-height: 1.6;
+}
+.cap-badge--text.is-on { color: var(--pool-text); background: var(--pool-text-bg); border-color: var(--pool-text-border); }
+.cap-badge--vision.is-on { color: var(--pool-vision); background: var(--pool-vision-bg); border-color: var(--pool-vision-border); }
+.cap-badge.is-off { color: var(--text-dim); background: transparent; }
+
+/* --- Pool summary cards --------------------------------------------------- */
+
+.pool-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3);
+}
+
+.pool-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--sp-3);
+  min-width: 0;
+}
+/* The top rule is the pool's colour: the loudest cue on the page. */
+.pool-card--text { border-top-color: var(--pool-text); }
+.pool-card--vision { border-top-color: var(--pool-vision); }
+
+.pool-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-3);
+}
+.pool-card--text .pool-card__icon { color: var(--pool-text); }
+.pool-card--vision .pool-card__icon { color: var(--pool-vision); }
+.pool-card__title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.pool-card__providers { margin-left: auto; font-size: var(--fs-xs); color: var(--text-dim); }
+
+.pool-card__stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.pool-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pool-stat__label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.pool-stat__value { font-size: var(--fs-lg); line-height: 1.2; }
+.pool-stat__value--ok { color: var(--ok); }
+.pool-stat__value--warn { color: var(--warn); }
+.pool-stat__value--danger { color: var(--danger); }
+.pool-stat__value.is-empty { color: var(--text-dim); }
+
+.pool-card__meter { display: flex; align-items: center; gap: var(--sp-3); }
+.pool-card__meter .health-bar { flex: 1 1 auto; }
+.pool-card__pct { font-size: var(--fs-xs); color: var(--text-muted); white-space: nowrap; }
+
+/* --- Provider matrix ------------------------------------------------------ */
+/*
+ * Built as a plain `.table` with a two-row header. `.table th` is sticky, which
+ * two stacked header rows cannot share, so sticky is turned off here and the
+ * matrix scrolls horizontally on narrower screens instead.
+ */
+
+.matrix-table { min-width: 720px; }
+.matrix-table th { position: static; }
+.matrix-table__provider-col { width: 220px; }
+
+.matrix-table__group {
+  text-align: center;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  border-bottom: 1px solid var(--border);
+}
+.matrix-table__group--text { color: var(--pool-text); background: var(--pool-text-bg); }
+.matrix-table__group--vision { color: var(--pool-vision); background: var(--pool-vision-bg); }
+
+/* The sub-header row keeps the pool's rule so the column groups stay legible
+   once the eye is down in the numbers. */
+.matrix-table__sub { color: var(--text-dim); }
+.matrix-table__sub--text { border-bottom-color: var(--pool-text-border); }
+.matrix-table__sub--vision { border-bottom-color: var(--pool-vision-border); }
+
+.matrix-table__provider { vertical-align: top; }
+.matrix-table__provider-name {
+  display: block;
+  border: 0;
+  background: none;
+  padding: 0;
+  margin-bottom: 2px;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.matrix-table__provider-name:hover { color: var(--accent); text-decoration: underline; }
+
+.matrix-table__unsupported { color: var(--text-dim); font-style: italic; text-align: center; }
+
+/* --- Filter chips --------------------------------------------------------- */
+
+.chips { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); }
+.chip {
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 2px 9px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover { color: var(--text); border-color: var(--border-strong); }
+.chip.is-active { color: var(--text); background: var(--bg-active); border-color: var(--border-strong); }
+.chip--text.is-active { color: var(--pool-text); background: var(--pool-text-bg); border-color: var(--pool-text-border); }
+.chip--vision.is-active { color: var(--pool-vision); background: var(--pool-vision-bg); border-color: var(--pool-vision-border); }
+
+/* --- Routing flow --------------------------------------------------------- */
+
+.flow { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.flow__arrow { display: flex; justify-content: center; color: var(--text-dim); padding: 3px 0; }
+
+.flow__step {
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+}
+.flow__step--warn { border-color: var(--danger-border); background: var(--danger-bg); }
+
+.flow__num {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.flow__content { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: var(--sp-2); }
+.flow__label { font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
+.flow__detail { font-size: var(--fs-xs); color: var(--text-muted); }
+
+.flow__row { display: flex; align-items: center; gap: var(--sp-2); }
+.flow__pool {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+.flow__pool--text { color: var(--pool-text); background: var(--pool-text-bg); }
+.flow__pool--vision { color: var(--pool-vision); background: var(--pool-vision-bg); }
+
+.flow__split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
+
+.flow__mini {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  min-width: 0;
+}
+.flow__mini--text { border-left-color: var(--pool-text); }
+.flow__mini--vision { border-left-color: var(--pool-vision); }
+.flow__mini-title {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.flow__route { font-size: var(--fs-xs); color: var(--text); }
+
+.flow__warning { display: flex; align-items: flex-start; gap: var(--sp-2); font-size: var(--fs-sm); }
+.flow__warning .icon { color: var(--danger); flex: none; margin-top: 2px; }
+
+/* --- Provider detail: one block per pool ---------------------------------- */
+
+.provider-pool {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: var(--sp-3);
+  background: var(--bg-input);
+}
+
+/* --- Mobile provider cards ------------------------------------------------ */
+
+.matrix-cards { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); }
+
+.matrix-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  padding: var(--sp-3);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.matrix-card:hover { border-color: var(--border-strong); }
+
+.matrix-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+}
+.matrix-card__name { font-weight: 600; color: var(--text); }
+
+.matrix-card__pools { display: flex; flex-direction: column; gap: var(--sp-2); }
+
+.matrix-card__pool {
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.matrix-card__pool--text { border-left-color: var(--pool-text); }
+.matrix-card__pool--vision { border-left-color: var(--pool-vision); }
+.matrix-card__metrics { display: flex; flex-wrap: wrap; gap: var(--sp-3); color: var(--text-muted); }
+
+/* --- Responsive ------------------------------------------------------------ */
+
+/* Two pool cards stop reading as a comparison once they squeeze; stack them
+   deliberately rather than letting each one wrap its own stats. */
+@media (max-width: 900px) {
+  .pool-cards { grid-template-columns: minmax(0, 1fr); }
+  .pool-card__stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 720px) {
+  .pool-card__stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .flow__split { grid-template-columns: minmax(0, 1fr); }
+}
+

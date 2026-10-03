@@ -4,7 +4,6 @@ import { useApi } from "../hooks/useApi.js";
 import { useConnection } from "../context/ConnectionContext.jsx";
 import { PageHeader } from "../components/layout/PageHeader.jsx";
 import { DataTable } from "../components/ui/DataTable.jsx";
-import { Drawer } from "../components/ui/Overlays.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
@@ -13,7 +12,9 @@ import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { HealthDistribution } from "../components/charts/Charts.jsx";
-import { formatLatency, formatPercent, formatRelativeTime, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
+import { CapabilityBadges } from "../components/domain/CapabilityBadges.jsx";
+import { ProviderDrawer } from "../components/domain/ProviderDrawer.jsx";
+import { formatRelativeTime, providerLabel } from "../lib/format.js";
 
 /**
  * Providers.
@@ -23,29 +24,12 @@ import { formatLatency, formatPercent, formatRelativeTime, protocolLabel, provid
  * failing for vision must be able to say exactly that, and the models, keys and
  * base URLs behind each pool are different configuration.
  *
- * The drawer answers "is this provider set up correctly?" using only values the
- * gateway is willing to expose: base URL, model lists, protocol support and a
- * *count* of configured keys. There is no code path that reads key material
- * into the browser, so nothing here can leak one.
+ * Clicking a row opens the shared `ProviderDrawer`, which answers "is this
+ * provider set up correctly?" using only values the gateway is willing to
+ * expose: base URL, model lists, protocol support and a *count* of configured
+ * keys. There is no code path that reads key material into the browser, so
+ * nothing here can leak one.
  */
-
-const POOL_LABEL = Object.freeze({ text: "Text", vision: "Vision" });
-
-/** ✓/✗ badges for the two capabilities, derived from configuration by the backend. */
-function CapabilityBadges({ capabilities }) {
-  const text = capabilities?.text === true;
-  const vision = capabilities?.vision === true;
-  return (
-    <div className="row row--wrap" style={{ gap: "var(--sp-1)" }}>
-      <StatusBadge tone={text ? "ok" : "neutral"} dot={false}>
-        <span aria-hidden="true">{text ? "✓" : "✗"}</span> Text
-      </StatusBadge>
-      <StatusBadge tone={vision ? "info" : "neutral"} dot={false}>
-        <span aria-hidden="true">{vision ? "✓" : "✗"}</span> Vision
-      </StatusBadge>
-    </div>
-  );
-}
 
 export default function Providers() {
   const { generation } = useConnection();
@@ -246,183 +230,11 @@ export default function Providers() {
       ))}
 
       <ProviderDrawer
-        provider={selected}
+        open={Boolean(selected)}
         onClose={() => setSelection(null)}
+        id={selected?.id}
+        pools={selected ? [{ pool: selected.pool, record: selected }] : []}
       />
     </div>
-  );
-}
-
-function ProviderDrawer({ provider, onClose }) {
-  // Model lists are separated by pool. An older gateway that predates the
-  // capability metadata still gets its single list shown for its own pool.
-  const textModels = Array.isArray(provider?.textModels)
-    ? provider.textModels
-    : provider?.pool === "text" ? provider?.models ?? [] : [];
-  const visionModels = Array.isArray(provider?.visionModels)
-    ? provider.visionModels
-    : provider?.pool === "vision" ? provider?.models ?? [] : [];
-  const targets = provider?.targets ?? [];
-
-  return (
-    <Drawer
-      open={Boolean(provider)}
-      onClose={onClose}
-      wide
-      title={provider ? providerLabel(provider.id) : ""}
-      subtitle={provider ? `${POOL_LABEL[provider.pool] ?? "Text"} pool · ${provider.envPrefix}_* environment variables` : null}
-    >
-      {provider ? (
-        <div className="stack" style={{ gap: "var(--sp-4)" }}>
-          <div className="row row--wrap">
-            {provider.configured
-              ? <StatusBadge tone="ok">configured</StatusBadge>
-              : <StatusBadge tone="neutral">not configured</StatusBadge>}
-            <StatusBadge tone={provider.pool === "vision" ? "info" : "neutral"} dot={false}>
-              {POOL_LABEL[provider.pool] ?? "Text"} pool
-            </StatusBadge>
-            <StatusBadge tone="info" dot={false}>{provider.targetCount} targets</StatusBadge>
-            {provider.protocols.map((protocol) => (
-              <StatusBadge key={protocol} tone="neutral" dot={false}>{protocolLabel(protocol)}</StatusBadge>
-            ))}
-          </div>
-
-          {!provider.configured ? (
-            <div className="notice notice--warn">
-              <div>
-                This provider is incomplete and is excluded from the {POOL_LABEL[provider.pool] ?? "text"} pool. Missing:
-                {" "}<strong>{provider.missing.join(", ")}</strong>.
-              </div>
-            </div>
-          ) : null}
-
-          <section>
-            <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>Capabilities</div>
-            <div className="row row--wrap" style={{ gap: "var(--sp-3)" }}>
-              <CapabilityBadges capabilities={provider.capabilities} />
-            </div>
-            <dl className="dl" style={{ marginTop: "var(--sp-3)" }}>
-              <dt className="dl__term">Text models</dt>
-              <dd className="dl__desc">
-                {textModels.length > 0
-                  ? <span className="mono tiny">{textModels.join(", ")}</span>
-                  : <span className="dim">none configured</span>}
-              </dd>
-
-              <dt className="dl__term">Vision models</dt>
-              <dd className="dl__desc">
-                {visionModels.length > 0
-                  ? <span className="mono tiny">{visionModels.join(", ")}</span>
-                  : <span className="dim">none configured</span>}
-              </dd>
-            </dl>
-            <p className="tiny dim" style={{ marginTop: "var(--sp-2)" }}>
-              Capabilities are derived from what is configured for each pool, never assumed from
-              the provider's name.
-            </p>
-          </section>
-
-          <section>
-            <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>Configuration</div>
-            <dl className="dl">
-              <dt className="dl__term">Base URL</dt>
-              <dd className="dl__desc mono">{provider.baseUrl ?? EMPTY}</dd>
-
-              <dt className="dl__term">Protocols</dt>
-              <dd className="dl__desc">{provider.protocols.map(protocolLabel).join(", ") || EMPTY}</dd>
-
-              <dt className="dl__term">API keys</dt>
-              <dd className="dl__desc">
-                {provider.keyCount > 0
-                  ? <span>{provider.keyCount} configured — values never leave the server</span>
-                  : <span className="dim">none configured</span>}
-              </dd>
-
-              {provider.clientHeaderNames.length > 0 ? (
-                <>
-                  <dt className="dl__term">Client headers</dt>
-                  <dd className="dl__desc">
-                    {provider.clientHeaderNames.join(", ")}
-                    <div className="tiny dim">Names only — header values are not exposed.</div>
-                  </dd>
-                </>
-              ) : null}
-            </dl>
-          </section>
-
-          <section>
-            <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>Health</div>
-            <dl className="dl dl--tight">
-              <dt className="dl__term">Overall</dt>
-              <dd className="dl__desc"><HealthBadge status={provider.health.status} /></dd>
-
-              <dt className="dl__term">Success rate</dt>
-              <dd className="dl__desc">
-                {provider.health.successRate === null
-                  ? <span className="dim">no observations yet</span>
-                  : formatPercent(provider.health.successRate)}
-              </dd>
-
-              <dt className="dl__term">Observations</dt>
-              <dd className="dl__desc mono">
-                {provider.health.successes} ok / {provider.health.failures} failed
-              </dd>
-
-              <dt className="dl__term">Latency</dt>
-              <dd className="dl__desc"><LatencyBadge ms={provider.health.latencyMs} /></dd>
-
-              <dt className="dl__term">Last check</dt>
-              <dd className="dl__desc">{formatRelativeTime(provider.health.lastUpdatedAt)}</dd>
-            </dl>
-          </section>
-
-          <section>
-            <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>
-              {POOL_LABEL[provider.pool] ?? "Text"} targets ({targets.length})
-            </div>
-            {targets.length === 0 ? (
-              <span className="dim small">No targets — this provider is not routable in this pool.</span>
-            ) : (
-              <div className="table-wrap">
-                <table className="table table--compact">
-                  <caption className="sr-only">Per-target health for {provider.id} ({provider.pool} pool)</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">Model</th>
-                      <th scope="col" className="right">Key</th>
-                      <th scope="col">Health</th>
-                      <th scope="col" className="right">Score</th>
-                      <th scope="col" className="right">Latency</th>
-                      <th scope="col">Last reason</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {targets.map((target) => (
-                      <tr key={target.id}>
-                        <td className="mono truncate">{target.model}</td>
-                        <td className="mono table__num">{target.keyIndex}</td>
-                        <td><HealthBadge status={target.status} /></td>
-                        <td className="mono table__num">{Math.round(target.score)}</td>
-                        <td className="table__num"><LatencyBadge ms={target.latencyMs} /></td>
-                        <td className="truncate tiny dim" title={target.lastReason ?? undefined}>
-                          {target.lastReason ?? EMPTY}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-
-          <div className="notice">
-            <span>
-              Provider credentials are configured server-side in <code>.env</code> and are never
-              sent to this panel. Only the count is shown.
-            </span>
-          </div>
-        </div>
-      ) : null}
-    </Drawer>
   );
 }
