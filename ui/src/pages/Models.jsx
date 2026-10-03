@@ -15,7 +15,9 @@ import { MetricSkeleton, TableSkeleton } from "../components/ui/LoadingSkeleton.
 import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
 import { getModels } from "../api/models.js";
-import { filterChoices, filterTargets, findTarget, isRoutable, normalizeModelPayload } from "../lib/targets.js";
+import {
+  filterChoices, filterTargets, findTarget, isRoutable, normalizeModelPayload, summarizeTargets
+} from "../lib/targets.js";
 import { poolLabel } from "../lib/pools.js";
 import { sortRows } from "../lib/table.js";
 import {
@@ -49,7 +51,7 @@ export default function Models() {
 
   // Narrowed once, so a partial or malformed response cannot reach the table.
   const view = useMemo(() => normalizeModelPayload(models.data), [models.data]);
-  const { rows, summary } = view;
+  const { rows } = view;
 
   // The endpoint advertises its own filter vocabulary; the fallback recount
   // lives in the view model so both pages share one implementation.
@@ -68,19 +70,25 @@ export default function Models() {
 
   const activeFilterCount = [pool, provider, protocol, status, debouncedSearch].filter(Boolean).length;
 
-  // Counted per pool and never added together: the text and vision pools are
-  // separate configuration, so each gets its own figure.
-  const poolCounts = useMemo(() => {
-    const counts = { text: 0, vision: 0 };
-    for (const row of rows) counts[row.pool] += 1;
-    return counts;
+  // One summary per pool, recounted from that pool's own rows. The payload's
+  // combined `summary` is deliberately not used: text and vision are separate
+  // pools, so no card here is ever the sum of both.
+  const poolSummaries = useMemo(() => {
+    const build = (pool) => {
+      const poolRows = rows.filter((row) => row.pool === pool);
+      return {
+        ...summarizeTargets(poolRows),
+        providers: new Set(poolRows.map((row) => row.provider)).size
+      };
+    };
+    return { text: build("text"), vision: build("vision") };
   }, [rows]);
 
   if (models.loading && !models.data) {
     return (
       <div className="page">
         <PageHeader title="Models" description="Model catalogue with health, protocol and usage" />
-        <MetricSkeleton count={7} />
+        <MetricSkeleton count={5} />
         <div className="panel"><div className="panel__body"><TableSkeleton rows={10} label="Loading models" /></div></div>
       </div>
     );
@@ -103,54 +111,9 @@ export default function Models() {
 
       {models.error ? <ErrorState error={models.error} onRetry={models.reload} compact /> : null}
 
-      <section className="section">
-        <div className="metrics">
-          <MetricCard
-            label="Total models"
-            value={formatNumber(summary.total)}
-            icon="box"
-            hint="provider + model + key targets"
-          />
-          <MetricCard
-            label="Text targets"
-            value={formatNumber(poolCounts.text)}
-            icon="box"
-            hint="text pool only"
-          />
-          <MetricCard
-            label="Vision targets"
-            value={formatNumber(poolCounts.vision)}
-            icon="box"
-            hint="vision pool only"
-          />
-          <MetricCard
-            label="Healthy"
-            value={formatNumber(summary.healthy)}
-            tone={summary.healthy > 0 ? "ok" : null}
-            icon="check"
-          />
-          <MetricCard
-            label="Failed"
-            value={formatNumber(summary.failed)}
-            tone={summary.failed > 0 ? "danger" : null}
-            icon="alert"
-          />
-          <MetricCard
-            label="Providers"
-            value={formatNumber(summary.providers)}
-            icon="server"
-            hint="serving at least one model"
-          />
-          <MetricCard
-            label="Available targets"
-            value={formatNumber(summary.available)}
-            tone={summary.total > 0 && summary.available === 0 ? "danger" : null}
-            icon="route"
-            hint="not cooling down"
-            title="Targets the router can currently route to"
-          />
-        </div>
-      </section>
+      {POOL_ORDER.map((pool) => (
+        <PoolMetrics key={pool} pool={pool} summary={poolSummaries[pool]} />
+      ))}
 
       <div className="panel section">
         <FilterBar
@@ -218,6 +181,67 @@ export default function Models() {
 
       <ModelDrawer model={selected} onClose={() => setSelectedId(null)} />
     </div>
+  );
+}
+
+const POOL_ORDER = ["text", "vision"];
+
+/** The five headline cards for ONE pool. */
+function PoolMetrics({ pool, summary }) {
+  const empty = summary.total === 0;
+
+  return (
+    <section className="section">
+      <div className="section__header">
+        <h2 className="section__title row" style={{ gap: 8 }}>
+          <PoolBadge pool={pool} />
+          {poolLabel(pool)} pool
+        </h2>
+      </div>
+
+      {empty ? (
+        <p className="tiny dim">
+          {pool === "vision"
+            ? "No vision targets configured. Image requests will fail until a vision provider is set up."
+            : "No text targets configured."}
+        </p>
+      ) : (
+        <div className="metrics">
+          <MetricCard
+            label="Total models"
+            value={formatNumber(summary.total)}
+            icon="box"
+            hint="provider + model + key targets"
+          />
+          <MetricCard
+            label="Healthy"
+            value={formatNumber(summary.healthy)}
+            tone={summary.healthy > 0 ? "ok" : null}
+            icon="check"
+          />
+          <MetricCard
+            label="Failed"
+            value={formatNumber(summary.failed)}
+            tone={summary.failed > 0 ? "danger" : null}
+            icon="alert"
+          />
+          <MetricCard
+            label="Providers"
+            value={formatNumber(summary.providers)}
+            icon="server"
+            hint="serving at least one model"
+          />
+          <MetricCard
+            label="Available targets"
+            value={formatNumber(summary.available)}
+            tone={summary.available === 0 ? "danger" : null}
+            icon="route"
+            hint="not cooling down"
+            title="Targets the router can currently route to"
+          />
+        </div>
+      )}
+    </section>
   );
 }
 
