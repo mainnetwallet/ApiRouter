@@ -1,5 +1,6 @@
 import { Drawer } from "../ui/Overlays.jsx";
 import { StatusBadge } from "../ui/StatusBadge.jsx";
+import { PoolBadge } from "../ui/PoolBadge.jsx";
 import { CopyableId } from "../ui/CopyableId.jsx";
 import { ErrorState } from "../ui/ErrorState.jsx";
 import { RequestTimeline } from "./RequestTimeline.jsx";
@@ -65,9 +66,7 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
 
               <dt className="dl__term">Routing pool</dt>
               <dd className="dl__desc">
-                <StatusBadge tone={entry.pool === "vision" ? "info" : "neutral"} dot={false}>
-                  {(entry.pool ?? "text").toUpperCase()}
-                </StatusBadge>
+                <PoolBadge pool={entry.pool} />
               </dd>
 
               <dt className="dl__term">Requested model</dt>
