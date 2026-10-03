@@ -112,6 +112,25 @@ Free-model availability and quotas are controlled by Vercel and can change.
 
 Free-model availability is controlled by OpenCode and can change.
 
+### NVIDIA Build
+
+```env
+NVIDIA_API_KEYS=
+NVIDIA_MODELS=
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+
+NVIDIA_VISION_API_KEYS=
+NVIDIA_VISION_MODELS=
+NVIDIA_VISION_BASE_URL=https://integrate.api.nvidia.com/v1
+```
+
+- Provider ID: `nvidia`. NVIDIA Build is OpenAI-compatible; the base URL already contains `/v1`
+  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
+- Text/coding requests use `NVIDIA_MODELS`; image requests use `NVIDIA_VISION_MODELS`.
+  Vision never falls back to NVIDIA text models: with no vision pool, images get `503 no_vision_route`.
+- Keys and models are comma-separated; every key x model pair is a target, in the configured order.
+- Free endpoint availability and limits may change, and real access needs a valid NVIDIA API key.
+
 Retryable statuses:
 
 ```text

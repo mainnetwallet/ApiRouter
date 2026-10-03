@@ -120,6 +120,6 @@ export function protocolLabel(protocol) {
 
 export function providerLabel(provider) {
   if (!provider) return EMPTY;
-  const special = { zai: "Z.ai", huggingface: "Hugging Face", vercel: "Vercel AI Gateway", opencode: "OpenCode Zen" };
+  const special = { zai: "Z.ai", huggingface: "Hugging Face", vercel: "Vercel AI Gateway", opencode: "OpenCode Zen", nvidia: "NVIDIA Build" };
   return special[provider] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
 }
