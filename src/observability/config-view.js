@@ -157,6 +157,7 @@ export function describeEnvironment(config) {
       { name: "PORT", configured: true, kind: "number" },
       { name: "REQUEST_TIMEOUT_MS", configured: true, kind: "number" },
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
+      { name: "PRIORITY_MODELS", configured: config.priority?.text?.length > 0 || config.priority?.vision?.length > 0, kind: "list" },
       { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
     ],
     providers: providerVars,

@@ -10,6 +10,10 @@ import { describeAttempt } from "../../lib/errors.js";
  * actually happened, including the fallback hops. A request that fell back
  * twice shows two failed targets and the fallback between them.
  */
+/** "Priority" / "Fallback" prefix for a recorded attempt; empty for old rows without a phase. */
+export const phaseLabel = (attempt) =>
+  attempt?.phase === "priority" ? "Priority" : attempt?.phase === "fallback" ? "Normal fallback" : "";
+
 export function buildLifecycle(entry) {
   if (!entry) return [];
 
@@ -38,10 +42,12 @@ export function buildLifecycle(entry) {
 
   attempts.forEach((attempt, index) => {
     const verdict = describeAttempt(attempt);
+    const phase = phaseLabel(attempt);
+    const kind = attempt.skipped ? "Skipped" : attempt.ok ? "Target" : "Target failed";
 
     stages.push({
       key: `attempt-${attempt.index ?? index}`,
-      stage: `${attempt.ok ? "Target" : "Target failed"} ${attempt.index ?? index + 1}`,
+      stage: `${phase ? `${phase} · ` : ""}${kind} ${attempt.index ?? index + 1}`,
       title: `${providerLabel(attempt.provider)} / ${attempt.model ?? "unknown"} · key ${attempt.keyIndex ?? "?"}`,
       meta: [
         attempt.status ? `HTTP ${attempt.status}` : null,
@@ -52,11 +58,11 @@ export function buildLifecycle(entry) {
       tone: attempt.ok ? "ok" : verdict.tone
     });
 
-    if (!attempt.ok && index < attempts.length - 1) {
+    if (!attempt.ok && !attempt.skipped && index < attempts.length - 1) {
       stages.push({
         key: `fallback-${index}`,
         stage: "Fallback",
-        title: "Target in cooldown — routing moved to the next candidate",
+        title: "Routing moved to the next eligible target",
         meta: `attempt ${index + 2} of ${attempts.length}`,
         tone: "warn"
       });
@@ -128,6 +134,7 @@ export function FallbackTrace({ entry }) {
                 <span className="chain__provider">{providerLabel(attempt.provider)}</span> / {attempt.model ?? "unknown"}
               </div>
               <div className="chain__meta">
+                {phaseLabel(attempt) ? <span>{phaseLabel(attempt)}</span> : null}
                 <span>key {attempt.keyIndex ?? "?"}</span>
                 {attempt.status ? <span>HTTP {attempt.status}</span> : null}
                 {Number.isFinite(attempt.latencyMs) ? <span>{formatLatency(attempt.latencyMs)}</span> : null}

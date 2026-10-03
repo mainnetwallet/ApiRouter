@@ -116,13 +116,14 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
             </div>
             <div className="stack stack--tight">
               {(entry.attempts ?? []).map((attempt) => (
-                <div key={attempt.index} className={`chain__card chain__card--${attempt.ok ? "ok" : "danger"}`}>
+                <div key={attempt.index} className={`chain__card chain__card--${attempt.ok ? "ok" : attempt.skipped ? "neutral" : "danger"}`}>
                   <span className="chain__rank">{attempt.index}</span>
                   <div className="chain__main">
                     <div className="chain__target">
                       <span className="chain__provider">{providerLabel(attempt.provider)}</span> / {attempt.model ?? EMPTY}
                     </div>
                     <div className="chain__meta">
+                      {attempt.phase ? <span>{attempt.phase === "priority" ? "Priority" : "Normal fallback"}</span> : null}
                       <span>key {attempt.keyIndex ?? "?"}</span>
                       {attempt.status ? <span>HTTP {attempt.status}</span> : null}
                       {Number.isFinite(attempt.latencyMs) ? <span>{formatLatency(attempt.latencyMs)}</span> : null}
@@ -130,8 +131,8 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
                     {attempt.errorMessage ? <div className="chain__meta">{attempt.errorMessage}</div> : null}
                   </div>
                   <div className="chain__side">
-                    <StatusBadge tone={attempt.ok ? "ok" : "danger"} dot={false}>
-                      {attempt.ok ? "ok" : "failed"}
+                    <StatusBadge tone={attempt.ok ? "ok" : attempt.skipped ? (attempt.skipReason === "cooldown" ? "warn" : "neutral") : "danger"} dot={false}>
+                      {attempt.ok ? "ok" : attempt.skipped ? (attempt.skipReason === "cooldown" ? "skipped · cooldown" : "skipped · already tried") : "failed"}
                     </StatusBadge>
                   </div>
                 </div>

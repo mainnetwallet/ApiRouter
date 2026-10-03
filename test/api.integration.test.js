@@ -239,9 +239,10 @@ test("each real attempt records its key index and a start time, never a key valu
   const { res: logRes, body } = await getJson(router, "/api/requests");
   const [first, second] = body.entries[0].attempts;
 
-  // Same model, two keys: two separate recorded attempts.
-  assert.equal(first.model, second.model);
-  assert.deepEqual([first.keyIndex, second.keyIndex], [0, 1]);
+  // Key-scoped fallback: key 0 runs its own model chain (model-a, then
+  // model-b) before key 1 is touched. Two separate recorded attempts.
+  assert.deepEqual([first.model, second.model], ["model-a", "model-b"]);
+  assert.deepEqual([first.keyIndex, second.keyIndex], [0, 0]);
   assert.equal(first.status, 429);
   assert.equal(second.status, 200);
 

@@ -236,9 +236,9 @@ test("a failing model cools only its own targets", async (t) => {
     })
   });
 
-  // model-a is the exact model match, so it is tried first. Both of its keys
-  // fail, and routing then widens to model-b — the same fallback rule Claude
-  // Code and Codex use — so the request still succeeds.
+  // Key-scoped fallback: key k0 tries model-a first and it fails; k0 then
+  // continues to model-b on the same key, which serves the request. Key k1 is
+  // never reached, so its model-a target is untouched.
   const fellBack = await router.request(
     "/v1/chat/completions",
     postJson({ model: "model-a", messages: [] })
@@ -249,12 +249,13 @@ test("a failing model cools only its own targets", async (t) => {
   const modelA = health.health.filter((e) => e.model === "model-a");
   const modelB = health.health.filter((e) => e.model === "model-b");
 
-  // Both keys of model-a failed and cooled down; the failure never marks
-  // model-b, which only served the fallback.
+  // Only the target that actually failed (model-a on k0) is cooled down.
   assert.equal(modelA.length, 2);
-  assert.ok(modelA.every((e) => e.status === "cooldown"), "model-a targets should be cooled");
-  assert.equal(modelA.reduce((n, e) => n + e.failures, 0), 2);
+  assert.equal(modelA.filter((e) => e.status === "cooldown").length, 1, "only the failing model-a target should be cooled");
+  assert.equal(modelA.find((e) => e.keyIndex === 0).status, "cooldown");
+  assert.equal(modelA.reduce((n, e) => n + e.failures, 0), 1);
 
+  // The failure never marks model-b, which only served the fallback.
   assert.equal(modelB.length, 2);
   assert.equal(modelB.reduce((n, e) => n + e.failures, 0), 0, "model-b must record no failures");
   assert.ok(modelB.every((e) => e.status !== "cooldown"), "model-b must not be cooled");

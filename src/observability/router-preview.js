@@ -1,4 +1,5 @@
-import { selectTargetsForProtocol, fallbackGroups, planFallbackGroups } from "./route-select.js";
+import { selectTargetsForProtocol } from "./route-select.js";
+import { buildRoutePlan } from "../routing-plan.js";
 
 /** Client protocols whose requests can be bridged to a non-native provider. */
 const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses", "gemini"]);
@@ -17,7 +18,7 @@ const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses
  * the stateless decision, which is what a fresh client receives.
  */
 
-function describeCandidate(target, health, { rank = null, available, status }) {
+function describeCandidate(target, health, { rank = null, available, status, phase = null }) {
   const state = health.get(health.key(target));
 
   return {
@@ -30,6 +31,7 @@ function describeCandidate(target, health, { rank = null, available, status }) {
     pool: target.pool ?? "text",
     protocols: [...(target.protocols ?? [])],
     rank,
+    phase,
     available,
     status,
     score: Number.isFinite(state?.score) ? state.score : null,
@@ -47,13 +49,27 @@ export function describeRouting({ targets = [], config, health, protocol, model 
   const bridged = BRIDGED_PROTOCOLS.has(protocol);
   const poolLabel = pool === "vision" ? "VISION" : "TEXT";
 
-  // The same grouping and the same ranking the proxy applies, so the order
-  // shown here is the order the request will actually be attempted in.
-  const groups = fallbackGroups(selection);
-  const ranked = groups.flatMap((group) => health.rank(group, now));
-  const rankedIds = new Set(ranked.map((target) => health.key(target)));
+  // The same plan the proxy walks: priority targets first (env order), then
+  // Provider -> Key -> Models. Health only decides eligibility here, exactly as
+  // it does when the plan is walked; it never reorders the plan.
+  const priority = config?.priority?.[pool] ?? [];
+  const plan = buildRoutePlan({ targets: selected, requestedModel: model, priority, stickyTargetId });
+  const phaseById = new Map();
+  for (const step of plan.steps) if (!phaseById.has(health.key(step.target))) phaseById.set(health.key(step.target), step.phase);
 
-  const order = planFallbackGroups(groups, health, stickyTargetId, now);
+  const eligible = selected.filter((target) => health.isAvailable(target, now));
+  const rankedIds = new Set(eligible.map((target) => health.key(target)));
+  const ranked = eligible;
+
+  const seenOrder = new Set();
+  const order = plan.steps
+    .map((step) => step.target)
+    .filter((target) => {
+      const id = health.key(target);
+      if (seenOrder.has(id) || !rankedIds.has(id)) return false;
+      seenOrder.add(id);
+      return true;
+    });
 
   /**
    * The reporting status of a target. Derived the same way for every list on
@@ -74,6 +90,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
   };
 
   const candidates = selected.map((target) => describeCandidate(target, health, {
+    phase: phaseById.get(health.key(target)) ?? null,
     rank: rankOf(target),
     available: rankedIds.has(health.key(target)),
     status: statusOf(target)
@@ -144,11 +161,9 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     {
       key: "ranking",
       label: "Ranking",
-      detail: groups.length > 1
-        ? `exact-match group tried first (${groups[0].length} target(s)), then ${groups[1].length} fallback target(s); health score orders each group`
-        : exact.length > 0
-          ? "ordered by health score; every reachable target matches the requested model"
-          : "ordered by health score; ties keep the caller's order",
+      detail: plan.priorityCount > 0
+        ? `${plan.priorityCount} priority target(s) first, in PRIORITY_MODELS order; then Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets`
+        : "no priority configured; Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets",
       count: ranked.length,
       state: "info"
     },
@@ -184,6 +199,8 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     requestedModel: selection.requestedModel,
     modelMatched,
     targetIdentity: "provider + model + keyIndex",
+    priority: priority.map((entry) => ({ provider: entry.provider, model: entry.model })),
+    priorityTargets: plan.priorityCount,
     retryableStatus: config ? [...config.retryableStatus].sort((a, b) => a - b) : [],
     stages,
     candidates,
@@ -191,6 +208,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     excluded,
     selected: order[0]
       ? describeCandidate(order[0], health, {
+          phase: phaseById.get(health.key(order[0])) ?? null,
           rank: 1,
           available: true,
           // The selected target's *own* status, not the first candidate's.
@@ -199,6 +217,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
       : null,
     fallbackOrder: order.map((target, index) =>
       describeCandidate(target, health, {
+        phase: phaseById.get(health.key(target)) ?? null,
         rank: index + 1,
         available: rankedIds.has(health.key(target)),
         status: statusOf(target)

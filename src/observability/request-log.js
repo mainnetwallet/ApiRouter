@@ -27,6 +27,11 @@ const MAX_PENDING = 200;
 function normalizeAttempts(list) {
   return (Array.isArray(list) ? list : []).map((attempt, index) => ({
     index: index + 1,
+    // "priority" | "fallback" | null (older callers); and whether this row was
+    // skipped without a network call (cooldown / already attempted).
+    phase: attempt?.phase === "priority" || attempt?.phase === "fallback" ? attempt.phase : null,
+    skipped: attempt?.skipped === true,
+    skipReason: attempt?.skipped === true && typeof attempt?.skipReason === "string" ? attempt.skipReason : null,
     provider: attempt?.provider ?? null,
     model: attempt?.model ?? null,
     keyIndex: Number.isInteger(attempt?.keyIndex) ? attempt.keyIndex : null,
@@ -128,8 +133,9 @@ export class RequestLog {
     if (!pending) return;
     if (attempts !== undefined) {
       pending.attempts = normalizeAttempts(attempts);
-      pending.attemptCount = pending.attempts.length;
-      pending.fallbackCount = Math.max(0, pending.attempts.length - 1);
+      const real = pending.attempts.filter((a) => !a.skipped).length;
+      pending.attemptCount = real;
+      pending.fallbackCount = Math.max(0, real - 1);
     }
     if (inflight !== undefined) {
       pending.inflight = inflight
@@ -189,8 +195,8 @@ export class RequestLog {
       autoRouted: entry.autoRouted === true,
       streamed: entry.streamed === true,
       attempts,
-      attemptCount: attempts.length,
-      fallbackCount: Math.max(0, attempts.length - 1),
+      attemptCount: attempts.filter((a) => !a.skipped).length,
+      fallbackCount: Math.max(0, attempts.filter((a) => !a.skipped).length - 1),
       finalProvider: entry.finalProvider ?? null,
       finalModel: entry.finalModel ?? null,
       finalKeyIndex: Number.isInteger(entry.finalKeyIndex) ? entry.finalKeyIndex : null,

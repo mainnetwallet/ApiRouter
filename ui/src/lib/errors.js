@@ -232,6 +232,14 @@ export function describeAttempt(attempt) {
 
   if (attempt.ok) return { label: "success", category: "ok", tone: "ok" };
 
+  // A skipped row never reached the network: the target was already attempted
+  // in this request, or it was cooling down in the health registry.
+  if (attempt.skipped) {
+    return attempt.skipReason === "cooldown"
+      ? { label: "skipped · cooldown", category: "skipped", tone: "warn" }
+      : { label: "skipped · already attempted", category: "skipped", tone: "neutral" };
+  }
+
   const status = Number(attempt.status);
   const message = String(attempt.errorMessage ?? "").toLowerCase();
 

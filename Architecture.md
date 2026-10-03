@@ -33,13 +33,51 @@ AI Provider
 3. The request protocol is detected from the endpoint.
 4. Configured provider/model/key combinations are expanded into independent targets.
 5. Targets incompatible with the client protocol are excluded.
-6. If the requested model exists, matching targets are preferred.
-7. Health ranking chooses the available targets.
-8. The current session's successful target is preferred.
+6. The request's pool (TEXT or VISION) is decided; only that pool's targets are used, never the other.
+7. A route plan is built (see "Priority and Key-Scoped Fallback"): optional priority targets first, then Provider -> Key -> Models.
+8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped.
 9. The router calls targets sequentially.
 10. Retryable failures put the exact target into cooldown and move routing forward.
 11. A successful target becomes the session's sticky target.
 12. The upstream response is streamed back to the client.
+
+## Priority and Key-Scoped Fallback
+
+Implemented in `src/routing-plan.js` (plan) and `withFallback` in
+`src/router.js` (walker). The same code serves both pools; only the target list
+differs.
+
+```text
+REQUEST -> TEXT pool | VISION pool (never mixed)
+  PRIORITY phase   PRIORITY_MODELS entries, exact env order (optional)
+  NORMAL fallback  Provider -> Key -> Models -> next Key -> Models -> next Provider
+```
+
+- `PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3` (or `TEXT_PRIORITY_MODELS` /
+  `VISION_PRIORITY_MODELS`, which override it for their pool). Empty = no
+  priority phase and no extra work. A priority entry expands to that
+  provider+model on each of the provider's keys, in key order.
+- Normal fallback is **not** flattened. For every key, the provider's models run
+  in configured order before the next key starts, and each key restarts at its
+  first model (`K1: G1,G2,G3,G4` then `K2: G1,G2,G3,G4`). A requested model that
+  the provider has leads that provider's per-key chain, and providers that serve
+  it are tried first.
+- A per-request `attempted` set keyed by the health id (pool + provider + model +
+  keyIndex) means a target is never called twice in one request. Repeats are
+  recorded as `skipped` rows (`already_attempted`), cooling targets as
+  `skipped` (`cooldown`); neither counts as an upstream attempt.
+- Health is the existing `HealthRegistry`: it only decides eligibility (cooldown,
+  default 15 minutes) and no longer reorders the plan. Priority has no state of
+  its own, so a failed priority target is tried again on the next request once
+  its cooldown has elapsed.
+- Precedence: pin (strict, no priority) > priority > sticky session > hierarchy.
+  The sticky target is promoted to the head of the normal phase only within the
+  first provider tier, so it can neither beat priority nor beat an available
+  exact-model provider.
+- Every real attempt is logged with its `phase` (`priority` | `fallback`); no
+  keys, headers, prompts or bodies are stored.
+- Fallback is strictly sequential, with no cap on the number of attempts other
+  than the plan itself.
 
 ## Supported Endpoints
 

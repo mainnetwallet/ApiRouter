@@ -93,8 +93,12 @@ export async function withFallback(
   retryableStatus = DEFAULT_RETRY_STATUS_CODES,
   session = new RouteSession(),
   health = new HealthRegistry(),
-  { groups = null } = {}
+  { groups = null, plan: steps = null, onSkip = null } = {}
 ) {
+  if (Array.isArray(steps)) {
+    return walkPlan(steps, invoke, retryableStatus, session, health, onSkip);
+  }
+
   const plan = (Array.isArray(groups) && groups.length > 0 ? groups : [targets])
     .filter((group) => Array.isArray(group) && group.length > 0);
 
@@ -186,6 +190,96 @@ export async function withFallback(
   const err = new Error(allBadRequest
     ? failures[failures.length - 1].message
     : "All routing targets failed");
+  err.status = allBadRequest ? 400 : 502;
+  err.failures = failures;
+  throw err;
+}
+
+/**
+ * Walks an explicit, already-ordered plan (see routing-plan.js) sequentially.
+ *
+ * The order is authoritative: nothing is re-ranked, so a key's models run in
+ * configured order and the next key restarts at its own first model. Per
+ * request, a target (pool + provider + model + keyIndex, i.e. the health id)
+ * is invoked at most once; a repeat is reported through `onSkip`, never called.
+ * Targets cooling down in the shared health registry are skipped the same way.
+ * Priority is not remembered: a failure only affects this request and whatever
+ * cooldown the health registry itself decides on.
+ */
+async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip) {
+  if (steps.length === 0) {
+    const err = new Error("No fully configured routing targets available");
+    err.status = 503;
+    throw err;
+  }
+
+  const attempted = new Set();
+  const cooldownReported = new Set();
+  const failures = [];
+  const allTargets = steps.map((step) => step.target);
+  let eligible = 0;
+
+  const skip = (step, reason) => {
+    if (typeof onSkip === "function") onSkip(step.target, { phase: step.phase, reason });
+  };
+
+  for (const step of steps) {
+    const target = step.target;
+    const id = health.key(target);
+
+    if (attempted.has(id)) {
+      skip(step, "already_attempted");
+      continue;
+    }
+    if (!health.isAvailable(target)) {
+      // A priority target in cooldown is skipped here; the normal phase will
+      // meet it again and skip it for the same reason, which is not a retry.
+      if (!cooldownReported.has(id)) {
+        cooldownReported.add(id);
+        skip(step, "cooldown");
+      }
+      continue;
+    }
+
+    eligible += 1;
+    attempted.add(id);
+    const startedAt = Date.now();
+
+    try {
+      const result = await invoke(target, { phase: step.phase });
+      health.markSuccess(target, { latencyMs: Date.now() - startedAt });
+      session.saveSuccess(target, health);
+      return result;
+    } catch (error) {
+      const status = Number(error?.status || 0);
+      failures.push({ target, status, message: error?.message || String(error) });
+
+      if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) throw error;
+      if (error?.skipCooldown) continue;
+
+      health.markFailure(target, status, status === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : {});
+
+      if (KEY_LEVEL_STATUS_CODES.has(status)) {
+        const reason = `${status} on ${target.model} applies to the whole key`;
+        for (const sibling of allTargets) {
+          if (sibling.provider !== target.provider || sibling.keyIndex !== target.keyIndex) continue;
+          if ((sibling.pool ?? "text") !== (target.pool ?? "text")) continue;
+          if (health.key(sibling) === id) continue;
+          health.markFailure(sibling, status, { reason });
+        }
+      }
+    }
+  }
+
+  if (eligible === 0) {
+    const err = new Error("No routing targets are currently available");
+    err.status = 503;
+    err.failures = [];
+    throw err;
+  }
+
+  const allBadRequest = failures.length > 0 && failures.every((failure) => failure.status === 400);
+  const err = new Error(allBadRequest ? failures[failures.length - 1].message : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;
   err.failures = failures;
   throw err;

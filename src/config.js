@@ -1,4 +1,5 @@
 import { providerProtocols } from "./adapters.js";
+import { readPriority } from "./routing-plan.js";
 
 const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529];
 /**
@@ -105,6 +106,8 @@ export function loadConfig(env = process.env) {
     maxBodyBytes: Math.max(1, Number(env.MAX_REQUEST_BODY_MB || 32)) * 1024 * 1024,
     connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
     retryableStatus: new Set(retryableValues),
+    // Priority is optional: an empty list means no priority phase at all.
+    priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,
     visionProviders
   };

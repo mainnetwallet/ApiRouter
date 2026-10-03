@@ -304,7 +304,7 @@ export function classifyFailure(entry) {
   if (status === 503) return "unavailable";
   if (status === 502 || status === 500) return "provider error";
 
-  const lastAttemptError = entry?.attempts?.at(-1)?.errorMessage;
+  const lastAttemptError = [...(entry?.attempts ?? [])].reverse().find((a) => !a.skipped)?.errorMessage;
   const attemptMessage = String(lastAttemptError ?? "").toLowerCase();
   const haystack = message || attemptMessage;
   if (haystack.includes("timed out")) return "timeout";

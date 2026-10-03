@@ -23,7 +23,8 @@ import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId, is
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
-import { selectTargetsForProtocol, fallbackGroups, pinTargets } from "./observability/route-select.js";
+import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
+import { buildRoutePlan } from "./routing-plan.js";
 import { selectPool } from "./vision.js";
 import {
   bridgeProtocol,
@@ -254,6 +255,8 @@ const pinnedHealth = Object.create(healthRegistry);
 pinnedHealth.rank = (group) => [...group];
 pinnedHealth.isAvailable = () => true;
 
+const lastRealAttempt = (list) => [...list].reverse().find((item) => !item.skipped);
+
 async function proxy(req, res, protocol, pathname) {
   const receivedAt = Date.now();
   const attempts = [];
@@ -395,10 +398,15 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "chat"
       ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true }
       : null;
-  const routeTargets = selection.selected;
-  // The requested model's targets are walked to exhaustion before any other
-  // model is considered; ranking only orders the targets inside a group.
-  const routeGroups = fallbackGroups(selection);
+  // Priority -> Provider -> Key -> Models -> next Key -> next Provider, built
+  // from this request's own pool only. A pinned request is strict and never
+  // gets a priority phase.
+  const routePlan = buildRoutePlan({
+    targets: selection.selected,
+    requestedModel,
+    priority: pinned.pinned ? [] : (config.priority?.[pool] ?? []),
+    stickyTargetId: sessionInfo.state.session.targetId
+  });
 
   if (selection.compatible.length === 0) {
     const noRouteMessage = pool === VISION_POOL
@@ -422,8 +430,8 @@ async function proxy(req, res, protocol, pathname) {
 
   try {
     const result = await withFallback(
-      routeTargets,
-      async (target) => {
+      selection.selected,
+      async (target, { phase } = {}) => {
         const upstreamProtocol = bridged
           ? upstreamProtocolFor(target)
           : protocol;
@@ -463,6 +471,7 @@ async function proxy(req, res, protocol, pathname) {
         const attempt = (ok, status, errorMessage) => {
           recorded = true;
           attempts.push({
+            phase: phase ?? null,
             provider: target.provider,
             model: target.model,
             keyIndex: target.keyIndex,
@@ -528,7 +537,28 @@ async function proxy(req, res, protocol, pathname) {
       config.retryableStatus,
       sessionInfo.state.session,
       pinned.pinned ? pinnedHealth : healthRegistry,
-      { groups: routeGroups }
+      {
+        plan: routePlan.steps,
+        // A skipped target never reaches the network, but it is still shown
+        // in the timeline so the walk is explained, not guessed at.
+        onSkip: (target, { phase, reason }) => {
+          attempts.push({
+            phase,
+            provider: target.provider,
+            model: target.model,
+            keyIndex: target.keyIndex,
+            protocol: null,
+            ok: false,
+            skipped: true,
+            skipReason: reason,
+            status: null,
+            startedAt: Date.now(),
+            latencyMs: 0,
+            errorMessage: null
+          });
+          progressRequest(liveSeq, { attempts, inflight: null });
+        }
+      }
     );
 
     const sessionId = sessionInfo.id;
@@ -678,9 +708,9 @@ async function proxy(req, res, protocol, pathname) {
       requestedModel,
       autoRouted: !selection.modelMatched,
       attempts,
-      finalProvider: attempts.at(-1)?.provider ?? null,
-      finalModel: attempts.at(-1)?.model ?? null,
-      finalKeyIndex: attempts.at(-1)?.keyIndex ?? null,
+      finalProvider: lastRealAttempt(attempts)?.provider ?? null,
+      finalModel: lastRealAttempt(attempts)?.model ?? null,
+      finalKeyIndex: lastRealAttempt(attempts)?.keyIndex ?? null,
       httpStatus: error.status || 502,
       latencyMs: Date.now() - receivedAt,
       totalMs: Date.now() - receivedAt,

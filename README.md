@@ -248,6 +248,24 @@ HTTP 400 from a provider also falls back to the next target. A generic 400
 (unsupported parameter, schema quirk) does not cool the target down, and if
 every target answers 400 the client receives the 400 instead of a 502.
 
+## Priority Routing
+
+```env
+PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3
+```
+
+Priority targets are tried first, in exactly this order (providers may be
+interleaved), and the first success stops the request. **Empty or unset means no
+priority phase**: routing goes directly to the normal fallback. Use
+`TEXT_PRIORITY_MODELS` / `VISION_PRIORITY_MODELS` to give each pool its own list;
+entries only match the pool being routed, so there is never text-to-vision or
+vision-to-text fallback. Pinned requests ignore priority.
+
+After priority, the normal fallback is key-scoped: **Provider -> Key -> Models ->
+next Key -> Models -> next Provider**. Each key restarts at its provider's first
+model, and a target already tried in the same request is skipped. See
+`Architecture.md` for details.
+
 ## Endpoints
 
 ### Gateway (public)
