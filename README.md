@@ -87,6 +87,18 @@ of a base URL. Nothing is shared with the normal `<PROVIDER>_API_KEYS` /
 - Requests pinned with the `x-multi-ai-pin-*` headers are matched inside the pool
   the request belongs to (vision pool for images, normal pool otherwise).
 
+### Vercel AI Gateway
+
+- Provider ID: `vercel`, OpenAI-compatible (`https://ai-gateway.vercel.sh/v1`).
+- Text pool: `VERCEL_API_KEYS`, `VERCEL_BASE_URL`, `VERCEL_MODELS`.
+- Separate vision pool: `VERCEL_VISION_API_KEYS`, `VERCEL_VISION_BASE_URL`, `VERCEL_VISION_MODELS`.
+- Several keys (`key1,key2`) each become their own routable target.
+- Goes through the normal fallback, health monitoring, streaming and pin headers
+  (`x-multi-ai-pin-provider: vercel`). Model ids are sent exactly as configured.
+- The model list is what you configure; the router does not discover models.
+
+Free-model availability and quotas are controlled by Vercel and can change.
+
 Retryable statuses:
 
 ```text

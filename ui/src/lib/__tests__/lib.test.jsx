@@ -73,6 +73,7 @@ describe("format", () => {
     expect(protocolLabel("anthropic")).toBe("Anthropic Messages");
     expect(protocolLabel("gemini")).toBe("Gemini generateContent");
     expect(providerLabel("zai")).toBe("Z.ai");
+    expect(providerLabel("vercel")).toBe("Vercel AI Gateway");
     expect(providerLabel(null)).toBe(EMPTY);
   });
 
