@@ -375,7 +375,7 @@ test("a hung streaming upstream fails over after STREAM_CONNECT_TIMEOUT_MS, not 
   assert.ok(Date.now() - startedAt < 5000, "should give up well before REQUEST_TIMEOUT_MS");
 });
 
-test("MAX_REQUEST_BODY_MB controls the largest accepted request body", async (t) => {
+test("the router imposes no request body size limit, even with MAX_REQUEST_BODY_MB set", async (t) => {
   const { router } = await withRig(
     t,
     () => ({ status: 200, body: { ok: true } }),
@@ -389,7 +389,7 @@ test("MAX_REQUEST_BODY_MB controls the largest accepted request body", async (t)
 
   const big = "x".repeat(2 * 1024 * 1024);
   const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [{ role: "user", content: big }] }));
-  assert.equal(res.status, 413);
+  assert.notEqual(res.status, 413);
 });
 
 test("an upstream 413 (provider size/TPM limit) falls back to the next target", async (t) => {
@@ -582,7 +582,7 @@ test("an empty body is accepted", async (t) => {
   assert.equal(upstream.apiRequests.length, 1);
 });
 
-test("an oversized body is rejected with 413", async (t) => {
+test("a very large body (11 MB) is forwarded, not rejected with 413", async (t) => {
   const { upstream, router } = await withRig(
     t,
     () => ok(),
@@ -599,8 +599,8 @@ test("an oversized body is rejected with 413", async (t) => {
     postJson({ model: "m", messages: [{ role: "user", content: "x".repeat(11 * 1024 * 1024) }] })
   );
 
-  assert.equal(res.status, 413);
-  assert.equal(upstream.apiRequests.length, 0);
+  assert.equal(res.status, 200);
+  assert.equal(upstream.apiRequests.length, 1);
 });
 
 test("streamed upstream responses arrive intact", async (t) => {

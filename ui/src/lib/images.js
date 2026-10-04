@@ -5,9 +5,8 @@
  * the chosen client protocol expects (see `buildRequestBody`). Nothing is
  * uploaded anywhere else.
  *
- * The limits keep a request well under the gateway's body cap
- * (MAX_REQUEST_BODY_MB, 32 MB by default): base64 inflates data by about a
- * third, so 4 images of at most 5 MB each stay near 27 MB.
+ * The gateway has no request-size limit of its own; these limits only keep the
+ * Playground's requests a reasonable size (base64 inflates data by about a third).
  */
 
 export const MAX_IMAGES = 4;

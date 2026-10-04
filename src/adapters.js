@@ -67,18 +67,10 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
 
 export function createSessionId() { return randomUUID(); }
 
-export async function readJsonBody(req, maxBytes = 10 * 1024 * 1024) {
+export async function readJsonBody(req) {
+  // No size limit of our own: the whole body is read as sent.
   const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > maxBytes) {
-      const error = new Error("Request body too large");
-      error.status = 413;
-      throw error;
-    }
-    chunks.push(chunk);
-  }
+  for await (const chunk of req) chunks.push(chunk);
   if (chunks.length === 0) return {};
   let parsed;
   try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }

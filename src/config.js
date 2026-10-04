@@ -118,8 +118,6 @@ export function loadConfig(env = process.env) {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
     port: readNumber(env, "PORT", 8788, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
     timeoutMs: readNumber(env, "REQUEST_TIMEOUT_MS", 120000, { min: 1, expected: "a positive integer" }),
-    // Fractions are allowed; as before, anything under 1 MB is raised to 1 MB.
-    maxBodyBytes: Math.max(1, readNumber(env, "MAX_REQUEST_BODY_MB", 32, { integer: false, min: Number.MIN_VALUE, expected: "a positive number" })) * 1024 * 1024,
     // 0 is meaningful here: server.js then uses the full request timeout for streams.
     connectTimeoutMs: readNumber(env, "STREAM_CONNECT_TIMEOUT_MS", 30000, { min: 0, expected: "a non-negative integer (0 disables the separate connect timeout)" }),
     retryableStatus: new Set(retryableValues),

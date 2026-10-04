@@ -7,23 +7,20 @@ import { loadConfig } from "../src/config.js";
 import { startMockUpstream } from "../test-helpers/mock-upstream.js";
 import { startRouter, postJson } from "../test-helpers/router-harness.js";
 
-// Numeric env settings must fail fast. An invalid value used to become NaN
-// (`size > NaN` is never true, so MAX_REQUEST_BODY_MB=abc removed the body cap)
-// or 0 (REQUEST_TIMEOUT_MS=0 aborted every upstream call immediately).
+// Numeric env settings must fail fast. An invalid value used to become NaN or
+// 0 (REQUEST_TIMEOUT_MS=0 aborted every upstream call immediately).
 
 test("valid numeric env values are parsed exactly as before", () => {
-  const c = loadConfig({ REQUEST_TIMEOUT_MS: "30000", MAX_REQUEST_BODY_MB: "10", STREAM_CONNECT_TIMEOUT_MS: "500", PORT: "9000" });
+  const c = loadConfig({ REQUEST_TIMEOUT_MS: "30000", STREAM_CONNECT_TIMEOUT_MS: "500", PORT: "9000" });
   assert.equal(c.timeoutMs, 30000);
-  assert.equal(c.maxBodyBytes, 10 * 1024 * 1024);
   assert.equal(c.connectTimeoutMs, 500);
   assert.equal(c.port, 9000);
 });
 
 test("unset or empty numeric env values keep their defaults", () => {
-  for (const env of [{}, { REQUEST_TIMEOUT_MS: "", MAX_REQUEST_BODY_MB: "  ", STREAM_CONNECT_TIMEOUT_MS: "", PORT: "" }]) {
+  for (const env of [{}, { REQUEST_TIMEOUT_MS: "", STREAM_CONNECT_TIMEOUT_MS: "", PORT: "" }]) {
     const c = loadConfig(env);
     assert.equal(c.timeoutMs, 120000);
-    assert.equal(c.maxBodyBytes, 32 * 1024 * 1024);
     assert.equal(c.connectTimeoutMs, 30000);
     assert.equal(c.port, 8788);
   }
@@ -35,14 +32,11 @@ test("REQUEST_TIMEOUT_MS rejects non-numeric, zero, negative and fractional valu
   }
 });
 
-test("MAX_REQUEST_BODY_MB rejects non-numeric, zero, negative and infinite values", () => {
-  for (const bad of ["abc", "0", "-3", "NaN", "Infinity", "10MB"]) {
-    assert.throws(() => loadConfig({ MAX_REQUEST_BODY_MB: bad }), /Invalid MAX_REQUEST_BODY_MB: expected a positive number/, bad);
+test("there is no request body size setting: MAX_REQUEST_BODY_MB is ignored", () => {
+  for (const value of ["1", "abc", "0", "-3"]) {
+    const c = loadConfig({ MAX_REQUEST_BODY_MB: value });
+    assert.equal("maxBodyBytes" in c, false, value);
   }
-  // Previously accepted values keep their meaning, including the 1 MB floor.
-  assert.equal(loadConfig({ MAX_REQUEST_BODY_MB: "1" }).maxBodyBytes, 1024 * 1024);
-  assert.equal(loadConfig({ MAX_REQUEST_BODY_MB: "0.5" }).maxBodyBytes, 1024 * 1024);
-  assert.equal(loadConfig({ MAX_REQUEST_BODY_MB: "2.5" }).maxBodyBytes, 2.5 * 1024 * 1024);
 });
 
 test("STREAM_CONNECT_TIMEOUT_MS and PORT are validated; 0 stays a meaningful value", () => {
@@ -83,7 +77,7 @@ function bootWith(env) {
   });
 }
 
-for (const [name, value] of [["REQUEST_TIMEOUT_MS", "abc"], ["MAX_REQUEST_BODY_MB", "abc"], ["REQUEST_TIMEOUT_MS", "0"]]) {
+for (const [name, value] of [["REQUEST_TIMEOUT_MS", "abc"], ["REQUEST_TIMEOUT_MS", "0"]]) {
   test(`startup with ${name}=${value} exits 1 with a clear message and never listens`, async () => {
     const { code, stdout, stderr } = await bootWith({ [name]: value });
     assert.equal(code, 1);
@@ -93,7 +87,7 @@ for (const [name, value] of [["REQUEST_TIMEOUT_MS", "abc"], ["MAX_REQUEST_BODY_M
   });
 }
 
-test("valid REQUEST_TIMEOUT_MS=30000 and MAX_REQUEST_BODY_MB=10 start normally and still enforce the body limit", async (t) => {
+test("valid REQUEST_TIMEOUT_MS=30000 starts normally and a large body is not rejected", async (t) => {
   const upstream = await startMockUpstream(() => ({ status: 200, body: {
     id: "c1", object: "chat.completion", created: 0, model: "u",
     choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
@@ -109,5 +103,5 @@ test("valid REQUEST_TIMEOUT_MS=30000 and MAX_REQUEST_BODY_MB=10 start normally a
   assert.equal(ok.status, 200);
 
   const big = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [{ role: "user", content: "x".repeat(2 * 1024 * 1024) }] }));
-  assert.equal(big.status, 413);
+  assert.equal(big.status, 200);
 });

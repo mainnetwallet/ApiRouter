@@ -42,7 +42,7 @@ const HTTP_STATUS = {
   404: { category: CATEGORY.MODEL, label: "Not found", retryable: true, hint: "The endpoint or model does not exist at this provider." },
   408: { category: CATEGORY.TIMEOUT, label: "Request timeout", retryable: true, hint: "The provider did not respond in time. Raising REQUEST_TIMEOUT_MS may help." },
   409: { category: CATEGORY.COOLDOWN_CLIENT, label: "Conflict", retryable: true, hint: "Another operation of the same kind is already in progress." },
-  413: { category: CATEGORY.INVALID, label: "Payload too large", retryable: false, hint: "The request body exceeded the gateway limit of 10 MB." },
+  413: { category: CATEGORY.INVALID, label: "Payload too large", retryable: false, hint: "The provider rejected the request as too large for this model or tier." },
   429: { category: CATEGORY.RATE_LIMIT, label: "Rate limited", retryable: true, hint: "The provider is throttling this key. The target enters cooldown and routing moves on." },
   500: { category: CATEGORY.PROVIDER, label: "Provider error", retryable: true, hint: "The provider failed internally. This is not a problem with the request." },
   501: { category: CATEGORY.PROVIDER, label: "Not implemented", retryable: true, hint: "The provider does not implement this operation." },

@@ -297,7 +297,7 @@ async function proxy(req, res, protocol, pathname) {
   }
 
   let body;
-  try { body = await readJsonBody(req, config.maxBodyBytes); }
+  try { body = await readJsonBody(req); }
   catch (error) {
     recordRequest({
       pendingSeq: liveSeq,
@@ -535,7 +535,6 @@ async function proxy(req, res, protocol, pathname) {
             // An upstream 413 means this provider/tier cannot take a request of
             // this size (e.g. a small tokens-per-minute cap). Another provider
             // may well accept it, so fall back instead of failing the request.
-            // (The router's own body-limit 413 is raised before routing starts.)
             if (upstream.status === 413) error.retryable = true;
             // A 400 that complains about the model (bad/unknown/unsupported model
             // id) is a problem with this provider's configuration, not with the
