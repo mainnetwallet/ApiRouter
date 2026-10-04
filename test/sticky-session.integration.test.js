@@ -113,14 +113,18 @@ test("4: a different session never inherits another session's sticky target", as
   assert.ok(!phases(await lastRequest(router)).some((p) => p.startsWith("sticky:")));
 });
 
-test("4b: a request without a session id gets a fresh session each time (no shared sticky)", async (t) => {
+test("4b: requests without a session id share one default sticky session; an explicit id stays isolated", async (t) => {
   const down = new Set(["groq/A1"]);
-  const { router } = await rig(t, (p, m) => (down.has(`${p}/${m}`) ? fail(503) : ok()), { TEXT_PRIORITY_MODELS: "" });
-  await send(router);                                    // anonymous request establishes nothing reusable
+  const { router, calls } = await rig(t, (p, m) => (down.has(`${p}/${m}`) ? fail(503) : ok()), { TEXT_PRIORITY_MODELS: "" });
+  await send(router);                                    // anonymous: groq/A1 down -> groq/A2/a1 succeeds -> default session sticky
   down.clear();
-  await send(router);
-  const entry = await lastRequest(router);
-  assert.ok(!phases(entry).some((p) => p.startsWith("sticky:")));
+  calls.length = 0;
+  await send(router);                                    // anonymous again: sticky leads, no priority/fallback needed
+  assert.deepEqual(calls, ["groq/A2/a1"]);
+  assert.equal(phases(await lastRequest(router))[0], "sticky:groq/A2/0:200");
+  calls.length = 0;
+  await send(router, sid("someone-else"));               // another explicit session never inherits it
+  assert.ok(!phases(await lastRequest(router)).some((p) => p.startsWith("sticky:")), "no sticky phase for another session");
 });
 
 test("response x-multi-ai-session-id, reused by the client, activates sticky on the next request", async (t) => {

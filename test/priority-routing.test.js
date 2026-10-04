@@ -47,7 +47,13 @@ test("readPriority: each pool reads only its own list (TEXT_ / VISION_PRIORITY_M
   assert.deepEqual(readPriority(env, "text"), [{ provider: "gemini", model: "G1" }]);
   assert.deepEqual(readPriority(env, "vision"), [{ provider: "groq", model: "GR1" }]);
   assert.deepEqual(readPriority({}, "text"), []);
-  assert.deepEqual(loadConfig({ TEXT_PRIORITY_MODELS: "gemini/G1" }).priority.vision, []);
+  // Empty/unset VISION_PRIORITY_MODELS inherits TEXT_PRIORITY_MODELS (same models, same order);
+  // a configured VISION list wins. Text never reads the vision list.
+  assert.deepEqual(readPriority({ TEXT_PRIORITY_MODELS: "gemini/G1,groq/GR2" }, "vision"), readPriority({ TEXT_PRIORITY_MODELS: "gemini/G1,groq/GR2" }, "text"));
+  assert.deepEqual(readPriority({ TEXT_PRIORITY_MODELS: "gemini/G1", VISION_PRIORITY_MODELS: "  " }, "vision"), [{ provider: "gemini", model: "G1" }]);
+  assert.deepEqual(readPriority({ VISION_PRIORITY_MODELS: "groq/GR1" }, "text"), []);
+  assert.deepEqual(readPriority({}, "vision"), []);
+  assert.deepEqual(loadConfig({ TEXT_PRIORITY_MODELS: "gemini/G1" }).priority.vision, [{ provider: "gemini", model: "G1" }]);
   assert.deepEqual(loadConfig({ PRIORITY_MODELS: "gemini/G1" }).priority.text, []);
 });
 
@@ -182,7 +188,11 @@ test("REGRESSION: sticky is a separate leading phase and never edits the normal 
     assert.deepEqual(normalOf({ stickyTargetId: health.key(target) }), baseline, "normal list untouched");
     assert.equal(plan.steps[0].phase, "sticky");
     assert.equal(label(plan.steps[0].target), label(target));
-    assert.equal(plan.steps[1].phase, "priority", "priority follows sticky");
+    // The sticky model's own other keys come right after sticky; priority follows them.
+    const own = plan.steps.slice(1).filter((s) => s.target.provider === target.provider && s.target.model === target.model && s.phase !== "fallback");
+    assert.equal(own.length, 2, "the other two keys of the sticky model directly follow sticky");
+    assert.deepEqual(plan.steps.slice(1, 3).map((s) => label(s.target)), own.map((s) => label(s.target)));
+    assert.equal(plan.steps[3].phase, "priority", "priority follows the sticky model's keys");
   }
   // Stale ids, another pool's id and unknown ids add no sticky phase.
   for (const id of ["vision:gemini:G1:key-0", "ghost:nothing:key-9", null]) {
@@ -219,8 +229,8 @@ test("routing preview shows the plan the proxy walks, with phases", async () => 
   assert.deepEqual(plain.fallbackOrder.map((c) => `${c.phase}:${c.provider}/${c.model}/k${c.keyIndex + 1}`), live.calls);
 
   const withSticky = describeRouting({ targets, config, health, protocol: "openai-chat", model: "", stickyTargetId: stickyId });
-  assert.deepEqual(withSticky.fallbackOrder.slice(0, 3).map((c) => `${c.phase}:${c.provider}/${c.model}/${c.keyIndex}`), [
-    "sticky:gemini/G4/2", "priority:groq/GR2/0", "priority:groq/GR2/1"
+  assert.deepEqual(withSticky.fallbackOrder.slice(0, 4).map((c) => `${c.phase}:${c.provider}/${c.model}/${c.keyIndex}`), [
+    "sticky:gemini/G4/2", "sticky:gemini/G4/0", "sticky:gemini/G4/1", "priority:groq/GR2/0"
   ]);
 });
 
@@ -431,12 +441,14 @@ test("C: sticky fails -> priority 1 -> priority 2 -> normal fallback, with no re
   const session = new RouteSession();
   stick(session, pick("groq", "GR3"));
   const { calls, skips } = await request(session, { priority: PRIO, fail: () => true });
-  assert.deepEqual(calls.slice(0, 7), [
+  assert.deepEqual(calls.slice(0, 9), [
     "sticky:groq/GR3/k1",
+    // the sticky MODEL's remaining keys come before any priority entry
+    "sticky:groq/GR3/k2", "sticky:groq/GR3/k3",
     "priority:gemini/G1/k1", "priority:gemini/G1/k2", "priority:gemini/G1/k3",
     "priority:groq/GR2/k1", "priority:groq/GR2/k2", "priority:groq/GR2/k3"
   ]);
-  assert.equal(phaseOf(calls[7]), "fallback");
+  assert.equal(phaseOf(calls[9]), "fallback");
   assert.equal(calls.length, 24, "every target exactly once");
   assert.equal(new Set(calls.map((c) => c.split(":")[1])).size, 24);
   assert.ok(skips.includes("fallback:groq/GR3/k1:already_attempted"), "failed sticky is not retried in the same request");
@@ -457,16 +469,16 @@ test("D: a new success becomes sticky with a fresh 15-minute TTL", async () => {
   assert.ok(session.expiresAt - Date.now() <= 15 * MIN && session.expiresAt - Date.now() > 15 * MIN - 5000);
 });
 
-test("E: a sticky target in cooldown is not called; priority then normal run", async () => {
+test("E: a sticky key in cooldown is not called; the sticky model's next key runs, then priority", async () => {
   const session = new RouteSession();
   const health = new HealthRegistry({ cooldownMs: 900000 });
   const sticky = pick("groq", "GR3");
   stick(session, sticky, Date.now());
   health.markFailure(sticky, 429, {}, Date.now());
   const { calls, skips } = await request(session, { health, priority: PRIO, now: Date.now() });
-  assert.deepEqual(calls, ["priority:gemini/G1/k1"]);
+  assert.deepEqual(calls, ["sticky:groq/GR3/k2"]);
   assert.ok(skips.includes("sticky:groq/GR3/k1:cooldown"));
-  assert.ok(!calls.some((c) => c.includes("groq/GR3")));
+  assert.ok(!calls.some((c) => c.includes("groq/GR3/k1")));
 });
 
 test("F: normal fallback order is Provider -> Key -> Model, unchanged by a sticky phase", async () => {
@@ -481,8 +493,9 @@ test("F: normal fallback order is Provider -> Key -> Model, unchanged by a stick
   stick(session, targets.find((t) => t.provider === "a" && t.model === "M2" && t.keyIndex === 1));
   const sticky = await request(session, { targets, fail: () => true });
   assert.equal(sticky.calls[0], "sticky:a/M2/k2");
-  // The remaining order is the same list, minus the one already attempted.
-  assert.deepEqual(sticky.calls.slice(1).map((c) => c.split(":")[1]), expected.filter((x) => x !== "a/M2/k2"));
+  // The sticky model's other key is next; the rest is the same normal list, minus what was already attempted.
+  assert.equal(sticky.calls[1], "sticky:a/M2/k1");
+  assert.deepEqual(sticky.calls.slice(2).map((c) => c.split(":")[1]), expected.filter((x) => x !== "a/M2/k2" && x !== "a/M2/k1"));
 });
 
 test("G: text and vision stickies are isolated", async () => {

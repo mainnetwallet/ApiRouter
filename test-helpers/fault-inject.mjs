@@ -1,11 +1,14 @@
 // Test-only preload (loaded with NODE_OPTIONS=--import). When MULTIAI_TEST_FAULT=session-id it makes
-// crypto.randomUUID throw, which the router calls while minting a session id for a request that
-// carries none. That is a genuine server-side fault raised inside request handling, so it proves
-// the top-level error boundary. Inert unless the variable is set.
-import crypto, { } from "node:crypto";
-import { syncBuiltinESMExports } from "node:module";
-
+// the session-store lookup for the shared DEFAULT session (a request that carries no
+// x-multi-ai-session-id header) throw. That is a genuine server-side fault raised inside request
+// handling, so it proves the top-level error boundary. A request with an explicit session id never
+// touches that key. Inert unless the variable is set.
 if (process.env.MULTIAI_TEST_FAULT === "session-id") {
-  crypto.randomUUID = () => { throw new Error("injected fault (Bearer sk-secretsecretsecret)"); };
-  syncBuiltinESMExports();
+  const originalGet = Map.prototype.get;
+  Map.prototype.get = function patchedGet(key) {
+    if (typeof key === "string" && key.endsWith(":default") && key.startsWith("openai-chat:")) {
+      throw new Error("injected fault (Bearer sk-secretsecretsecret)");
+    }
+    return originalGet.call(this, key);
+  };
 }

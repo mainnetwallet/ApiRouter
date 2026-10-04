@@ -13,7 +13,8 @@ import { targetId } from "./health.js";
  *   FALLBACK phase   Provider -> Key -> Models (config order) -> next Key
  *                    -> next Provider. Each key restarts at its own first model.
  *
- *   STICKY phase    the session's last good target, only while its TTL is valid
+ *   STICKY phase    the session's last good target, then the OTHER keys of that same
+ *                   provider/model (key order), only while its TTL is valid
  *
  * The normal fallback list is fully deterministic. Health, latency and
  * previous successes never reorder it. Sticky is a separate leading phase and
@@ -57,13 +58,18 @@ export function parsePriorityModels(value) {
 
 /**
  * Priority list for one pool: TEXT_PRIORITY_MODELS for the text pool,
- * VISION_PRIORITY_MODELS for the vision pool. An entry only ever matches
- * targets of the pool being routed, so it can never pull a request across
- * pools.
+ * VISION_PRIORITY_MODELS for the vision pool. An empty/unset
+ * VISION_PRIORITY_MODELS inherits TEXT_PRIORITY_MODELS, so both pools use the
+ * same priority models in the same order unless vision is configured on its
+ * own. An entry only ever matches targets of the pool being routed, so it can
+ * never pull a request across pools (a text-only entry matches nothing in the
+ * vision pool and is simply absent there).
  */
 export function readPriority(env, pool = "text") {
-  const specific = pool === "vision" ? env.VISION_PRIORITY_MODELS : env.TEXT_PRIORITY_MODELS;
-  return parsePriorityModels(specific);
+  const text = parsePriorityModels(env.TEXT_PRIORITY_MODELS);
+  if (pool !== "vision") return text;
+  const vision = parsePriorityModels(env.VISION_PRIORITY_MODELS);
+  return vision.length > 0 ? vision : text;
 }
 
 /** Providers in first-appearance (configuration) order, then keys, then models. */
@@ -165,8 +171,30 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
     if (candidate && (!modelConfigured || candidate.model === named)) sticky = candidate;
   }
 
+  // The sticky model is exhausted before anything else is tried: after the
+  // sticky key, the remaining keys of the SAME provider/model follow in key
+  // order. Priority and normal fallback only start once the whole sticky model
+  // has failed. Their later appearances are skipped by the walker as already
+  // attempted; the priority and normal lists themselves are never reordered.
+  const stickyGroup = sticky
+    ? all
+      .filter((target) => target.provider === sticky.provider && target.model === sticky.model && targetId(target) !== targetId(sticky))
+      .sort((a, b) => a.keyIndex - b.keyIndex)
+    : [];
+
+  const stickyIsPriority = Boolean(sticky) && priorityEntries.some(({ target }) => target.provider === sticky.provider && target.model === sticky.model);
+
   const steps = [
     ...(sticky ? [{ target: sticky, phase: PHASES.STICKY }] : []),
+    // Labelled for what they are in the timeline: the other keys of a configured
+    // priority entry are priority attempts; for any other sticky model they are
+    // still sticky-model attempts, so the "fallback" steps stay exactly the
+    // untouched normal list.
+    ...stickyGroup.map((target) => ({
+      target,
+      phase: stickyIsPriority ? PHASES.PRIORITY : PHASES.STICKY,
+      group: `${sticky.provider}/${sticky.model}`
+    })),
     ...priorityEntries.map(({ target, group }) => ({ target, phase: PHASES.PRIORITY, group })),
     ...normal.map((target) => ({ target, phase: PHASES.FALLBACK }))
   ];

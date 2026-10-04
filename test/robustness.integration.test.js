@@ -139,7 +139,7 @@ test("an unexpected server-side exception becomes a JSON 500, is logged without 
   const preload = fileURLToPath(new URL("../test-helpers/fault-inject.mjs", import.meta.url));
   const { router, isAlive } = await boot(t, { NODE_OPTIONS: `--import ${preload}`, MULTIAI_TEST_FAULT: "session-id" });
 
-  // No session header => the router mints one => the injected fault throws inside request handling.
+  // No session header => the router looks up the shared default session => the injected fault throws inside request handling.
   const res = await router.request("/v1/chat/completions", postJson(validBody));
   assert.equal(res.status, 500);
   const json = await res.json();

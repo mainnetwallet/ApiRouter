@@ -19,7 +19,7 @@ import {
 } from "./health.js";
 import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
 import { RouteSession, SessionStore, withFallback } from "./router.js";
-import { clientProtocol, buildUpstreamRequest, readJsonBody, createSessionId, isGeminiStream } from "./adapters.js";
+import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
@@ -158,9 +158,16 @@ function authorized(req) {
   return Boolean(token && config.routerApiKeys.includes(token));
 }
 
+// Clients such as Claude Code, Codex and the OpenAI SDKs never send
+// x-multi-ai-session-id. A random id per request meant every such request
+// started a brand-new session, so the last successful model + key was never
+// found again. Requests without the header now share one stable session per
+// protocol + pool; an explicit header still selects its own isolated session.
+const DEFAULT_SESSION_ID = "default";
+
 function getSession(req, protocol, pool = TEXT_POOL) {
   const requested = String(req.headers["x-multi-ai-session-id"] || "").trim();
-  const id = requested || createSessionId();
+  const id = requested || DEFAULT_SESSION_ID;
   // Text and vision keep independent sticky targets. Sharing one entry would
   // let a vision target's id sit in a text session (and vice versa), which is
   // harmless today only because the id would not be found in the other pool's

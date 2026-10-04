@@ -264,7 +264,7 @@ test("sticky HTTP: success -> next request first; failure -> priority -> normal;
   assert.deepEqual(calls, ["groq/A1/g1"]);
 });
 
-test("sticky HTTP: a sticky target in cooldown is never called; normal fallback continues", async (t) => {
+test("sticky HTTP: a sticky key in cooldown is never called; the sticky model's next key runs", async (t) => {
   let phase = 1;
   const { router, calls } = await rig(t, (p, m, k) => {
     if (p !== "groq") return ok("ok");
@@ -286,7 +286,8 @@ test("sticky HTTP: a sticky target in cooldown is never called; normal fallback 
   const res = await router.request("/v1/chat/completions", postJson(noModel, S1));
   assert.equal(res.status, 200);
   assert.ok(!calls.includes("groq/A2/g1"), "the cooling sticky target must not be called");
-  assert.deepEqual(calls, ["groq/A1/g2"]);
+  // The cooling sticky key is skipped; the SAME model's other key (A2/g2) is tried next and succeeds.
+  assert.deepEqual(calls, ["groq/A2/g2"]);
   assert.equal(phases(await lastRequest(router))[0], "sticky:groq/A2/0:skipped");
 });
 
