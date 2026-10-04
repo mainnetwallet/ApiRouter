@@ -49,7 +49,7 @@ async function rig(t, decide, extraEnv = {}) {
 const send = (router, headers) => router.request("/v1/chat/completions", postJson(noModel, headers));
 
 test("1: priority success becomes sticky - two requests, same target, exactly two upstream calls", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "groq/A1,openrouter/B1" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "groq/A1,openrouter/B1" });
   assert.equal((await send(router, sid("s-1"))).status, 200);
   assert.equal((await send(router, sid("s-1"))).status, 200);
   assert.deepEqual(calls, ["groq/A1/a1", "groq/A1/a1"]);
@@ -58,7 +58,7 @@ test("1: priority success becomes sticky - two requests, same target, exactly tw
 
 test("2: sticky failure -> priority (sticky itself not repeated) -> next priority succeeds", async (t) => {
   const down = new Set();
-  const { router, calls } = await rig(t, (p, m) => (down.has(`${p}/${m}`) ? fail(503) : ok()), { PRIORITY_MODELS: "groq/A1,openrouter/B1" });
+  const { router, calls } = await rig(t, (p, m) => (down.has(`${p}/${m}`) ? fail(503) : ok()), { TEXT_PRIORITY_MODELS: "groq/A1,openrouter/B1" });
   await send(router, sid("s-2"));                       // groq/A1/a1 succeeds -> sticky
   down.add("groq/A1");
   calls.length = 0;
@@ -72,7 +72,7 @@ test("2: sticky failure -> priority (sticky itself not repeated) -> next priorit
 });
 
 test("3: priority order is never mutated - a new session still starts at the first configured entry", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "groq/A1,openrouter/B1,mistral/C1" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "groq/A1,openrouter/B1,mistral/C1" });
   await send(router, sid("order-x"));                    // A1 succeeds (first priority)
   await send(router, sid("order-x"));                    // sticky A1
   calls.length = 0;
@@ -85,7 +85,7 @@ test("3b: after a later priority entry succeeds for one session, other sessions 
   // A generic 400 fails the attempt without cooling the target, so groq/A1 stays eligible.
   let a1Rejects = true;
   const { router, calls } = await rig(t, (p, m) => (a1Rejects && p === "groq" && m === "A1" ? fail(400) : ok()), {
-    PRIORITY_MODELS: "groq/A1,openrouter/B1,mistral/C1"
+    TEXT_PRIORITY_MODELS: "groq/A1,openrouter/B1,mistral/C1"
   });
   await send(router, sid("promo-1"));                    // every A1 key rejects, B1 succeeds -> sticky for promo-1 only
   assert.deepEqual(calls, ["groq/A1/a1", "groq/A1/a2", "openrouter/B1/b1"]);
@@ -100,7 +100,7 @@ test("3b: after a later priority entry succeeds for one session, other sessions 
 
 test("4: a different session never inherits another session's sticky target", async (t) => {
   let a1Rejects = true;
-  const { router, calls } = await rig(t, (p, m) => (a1Rejects && p === "groq" && m === "A1" ? fail(400) : ok()), { PRIORITY_MODELS: "" });
+  const { router, calls } = await rig(t, (p, m) => (a1Rejects && p === "groq" && m === "A1" ? fail(400) : ok()), { TEXT_PRIORITY_MODELS: "" });
   await send(router, sid("iso-1"));                      // A1/a1 rejects, A2/a1 succeeds -> sticky for iso-1
   assert.deepEqual(calls, ["groq/A1/a1", "groq/A2/a1"]);
   a1Rejects = false;
@@ -115,7 +115,7 @@ test("4: a different session never inherits another session's sticky target", as
 
 test("4b: a request without a session id gets a fresh session each time (no shared sticky)", async (t) => {
   const down = new Set(["groq/A1"]);
-  const { router } = await rig(t, (p, m) => (down.has(`${p}/${m}`) ? fail(503) : ok()), { PRIORITY_MODELS: "" });
+  const { router } = await rig(t, (p, m) => (down.has(`${p}/${m}`) ? fail(503) : ok()), { TEXT_PRIORITY_MODELS: "" });
   await send(router);                                    // anonymous request establishes nothing reusable
   down.clear();
   await send(router);
@@ -124,7 +124,7 @@ test("4b: a request without a session id gets a fresh session each time (no shar
 });
 
 test("response x-multi-ai-session-id, reused by the client, activates sticky on the next request", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "openrouter/B2" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "openrouter/B2" });
   const first = await send(router);
   const id = first.headers.get("x-multi-ai-session-id");
   assert.ok(id, "server issues a session id");
@@ -135,7 +135,7 @@ test("response x-multi-ai-session-id, reused by the client, activates sticky on 
 });
 
 test("5: sticky TTL expiry returns the session to Priority -> Fallback", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "groq/A1,openrouter/B1", STICKY_TTL_MS: "400" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "groq/A1,openrouter/B1", STICKY_TTL_MS: "400" });
   await send(router, sid("ttl"));
   calls.length = 0;
   await send(router, sid("ttl"));
@@ -149,7 +149,7 @@ test("5: sticky TTL expiry returns the session to Priority -> Fallback", async (
 });
 
 test("6: sticky success stops routing - no priority or fallback call is made", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "groq/A1,openrouter/B1" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "groq/A1,openrouter/B1" });
   await send(router, sid("stop"));
   calls.length = 0;
   await send(router, sid("stop"));
@@ -161,7 +161,7 @@ test("6: sticky success stops routing - no priority or fallback call is made", a
 test("7: the exact key is remembered - key2 is never preferred over the sticky key1 for the same model", async (t) => {
   // Key a1 rejects once (generic 400: no cooldown), so a2 serves A1 and becomes sticky.
   let a1Rejects = true;
-  const { router, calls } = await rig(t, (p, m, k) => (a1Rejects && p === "groq" && k === "a1" ? fail(400) : ok()), { PRIORITY_MODELS: "" });
+  const { router, calls } = await rig(t, (p, m, k) => (a1Rejects && p === "groq" && k === "a1" ? fail(400) : ok()), { TEXT_PRIORITY_MODELS: "" });
   await send(router, sid("key"));
   assert.deepEqual(calls, ["groq/A1/a1", "groq/A2/a1", "groq/A1/a2"]);
   a1Rejects = false;                                     // a1 is healthy again: the normal order would start there
@@ -175,7 +175,7 @@ test("7: the exact key is remembered - key2 is never preferred over the sticky k
 });
 
 test("8: pools are isolated - a text sticky is never used for a vision request", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "openrouter/B1" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "openrouter/B1" });
   await send(router, sid("pool"));                       // text sticky = openrouter/B1
   calls.length = 0;
   const image = { max_tokens: 8, messages: [{ role: "user", content: [
@@ -189,7 +189,7 @@ test("8: pools are isolated - a text sticky is never used for a vision request",
 });
 
 test("model-centric priority over HTTP: every key of the entry, then stop; the winning key becomes sticky", async (t) => {
-  const { router, calls } = await rig(t, (p, m, k) => (p === "groq" && k === "a1" ? fail(503) : ok()), { PRIORITY_MODELS: "groq/A1,openrouter/B1" });
+  const { router, calls } = await rig(t, (p, m, k) => (p === "groq" && k === "a1" ? fail(503) : ok()), { TEXT_PRIORITY_MODELS: "groq/A1,openrouter/B1" });
   assert.equal((await send(router, sid("mc"))).status, 200);
   assert.deepEqual(calls, ["groq/A1/a1", "groq/A1/a2"], "key a2 is tried before any other priority entry; openrouter/B1 is never called");
   calls.length = 0;

@@ -268,7 +268,7 @@ export const ROUTING_FLOW_STEPS = Object.freeze([
   { key: "incoming", step: 1, label: "Incoming Request", detail: "TEXT or VISION" },
   { key: "detect", step: 2, label: "Detect Request Type", detail: "Text: chat / coding / reasoning · Vision: image / multimodal" },
   { key: "pool", step: 3, label: "Route to Correct Pool", detail: "The request enters exactly one pool" },
-  { key: "priority", step: 4, label: "Priority Targets (optional)", detail: "PRIORITY_MODELS in exact env order; skipped entirely when empty. Stops on first success" },
+  { key: "priority", step: 4, label: "Priority Targets (optional)", detail: "TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS in exact env order; skipped entirely when empty. Stops on first success" },
   { key: "select", step: 5, label: "Normal Fallback: Provider → Key → Models", detail: "Every model of a key is tried in order before the next key; each key restarts at its first model, then the next provider. Targets already attempted are skipped; cooling targets are skipped" },
   { key: "fallback", step: 6, label: "Fallback (Same Pool Only)", detail: CROSS_POOL_FALLBACK.label, warn: true }
 ]);

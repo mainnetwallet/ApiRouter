@@ -50,14 +50,14 @@ differs.
 ```text
 REQUEST -> TEXT pool | VISION pool (never mixed)
   STICKY phase     the session's last successful target, only while its 15-minute TTL is valid
-  PRIORITY phase   PRIORITY_MODELS entries, exact env order (optional)
+  PRIORITY phase   TEXT_/VISION_PRIORITY_MODELS entries, exact env order (optional)
   NORMAL fallback  Provider -> Key -> Models -> next Key -> Models -> next Provider
 ```
 
 Sticky is a separate leading phase. It never edits the normal fallback list.
 
-- `PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3` (or `TEXT_PRIORITY_MODELS` /
-  `VISION_PRIORITY_MODELS`, which override it for their pool). Empty = no
+- `TEXT_PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3` (text pool) and
+  `VISION_PRIORITY_MODELS` (vision pool). Empty = no
   priority phase and no extra work. A priority entry is one
   provider/model GROUP: every eligible key of it is attempted in key order
   (`G1/key1, G1/key2, G1/key3`) until one succeeds, and only when all of them
@@ -243,7 +243,7 @@ If absent, the router creates a UUID and returns:
 x-multi-ai-session-id: <session-id>
 ```
 
-A successful target becomes the session's sticky target for 15 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, routing continues with priority, then the normal fallback. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders `PRIORITY_MODELS` or the normal fallback list.
+A successful target becomes the session's sticky target for 15 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, routing continues with priority, then the normal fallback. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders the priority list or the normal fallback list.
 
 ## Security
 

@@ -154,7 +154,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
       key: "ranking",
       label: "Route order",
       detail: plan.priorityCount > 0
-        ? `${plan.priorityCount} priority target(s) first, in PRIORITY_MODELS order; then Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets`
+        ? `${plan.priorityCount} priority target(s) first, in TEXT_/VISION_PRIORITY_MODELS order; then Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets`
         : "no priority configured; Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets",
       count: ranked.length,
       state: "info"

@@ -225,7 +225,8 @@ every target answers 400 the client receives the 400 instead of a 502.
 ## Priority Routing
 
 ```env
-PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3
+TEXT_PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3
+VISION_PRIORITY_MODELS=gemini/V1,groq/V2
 ```
 
 Priority targets are tried first, in exactly this order (providers may be
@@ -234,14 +235,14 @@ interleaved), and the first success stops the request. Priority is
 it is tried in key order (`gemini/G1/key1, key2, key3`) before the walk moves to
 the next entry (`groq/GR2` keys, then `gemini/G3` keys). Only when all entries
 and all their keys have failed or cooled down does the normal fallback start. **Empty or unset means no
-priority phase**: routing goes directly to the normal fallback. Use
-`TEXT_PRIORITY_MODELS` / `VISION_PRIORITY_MODELS` to give each pool its own list;
+priority phase**: routing goes directly to the normal fallback. `TEXT_PRIORITY_MODELS` sets the text pool list and
+`VISION_PRIORITY_MODELS` the vision pool list;
 entries only match the pool being routed, so there is never text-to-vision or
 vision-to-text fallback. Pinned requests ignore priority and sticky. A pinned success is not remembered as the session's sticky target. If a client names a model this pool serves, only priority entries of that model apply, so a priority entry of a different model never outranks the requested one.
 
 A session's last successful target stays sticky for 15 minutes (refreshed by each success) and is tried before priority; once it expires, or fails, routing goes Priority → Normal fallback.
 
-Stickiness is **per session** (`X-Multi-AI-Session-ID`; reuse the `x-multi-ai-session-id` response header) and remembers the exact `provider + key + model`, not just the model name. Another session never inherits it, text and vision keep separate sticky targets, and a success never reorders `PRIORITY_MODELS`: a new session always starts at the first configured priority entry. A sticky success ends the request (no priority/fallback call), and a target is never called twice in one request. Example with `PRIORITY_MODELS=groq/A1,openrouter/B1`: request #1 runs `priority groq/A1/key1 → 200`, so request #2 of the same session runs `sticky groq/A1/key1 → 200` and stops; if the sticky call fails, request #2 continues `priority groq/A1 (its other keys) → priority openrouter/B1 → fallback`, never repeating the sticky target.
+Stickiness is **per session** (`X-Multi-AI-Session-ID`; reuse the `x-multi-ai-session-id` response header) and remembers the exact `provider + key + model`, not just the model name. Another session never inherits it, text and vision keep separate sticky targets, and a success never reorders the priority list: a new session always starts at the first configured priority entry. A sticky success ends the request (no priority/fallback call), and a target is never called twice in one request. Example with `TEXT_PRIORITY_MODELS=groq/A1,openrouter/B1`: request #1 runs `priority groq/A1/key1 → 200`, so request #2 of the same session runs `sticky groq/A1/key1 → 200` and stops; if the sticky call fails, request #2 continues `priority groq/A1 (its other keys) → priority openrouter/B1 → fallback`, never repeating the sticky target.
 
 After priority, the normal fallback is key-scoped: **Provider -> Key -> Models ->
 next Key -> Models -> next Provider**. Each key restarts at its provider's first

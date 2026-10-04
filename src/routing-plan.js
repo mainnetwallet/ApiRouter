@@ -9,7 +9,7 @@ import { targetId } from "./health.js";
  * vision targets. Nothing here looks at health: eligibility (cooldown) is
  * applied while the plan is walked, against the one shared HealthRegistry.
  *
- *   PRIORITY phase   PRIORITY_MODELS entries, in exactly the configured order
+ *   PRIORITY phase   TEXT_/VISION_PRIORITY_MODELS entries, in exactly the configured order
  *   FALLBACK phase   Provider -> Key -> Models (config order) -> next Key
  *                    -> next Provider. Each key restarts at its own first model.
  *
@@ -56,14 +56,14 @@ export function parsePriorityModels(value) {
 }
 
 /**
- * Priority list for one pool. TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS win
- * over the shared PRIORITY_MODELS. A shared entry only ever matches targets of
- * the pool being routed, so it can never pull a request across pools.
+ * Priority list for one pool: TEXT_PRIORITY_MODELS for the text pool,
+ * VISION_PRIORITY_MODELS for the vision pool. An entry only ever matches
+ * targets of the pool being routed, so it can never pull a request across
+ * pools.
  */
 export function readPriority(env, pool = "text") {
   const specific = pool === "vision" ? env.VISION_PRIORITY_MODELS : env.TEXT_PRIORITY_MODELS;
-  const raw = specific !== undefined && String(specific).trim() !== "" ? specific : env.PRIORITY_MODELS;
-  return parsePriorityModels(raw);
+  return parsePriorityModels(specific);
 }
 
 /** Providers in first-appearance (configuration) order, then keys, then models. */

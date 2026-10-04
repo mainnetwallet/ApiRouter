@@ -70,7 +70,7 @@ test("plan: an explicit configured model keeps only priority entries of that mod
 });
 
 test("HTTP text: an explicit model is served first even when another model is the priority entry", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "groq/Q1" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "groq/Q1" });
   assert.equal((await post(router, { ...text, model: "O1" }, sid("e1"))).status, 200);
   assert.deepEqual(calls, ["openrouter/O1/o1"], "priority groq/Q1 must not run ahead of the requested O1");
   // Requesting the priority model itself still goes through the priority phase.
@@ -89,7 +89,7 @@ test("HTTP vision: an explicit vision model is served first; VISION_PRIORITY_MOD
 // ---- Bug 2: pin never becomes sticky ---------------------------------------------------------
 
 test("HTTP text: a pinned success is not remembered; the next unpinned request follows priority", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "groq/Q1" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "groq/Q1" });
   assert.equal((await post(router, text, sid("p1", { "x-multi-ai-pin-provider": "openrouter" }))).status, 200);
   assert.deepEqual(calls, ["openrouter/O1/o1"]);
   calls.length = 0;
@@ -108,7 +108,7 @@ test("HTTP vision: a pinned success is not remembered either", async (t) => {
 });
 
 test("a pinned request does not disturb an existing sticky target of the same session", async (t) => {
-  const { router, calls } = await rig(t, () => ok(), { PRIORITY_MODELS: "groq/Q1" });
+  const { router, calls } = await rig(t, () => ok(), { TEXT_PRIORITY_MODELS: "groq/Q1" });
   await post(router, text, sid("keep"));                                          // sticky = groq/Q1/q1
   await post(router, text, sid("keep", { "x-multi-ai-pin-provider": "openrouter" }));
   calls.length = 0;

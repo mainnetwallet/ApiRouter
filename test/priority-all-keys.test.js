@@ -5,7 +5,7 @@ import { HealthRegistry } from "../src/health.js";
 import { RouteSession, withFallback } from "../src/router.js";
 import { buildRoutePlan, parsePriorityModels } from "../src/routing-plan.js";
 
-// Priority is MODEL-centric: one PRIORITY_MODELS entry is one provider/model
+// Priority is MODEL-centric: one TEXT_PRIORITY_MODELS entry is one provider/model
 // group, and EVERY eligible key of it is attempted, in key order, before the
 // walk advances to the next configured entry. Exact targets are never repeated
 // within a request, sticky leads only the current session, and the configured

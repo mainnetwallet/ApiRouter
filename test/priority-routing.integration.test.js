@@ -39,8 +39,8 @@ async function rig(t, decide, extraEnv = {}) {
 
 const lastRequest = async (router) => (await (await router.request("/api/requests")).json()).entries[0];
 
-test("empty PRIORITY_MODELS: normal key-scoped fallback, no priority rows", async (t) => {
-  const { router, calls } = await rig(t, (p, m, k) => (k === "g1" ? fail() : ok("done")), { PRIORITY_MODELS: "" });
+test("empty TEXT_PRIORITY_MODELS: normal key-scoped fallback, no priority rows", async (t) => {
+  const { router, calls } = await rig(t, (p, m, k) => (k === "g1" ? fail() : ok("done")), { TEXT_PRIORITY_MODELS: "" });
   const res = await router.request("/v1/chat/completions", postJson(textBody));
   assert.equal(res.status, 200);
   // g1 runs its own chain (A1 then A2) before g2 restarts at A1.
@@ -50,7 +50,7 @@ test("empty PRIORITY_MODELS: normal key-scoped fallback, no priority rows", asyn
 });
 
 test("priority interleaves providers in env order and stops on first success", async (t) => {
-  const { router, calls } = await rig(t, () => ok("prio"), { PRIORITY_MODELS: "openrouter/B2,groq/A1" });
+  const { router, calls } = await rig(t, () => ok("prio"), { TEXT_PRIORITY_MODELS: "openrouter/B2,groq/A1" });
   const res = await router.request("/v1/chat/completions", postJson(autoRouted));
   assert.equal(res.status, 200);
   assert.deepEqual(calls, ["openrouter/B2/o1"], "no further upstream call after the first priority success");
@@ -61,7 +61,7 @@ test("priority failures fall through to normal fallback; repeats are logged as s
   const { router, calls } = await rig(
     t,
     (p, m) => (p === "openrouter" && m === "B2" ? fail() : p === "groq" && m === "A1" ? fail(503) : ok("late")),
-    { PRIORITY_MODELS: "openrouter/B2,groq/A1" }
+    { TEXT_PRIORITY_MODELS: "openrouter/B2,groq/A1" }
   );
   const res = await router.request("/v1/chat/completions", postJson(autoRouted));
   assert.equal(res.status, 200);
@@ -80,14 +80,14 @@ test("priority failures fall through to normal fallback; repeats are logged as s
 });
 
 test("pinned requests ignore priority and stay strict", async (t) => {
-  const { router, calls } = await rig(t, () => ok("pinned"), { PRIORITY_MODELS: "openrouter/B2" });
+  const { router, calls } = await rig(t, () => ok("pinned"), { TEXT_PRIORITY_MODELS: "openrouter/B2" });
   const res = await router.request("/v1/chat/completions", postJson(textBody, { "x-multi-ai-pin-provider": "groq", "x-multi-ai-pin-key-index": "1" }));
   assert.equal(res.status, 200);
   assert.deepEqual(calls, ["groq/A1/g2"]);
 });
 
 test("image request with no vision pool is 503 no_vision_route and never touches text or priority", async (t) => {
-  const { router, calls } = await rig(t, () => ok("text"), { PRIORITY_MODELS: "groq/A1" });
+  const { router, calls } = await rig(t, () => ok("text"), { TEXT_PRIORITY_MODELS: "groq/A1" });
   const res = await router.request("/v1/chat/completions", postJson({
     model: "A1", messages: [{ role: "user", content: [{ type: "text", text: "?" }, { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }]
   }));
@@ -103,7 +103,7 @@ test("vision priority applies only to the vision pool", async (t) => {
   const router = await startRouter({
     GROQ_API_KEYS: "g1", GROQ_MODELS: "A1", GROQ_BASE_URL: text.baseUrl,
     OPENROUTER_VISION_API_KEYS: "v1", OPENROUTER_VISION_MODELS: "V1,V2", OPENROUTER_VISION_BASE_URL: vision.baseUrl,
-    PRIORITY_MODELS: "groq/A1", VISION_PRIORITY_MODELS: "openrouter/V2"
+    TEXT_PRIORITY_MODELS: "groq/A1", VISION_PRIORITY_MODELS: "openrouter/V2"
   });
   t.after(async () => { await router.close(); await text.close(); await vision.close(); });
 
@@ -115,7 +115,7 @@ test("vision priority applies only to the vision pool", async (t) => {
 });
 
 test("the request log never stores credentials", async (t) => {
-  const { router } = await rig(t, (p, m, k) => (k === "g1" ? fail() : ok("x")), { PRIORITY_MODELS: "groq/A1" });
+  const { router } = await rig(t, (p, m, k) => (k === "g1" ? fail() : ok("x")), { TEXT_PRIORITY_MODELS: "groq/A1" });
   await router.request("/v1/chat/completions", postJson(textBody));
   const raw = await (await router.request("/api/requests")).text();
   for (const secret of ["g1", "g2", "o1"]) assert.ok(!raw.includes(`"${secret}"`) && !raw.includes(`Bearer ${secret}`));
@@ -185,7 +185,7 @@ test("all-400 returns the client's 400; a 422 is returned after a single call", 
 });
 
 test("pinned request is strict: no priority, no sticky, never leaves the pinned provider/key", async (t) => {
-  const { router, calls } = await rig(t, (p, m) => (m === "A1" ? fail() : ok("pin")), { PRIORITY_MODELS: "openrouter/B1" });
+  const { router, calls } = await rig(t, (p, m) => (m === "A1" ? fail() : ok("pin")), { TEXT_PRIORITY_MODELS: "openrouter/B1" });
   const pin = { "x-multi-ai-pin-provider": "groq", "x-multi-ai-pin-key-index": "1", "x-multi-ai-session-id": "s" };
 
   // Pinned to a model that fails: the pin is the exact target, so no fallback elsewhere.
@@ -219,7 +219,7 @@ test("vision: no valid route is 503 no_vision_route even when text targets are h
 });
 
 test("/health and /api/health report the real route order, with priority first", async (t) => {
-  const { router } = await rig(t, () => ok("h"), { PRIORITY_MODELS: "openrouter/B2" });
+  const { router } = await rig(t, () => ok("h"), { TEXT_PRIORITY_MODELS: "openrouter/B2" });
   const h = await (await router.request("/health")).json();
   assert.deepEqual(h.rankedTargets.slice(0, 3).map((r) => `${r.provider}/${r.model}/${r.keyIndex}`), ["openrouter/B2/0", "groq/A1/0", "groq/A2/0"]);
   const a = await (await router.request("/api/health")).json();
@@ -236,7 +236,7 @@ const phases = (entry) => entry.attempts.map((a) => `${a.phase}:${a.provider}/${
 
 test("sticky HTTP: success -> next request first; failure -> priority -> normal; new sticky", async (t) => {
   const down = new Set();
-  const { router, calls } = await rig(t, (p, m) => (down.has(`${p}/${m}`) ? fail(503) : ok("ok")), { PRIORITY_MODELS: "openrouter/B1,openrouter/B2" });
+  const { router, calls } = await rig(t, (p, m) => (down.has(`${p}/${m}`) ? fail(503) : ok("ok")), { TEXT_PRIORITY_MODELS: "openrouter/B1,openrouter/B2" });
 
   // Request 1: no sticky yet -> priority first (openrouter/B1 serves) -> becomes sticky.
   assert.equal((await router.request("/v1/chat/completions", postJson(noModel, SESSION))).status, 200);
@@ -292,7 +292,7 @@ test("sticky HTTP: a sticky target in cooldown is never called; normal fallback 
 
 test("sticky HTTP: the 15-minute TTL is real-time based (shortened only to be testable)", async (t) => {
   const { router, calls } = await rig(t, (p, m) => (p === "groq" && m === "A1" ? fail(503) : ok("ok")), {
-    PRIORITY_MODELS: "openrouter/B2", STICKY_TTL_MS: "500"
+    TEXT_PRIORITY_MODELS: "openrouter/B2", STICKY_TTL_MS: "500"
   });
   // R1: priority openrouter/B2 serves -> sticky for 500 ms.
   await router.request("/v1/chat/completions", postJson(noModel, SESSION));
@@ -314,7 +314,7 @@ test("sticky HTTP: expiry does not skip priority (priority 1 -> priority 2 -> no
   // A generic 400 fails the priority targets without putting them into cooldown,
   // so the second request can really run them again.
   const { router, calls } = await rig(t, (p, m) => (p === "openrouter" ? fail(400) : ok("ok")), {
-    PRIORITY_MODELS: "openrouter/B1,openrouter/B2", STICKY_TTL_MS: "300"
+    TEXT_PRIORITY_MODELS: "openrouter/B1,openrouter/B2", STICKY_TTL_MS: "300"
   });
   await router.request("/v1/chat/completions", postJson(noModel, SESSION)); // groq/A1 becomes sticky after priority fails
   await new Promise((r) => setTimeout(r, 450));
@@ -355,7 +355,7 @@ test("sticky HTTP: text and vision stickies are isolated, even for the same sess
 });
 
 test("sticky HTTP: a pinned request ignores the session's sticky target", async (t) => {
-  const { router, calls } = await rig(t, () => ok("ok"), { PRIORITY_MODELS: "openrouter/B1" });
+  const { router, calls } = await rig(t, () => ok("ok"), { TEXT_PRIORITY_MODELS: "openrouter/B1" });
   await router.request("/v1/chat/completions", postJson(noModel, SESSION)); // sticky -> openrouter/B1
   calls.length = 0;
   const res = await router.request("/v1/chat/completions", postJson(noModel, { ...SESSION, "x-multi-ai-pin-provider": "groq", "x-multi-ai-pin-key-index": "1" }));

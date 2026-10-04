@@ -42,12 +42,13 @@ test("parsePriorityModels keeps order, namespaces by provider and drops junk", (
   assert.deepEqual(parsePriorityModels("openrouter/meta/llama-3"), [{ provider: "openrouter", model: "meta/llama-3" }]);
 });
 
-test("readPriority: pool-specific lists win, otherwise the shared list applies", () => {
-  const env = { PRIORITY_MODELS: "gemini/G1", VISION_PRIORITY_MODELS: "groq/GR1" };
+test("readPriority: each pool reads only its own list (TEXT_ / VISION_PRIORITY_MODELS)", () => {
+  const env = { TEXT_PRIORITY_MODELS: "gemini/G1", VISION_PRIORITY_MODELS: "groq/GR1" };
   assert.deepEqual(readPriority(env, "text"), [{ provider: "gemini", model: "G1" }]);
   assert.deepEqual(readPriority(env, "vision"), [{ provider: "groq", model: "GR1" }]);
   assert.deepEqual(readPriority({}, "text"), []);
-  assert.deepEqual(loadConfig({ PRIORITY_MODELS: "gemini/G1" }).priority.vision, [{ provider: "gemini", model: "G1" }]);
+  assert.deepEqual(loadConfig({ TEXT_PRIORITY_MODELS: "gemini/G1" }).priority.vision, []);
+  assert.deepEqual(loadConfig({ PRIORITY_MODELS: "gemini/G1" }).priority.text, []);
 });
 
 test("empty priority: no priority phase, straight to Provider -> Key -> Models", async () => {

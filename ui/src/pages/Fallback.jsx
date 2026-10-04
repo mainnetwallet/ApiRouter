@@ -371,7 +371,7 @@ function HowFallbackWorks() {
           <li>Targets that cannot speak the client's protocol are removed.</li>
           <li>Targets inside a cooldown window are removed.</li>
           <li>The session's sticky target (last success, valid for 15 minutes) is tried first, if it is eligible.</li>
-          <li>Then priority targets (PRIORITY_MODELS), in their configured order; every eligible key of an entry is tried before the next entry.</li>
+          <li>Then priority targets (TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS), in their configured order; every eligible key of an entry is tried before the next entry.</li>
           <li>The rest follow Provider → Key → Models: every model of a key runs in order before the next key, and each key restarts at its first model.</li>
           <li>Sticky is a separate first step and never reorders the chain; health only skips cooling targets.</li>
           <li>Each target is tried at most once per request, in order, until one succeeds.</li>
