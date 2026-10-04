@@ -38,6 +38,7 @@ The clone, `npm install` and `.env` setup are one-time steps. Next time, just:
 
 ```powershell
 cd MultiAI-Router
+git pull origin main
 npm start
 ```
 
@@ -45,6 +46,7 @@ After pulling updates (`git pull`), rebuild only what changed:
 
 ```powershell
 cd MultiAI-Router
+git pull origin main
 npm run ui:build    
 npm start
 ```
