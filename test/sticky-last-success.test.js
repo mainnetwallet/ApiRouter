@@ -86,14 +86,15 @@ test("A4 sticky is on a LOWER priority model: its other keys run before any othe
   assert.deepEqual(calls, ["sticky:groq/R1/k2", "priority:groq/R1/k1"]);
 });
 
-test("A5 a model is exhausted only after ALL its keys fail; only then the next priority model", async () => {
+test("A5 a model is exhausted only after ALL its keys fail; priority then CONTINUES after it, never back before it", async () => {
   const session = new RouteSession();
-  sticky(session, pick("groq", "R1", 1));
+  sticky(session, pick("groq", "R1", 1)); // priority #2 of "gemini/G1,groq/R1" (the last entry)
   const { calls, result } = await request(session, { fail: (l) => l.startsWith("groq/R1/") });
   assert.deepEqual(calls, [
     "sticky:groq/R1/k2", "priority:groq/R1/k1", // both R1 keys first
-    "priority:gemini/G1/k1"                      // only then the next priority model
+    "fallback:gemini/G1/k1"                      // R1 was the last priority model: gemini/G1 (listed BEFORE it) is NOT a priority attempt
   ]);
+  assert.ok(!calls.some((c) => c.startsWith("priority:gemini")), "priority never goes back to an entry listed before the sticky model");
   assert.equal(label(result), "gemini/G1/k1");
   assert.equal(label(stickyOf(session)), "gemini/G1/k1", "the new success becomes the sticky target");
 });

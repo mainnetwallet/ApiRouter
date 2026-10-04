@@ -14,7 +14,10 @@ import { targetId } from "./health.js";
  *                    -> next Provider. Each key restarts at its own first model.
  *
  *   STICKY phase    the session's last good target, then the OTHER keys of that same
- *                   provider/model (key order), only while its TTL is valid
+ *                   provider/model (key order), only while its TTL is valid.
+ *                   When the sticky model is itself a priority entry, the priority
+ *                   phase then CONTINUES from it (A,B,C,D with sticky B -> C, D);
+ *                   priority entries listed before it are not revisited.
  *
  * The normal fallback list is fully deterministic. Health, latency and
  * previous successes never reorder it. Sticky is a separate leading phase and
@@ -182,7 +185,19 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
       .sort((a, b) => a.keyIndex - b.keyIndex)
     : [];
 
-  const stickyIsPriority = Boolean(sticky) && priorityEntries.some(({ target }) => target.provider === sticky.provider && target.model === sticky.model);
+  const stickyGroupId = sticky ? `${sticky.provider}/${sticky.model}` : null;
+  const stickyIsPriority = Boolean(sticky) && priorityEntries.some(({ group }) => group === stickyGroupId);
+
+  // Priority CONTINUES from the sticky model, it never goes back. With priority
+  // A -> B -> C -> D and sticky on B, once B (every eligible key) is exhausted
+  // the priority phase proceeds C -> D and then the normal fallback; A is not
+  // part of this request's priority phase. A sticky target that is not a
+  // priority model has no position in the list, so the full list still applies.
+  // (The groups are contiguous and in configured order, so "from the sticky
+  // group on" is a straight slice.)
+  const groupOrder = [...new Set(priorityEntries.map(({ group }) => group))];
+  const resumeAt = stickyIsPriority ? groupOrder.indexOf(stickyGroupId) : 0;
+  const priorityPhase = priorityEntries.filter(({ group }) => groupOrder.indexOf(group) >= resumeAt);
 
   const steps = [
     ...(sticky ? [{ target: sticky, phase: PHASES.STICKY }] : []),
@@ -195,7 +210,7 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
       phase: stickyIsPriority ? PHASES.PRIORITY : PHASES.STICKY,
       group: `${sticky.provider}/${sticky.model}`
     })),
-    ...priorityEntries.map(({ target, group }) => ({ target, phase: PHASES.PRIORITY, group })),
+    ...priorityPhase.map(({ target, group }) => ({ target, phase: PHASES.PRIORITY, group })),
     ...normal.map((target) => ({ target, phase: PHASES.FALLBACK }))
   ];
   return { steps, priorityCount: new Set(priorityEntries.map((entry) => entry.group)).size, sticky };
