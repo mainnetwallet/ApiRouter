@@ -2,74 +2,55 @@ import { describeAttempt } from "./errors.js";
 import { sanitizeText } from "./sanitize.js";
 
 /**
- * Live Logs: one row per API call, updated in place as the call progresses.
+ * Live Logs: one card per real upstream attempt.
  *
- * Nothing here is invented. The gateway reports every request twice over the
- * life of the call: while it runs (`pending[]`: the attempts finished so far
- * and the attempt currently on the wire) and once it finishes (`entries[]`).
- * Both carry the same `startSeq`, so a row simply changes state:
+ * ONE REAL UPSTREAM ATTEMPT = ONE CARD. The gateway reports every attempt as
+ * its own event, with its own `attemptId`, while it runs (`calling`) and once it
+ * answers (`success` / `failed`). A card is keyed by that id and by nothing
+ * else, so:
  *
- *   ROUTING   the request reached the gateway, no upstream call has started
- *   RUNNING   the first upstream attempt is on the wire
- *   RETRYING  an earlier attempt failed and the router moved to another target
- *   SUCCESS   an attempt returned 2xx
- *   FAILED    every target failed (or the request was rejected up front)
+ *   - the same provider/model/key called again is a new card, never an old one
+ *     reused or updated: its attempt has a new id;
+ *   - a card moves once, CALLING -> SUCCESS or FAILED, and a final card is never
+ *     rewritten, not by a stale snapshot and not by a later attempt;
+ *   - the request id only groups cards (`requestId`); it is not a card key.
  *
- * Every attempt is also kept as a box (`steps`) inside the row, so the card
- * shows each model the router tried: failed ones, the one on the wire, and the
- * one that answered.
+ * A request that never reached a provider (rejected up front), or has not
+ * picked a target yet, has no attempt to show, so it gets one request card
+ * (`kind: "request"`), which a real attempt replaces.
  *
- * Only key *indexes* are ever carried — the log has no key values, and every
- * free-text field is scrubbed again here before it can reach the DOM.
+ * Live pushes, the snapshot and the history all go through the same builders
+ * (`buildAttemptRow`, `buildRequestRow`), so a card looks the same whichever way
+ * it arrived. Only key *indexes* are ever carried: the log has no key values, and
+ * every free-text field is scrubbed again here before it can reach the DOM.
  */
 
 export const STATE = Object.freeze({
+  /** A request with no attempt on the wire yet, or rejected before any attempt. */
   ROUTING: "ROUTING",
-  RUNNING: "RUNNING",
-  RETRYING: "RETRYING",
-  SUCCESS: "SUCCESS",
-  FAILED: "FAILED"
-});
-
-/**
- * Inside a call, every attempt is its own box (a "step"):
- *
- *   ROUTING   waiting for the router to pick the (next) target
- *   CALLING   this target is on the wire right now
- *   FAILED    this target answered with an error or timed out; the router
- *             falls back to the next box
- *   SUCCESS   this target answered; the call is done
- */
-export const STEP = Object.freeze({
-  ROUTING: "ROUTING",
+  /** This attempt is on the wire right now. */
   CALLING: "CALLING",
-  FAILED: "FAILED",
-  SUCCESS: "SUCCESS"
-});
-
-export const STEP_TONE = Object.freeze({
-  [STEP.ROUTING]: "neutral",
-  [STEP.CALLING]: "info",
-  [STEP.FAILED]: "danger",
-  [STEP.SUCCESS]: "ok"
+  /** This attempt answered with a 2xx. */
+  SUCCESS: "SUCCESS",
+  /** This attempt answered with an error, or timed out. */
+  FAILED: "FAILED"
 });
 
 /** Badge tone per state. */
 export const STATE_TONE = Object.freeze({
   [STATE.ROUTING]: "neutral",
-  [STATE.RUNNING]: "info",
-  [STATE.RETRYING]: "warn",
+  [STATE.CALLING]: "info",
   [STATE.SUCCESS]: "ok",
   [STATE.FAILED]: "danger"
 });
 
-/** States in which a row is still changing. */
-export const LIVE_STATES = Object.freeze([STATE.ROUTING, STATE.RUNNING, STATE.RETRYING]);
+/** States in which a card is still changing. */
+export const LIVE_STATES = Object.freeze([STATE.ROUTING, STATE.CALLING]);
 export const isLive = (row) => LIVE_STATES.includes(row?.state);
 
 /**
- * Live Logs keeps the last 50 calls. When a newer call arrives past that, the
- * oldest one is dropped, so the view stays short and a long-open tab cannot grow.
+ * Live Logs keeps the last 50 cards. When a newer one arrives past that, the
+ * oldest is dropped, so the view stays short and a long-open tab cannot grow.
  */
 export const MAX_ROWS = 50;
 
@@ -80,144 +61,166 @@ const optText = (value, maxLength = 300) => {
   return text ? text : null;
 };
 
-function buildAttempt(attempt) {
-  if (!attempt || typeof attempt !== "object") return null;
-  const ok = attempt.ok === true;
+/** Request-level context an attempt may inherit when its own event lacks it. */
+function requestContext(entry) {
+  const startSeq = isNum(entry?.startSeq) ? entry.startSeq : (isNum(entry?.seq) ? entry.seq : null);
   return {
-    provider: attempt.provider ?? null,
-    model: attempt.model ?? null,
-    keyIndex: optInt(attempt.keyIndex),
-    status: optInt(attempt.status),
-    ok,
-    startedAt: isNum(attempt.startedAt) ? attempt.startedAt : null,
-    durationMs: isNum(attempt.latencyMs) ? attempt.latencyMs : null,
-    reason: ok ? null : describeAttempt(attempt).label,
-    detail: ok ? null : optText(attempt.errorMessage)
+    startSeq,
+    requestId: entry?.requestId ?? entry?.id ?? null,
+    sessionId: entry?.id ?? null,
+    pool: entry?.pool,
+    protocol: entry?.protocol ?? null,
+    requestedModel: entry?.requestedModel ?? null
   };
 }
 
 /**
- * One box per attempt, in the order the router tried them. A running call adds
- * a CALLING box for the target on the wire, or a ROUTING placeholder while the
- * router is choosing the next one after a failure.
+ * One card for one attempt. `attempt` is an attempt event (live or listed) or an
+ * attempt row nested in a request entry; both carry the same identity. Returns
+ * `null` for anything that is not a real attempt (a skipped target, malformed
+ * input, or one with no way to be told apart from another).
  */
-function buildSteps(attempts, inflight, pending) {
-  const steps = attempts.map((attempt) => ({
-    ...attempt,
-    state: attempt.ok ? STEP.SUCCESS : STEP.FAILED
-  }));
-  const last = attempts.at(-1) ?? null;
+export function buildAttemptRow(attempt, ctx = {}) {
+  if (!attempt || typeof attempt !== "object" || attempt.skipped === true) return null;
 
-  if (pending && inflight) {
-    steps.push({
-      provider: inflight.provider ?? null,
-      model: inflight.model ?? null,
-      keyIndex: optInt(inflight.keyIndex),
-      status: null,
-      ok: false,
-      startedAt: isNum(inflight.startedAt) ? inflight.startedAt : null,
-      durationMs: null,
-      reason: null,
-      detail: null,
-      state: STEP.CALLING
-    });
-  } else if (pending && (!last || !last.ok)) {
-    steps.push({
-      provider: null, model: null, keyIndex: null, status: null, ok: false,
-      startedAt: null, durationMs: null, reason: null, detail: null,
-      state: STEP.ROUTING
-    });
-  }
-  return steps;
-}
+  // An attempt id is what makes a card. Only a gateway that predates attempt
+  // ids falls back to the position inside its request, and only for that
+  // request, so even then two requests can never share a card.
+  const attemptId = typeof attempt.attemptId === "string" && attempt.attemptId ? attempt.attemptId : null;
+  const requestKey = isNum(attempt.requestSeq) ? attempt.requestSeq : (isNum(ctx.startSeq) ? ctx.startSeq : null);
+  const legacyIndex = Number.isInteger(attempt.index) ? attempt.index : null;
+  const key = attemptId ?? (requestKey !== null && legacyIndex !== null ? `legacy:${requestKey}:${legacyIndex}` : null);
+  if (key === null) return null;
 
-/**
- * Derive one row from a request-log entry or a pending entry.
- * Tolerates any missing optional field; a malformed entry yields `null`.
- */
-export function buildRow(entry) {
-  if (!entry || typeof entry !== "object") return null;
-
-  const seq = isNum(entry.seq) ? entry.seq : 0;
-  const key = isNum(entry.startSeq) ? entry.startSeq : seq;
-  const pending = entry.outcome === "pending";
-  const attempts = (Array.isArray(entry.attempts) ? entry.attempts : []).map(buildAttempt).filter(Boolean);
-  const inflight = pending && entry.inflight && typeof entry.inflight === "object" ? entry.inflight : null;
-  const lastAttempt = attempts.at(-1) ?? null;
-
-  let state;
-  if (pending) {
-    // Earlier attempts only ever exist because they failed, so a target on the
-    // wire after one is a retry. With nothing on the wire, a successful last
-    // attempt means the body is still arriving (RUNNING), not another retry.
-    if (inflight) state = attempts.length > 0 ? STATE.RETRYING : STATE.RUNNING;
-    else if (attempts.length === 0) state = STATE.ROUTING;
-    else state = lastAttempt.ok ? STATE.RUNNING : STATE.RETRYING;
-  } else {
-    state = entry.outcome === "failed" ? STATE.FAILED : STATE.SUCCESS;
-  }
-
-  // The target to show: the one on the wire, else the one that last answered.
-  const target = pending
-    ? (inflight ?? lastAttempt)
-    : { provider: entry.finalProvider, model: entry.finalModel, keyIndex: entry.finalKeyIndex };
-
-  const steps = buildSteps(attempts, inflight, pending);
-
-  const total = isNum(entry.totalMs) ? entry.totalMs : isNum(entry.latencyMs) ? entry.latencyMs : null;
-  const received = isNum(entry.receivedAt) ? entry.receivedAt : null;
+  const state = attempt.state === "calling"
+    ? STATE.CALLING
+    : attempt.state === "success" || (attempt.state === undefined && attempt.ok === true)
+      ? STATE.SUCCESS
+      : STATE.FAILED;
+  const calling = state === STATE.CALLING;
+  const failed = state === STATE.FAILED;
+  const pool = attempt.pool ?? ctx.pool;
+  const requestId = attempt.requestId ?? ctx.requestId ?? null;
 
   return {
     key,
-    seq,
-    requestId: entry.id ? String(entry.id) : null,
+    kind: "attempt",
+    attemptId,
+    // The number the log gave the attempt; orders attempts started in the same millisecond.
+    order: isNum(attempt.attemptSeq) ? attempt.attemptSeq : (legacyIndex ?? 0),
+    // Which request it belongs to, in the request log's own numbering. Used to
+    // honour Clear and to spot a restarted gateway, never to identify a card.
+    requestKey: requestKey ?? 0,
+    callIndex: optInt(attempt.callIndex) ?? legacyIndex,
+    requestId: requestId ? String(requestId) : null,
     state,
-    pending,
-    ts: received,
-    protocol: entry.protocol ?? null,
-    // Which routing pool served (or is serving) this call. Defaults to text so a
-    // gateway that predates the vision pool still renders correctly.
-    pool: entry.pool === "vision" ? "vision" : "text",
-    requestedModel: optText(entry.requestedModel, 120),
-    provider: target?.provider ?? null,
-    model: target?.model ?? null,
-    keyIndex: optInt(target?.keyIndex),
-    status: pending ? null : optInt(entry.httpStatus),
-    durationMs: pending ? null : total,
-    attemptStartedAt: inflight && isNum(inflight.startedAt) ? inflight.startedAt : null,
-    attemptCount: attempts.length,
-    // How far a running call has got: each finished attempt, then the one on
-    // the wire. Lets an older snapshot be told apart from a newer event.
-    progress: attempts.length * 2 + (inflight ? 1 : 0),
-    steps,
-    reason: state === STATE.FAILED ? (optText(entry.errorMessage) ?? optText(entry.errorType, 60)) : null
+    pending: calling,
+    ts: isNum(attempt.startedAt) ? attempt.startedAt : null,
+    protocol: attempt.protocol ?? ctx.protocol ?? null,
+    // Which routing pool this call went to. Defaults to text so a gateway that
+    // predates the vision pool still renders correctly.
+    pool: pool === "vision" ? "vision" : "text",
+    requestedModel: optText(attempt.requestedModel ?? ctx.requestedModel, 120),
+    phase: attempt.phase ?? null,
+    provider: attempt.provider ?? null,
+    model: attempt.model ?? null,
+    keyIndex: optInt(attempt.keyIndex),
+    status: calling ? null : optInt(attempt.status),
+    durationMs: calling ? null : (isNum(attempt.latencyMs) ? attempt.latencyMs : null),
+    reason: failed ? describeAttempt({ ...attempt, ok: false }).label : null,
+    detail: failed ? optText(attempt.errorMessage) : null
   };
 }
 
-/** Chronological order by start time; ties fall back to start order. */
+/**
+ * The one card for a request that has no attempt to show: still choosing a
+ * target (ROUTING), or finished without ever calling a provider.
+ */
+export function buildRequestRow(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const ctx = requestContext(entry);
+  if (ctx.startSeq === null) return null;
+
+  const pending = entry.outcome === "pending";
+  const state = pending ? STATE.ROUTING : entry.outcome === "failed" ? STATE.FAILED : STATE.SUCCESS;
+  const total = isNum(entry.totalMs) ? entry.totalMs : isNum(entry.latencyMs) ? entry.latencyMs : null;
+
+  return {
+    key: `req:${ctx.startSeq}`,
+    kind: "request",
+    attemptId: null,
+    order: ctx.startSeq,
+    requestKey: ctx.startSeq,
+    callIndex: null,
+    requestId: ctx.requestId ? String(ctx.requestId) : null,
+    state,
+    pending,
+    ts: isNum(entry.receivedAt) ? entry.receivedAt : null,
+    protocol: ctx.protocol,
+    pool: entry.pool === "vision" ? "vision" : "text",
+    requestedModel: optText(entry.requestedModel, 120),
+    phase: null,
+    provider: entry.finalProvider ?? null,
+    model: entry.finalModel ?? null,
+    keyIndex: optInt(entry.finalKeyIndex),
+    status: pending ? null : optInt(entry.httpStatus),
+    durationMs: pending ? null : total,
+    reason: state === STATE.FAILED ? (optText(entry.errorMessage) ?? optText(entry.errorType, 60)) : null,
+    detail: null
+  };
+}
+
+/**
+ * Every card a request entry (running or finished) accounts for: one per real
+ * attempt it lists, plus the attempt on the wire, or the single request card
+ * when there is no attempt at all.
+ */
+export function buildRows(entry) {
+  if (!entry || typeof entry !== "object") return [];
+  const ctx = requestContext(entry);
+  const listed = Array.isArray(entry.attempts) ? entry.attempts : [];
+  const rows = listed.map((attempt) => buildAttemptRow(attempt, ctx)).filter(Boolean);
+
+  const inflight = entry.outcome === "pending" && entry.inflight && typeof entry.inflight === "object" ? entry.inflight : null;
+  if (inflight) {
+    const calling = buildAttemptRow({ ...inflight, state: "calling", index: listed.length + 1 }, ctx);
+    if (calling) rows.push(calling);
+  }
+
+  if (rows.length === 0) {
+    const request = buildRequestRow(entry);
+    return request ? [request] : [];
+  }
+  return rows;
+}
+
+/** Chronological order by start time; ties fall back to the order the log numbered them. */
 export function compareRows(a, b) {
   const at = isNum(a.ts) ? a.ts : null;
   const bt = isNum(b.ts) ? b.ts : null;
   if (at !== null && bt !== null && at !== bt) return at - bt;
-  return a.key - b.key;
+  if (a.order !== b.order) return a.order - b.order;
+  return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
 }
 
 /**
- * Does `next` describe the call at least as far along as `prev`? Rows arrive
- * from two places (pushed events and snapshots), and a snapshot taken a moment
- * earlier can land after a newer event. A finished call is never turned back
- * into a running one, and a running call never moves backwards.
+ * May `next` replace the card already held under the same key? Cards arrive from
+ * two places (pushed events and snapshots), and a snapshot taken a moment earlier
+ * can land after a newer event. An attempt that has answered is final: nothing
+ * turns it back into CALLING and nothing rewrites its outcome. Only a request
+ * card, which stands for a whole request rather than one attempt, may move from
+ * running to finished.
  */
 function supersedes(next, prev) {
   if (!prev) return true;
-  if (!prev.pending && next.pending) return false;
-  if (prev.pending && next.pending) return (next.progress ?? 0) >= (prev.progress ?? 0);
-  return true;
+  if (prev.kind === "attempt") return prev.pending;
+  return !(!prev.pending && next.pending);
 }
 
 /**
- * Upsert incoming rows by key (a running row is replaced by its next state),
- * sorted chronologically with the newest last, capped at `MAX_ROWS`.
+ * Upsert incoming cards by key and sort them chronologically, newest last,
+ * capped at `MAX_ROWS`. A new attempt id is a new card, however much it looks
+ * like an earlier one; only the *same* attempt can update a card.
  */
 export function mergeRows(current, incoming, { max = MAX_ROWS } = {}) {
   if (!incoming || incoming.length === 0) return current;
@@ -227,51 +230,75 @@ export function mergeRows(current, incoming, { max = MAX_ROWS } = {}) {
     if (supersedes(row, byKey.get(row.key))) byKey.set(row.key, row);
   }
 
+  // A request card that only says "still routing" is a placeholder: once any
+  // real attempt of that request is on screen it has nothing left to say.
+  const withAttempts = new Set();
+  for (const row of byKey.values()) if (row.kind === "attempt") withAttempts.add(row.requestKey);
+  for (const [key, row] of byKey) {
+    if (row.kind === "request" && row.state === STATE.ROUTING && withAttempts.has(row.requestKey)) byKey.delete(key);
+  }
+
   const merged = [...byKey.values()].sort(compareRows);
   return merged.length > max ? merged.slice(merged.length - max) : merged;
 }
 
 /**
- * Turn one `/api/requests` payload into rows.
+ * Turn one `/api/requests` payload (or stream snapshot) into cards.
  *
- * `floor` is the highest sequence number the operator cleared, so cleared
- * requests do not come back on the next poll. `maxSeq` is the highest sequence
- * seen so far; a payload whose highest sequence is *lower* means the gateway
- * restarted (its counter reset) and the view starts over.
+ * `floor` is the highest request sequence number the operator cleared, so cleared
+ * requests do not come back on the next poll. `maxSeq` is the highest request
+ * sequence seen so far; a payload whose highest sequence is *lower* means the
+ * gateway restarted (its counter reset) and the view starts over.
  */
 export function ingestPayload(payload, { floor = 0, maxSeq = 0 } = {}) {
   const entries = Array.isArray(payload?.entries) ? payload.entries : [];
   const pending = Array.isArray(payload?.pending) ? payload.pending : [];
-  const all = [...entries, ...pending].filter((entry) => entry && isNum(entry.seq ?? entry.startSeq));
+  const events = Array.isArray(payload?.attempts) ? payload.attempts : [];
+  const requests = [...entries, ...pending].filter((entry) => entry && isNum(entry.seq ?? entry.startSeq));
 
-  if (all.length === 0) return { rows: [], maxSeq, restarted: false };
+  if (requests.length === 0 && events.length === 0) return { rows: [], maxSeq, restarted: false };
 
-  const newest = Math.max(...all.map((entry) => Math.max(entry.seq ?? 0, entry.startSeq ?? 0)));
+  const seen = [
+    ...requests.map((entry) => Math.max(entry.seq ?? 0, entry.startSeq ?? 0)),
+    ...events.filter((event) => isNum(event?.requestSeq)).map((event) => event.requestSeq)
+  ];
+  const newest = seen.length > 0 ? Math.max(...seen) : maxSeq;
   const restarted = newest < maxSeq;
   const lowest = restarted ? 0 : floor;
 
-  const rows = all
-    .map(buildRow)
-    .filter((row) => row && row.key > lowest);
+  // The listed attempt events and the attempts nested in each request are the
+  // same attempts (same ids), so building both is harmless: they merge by id.
+  const rows = [
+    ...events.map((event) => buildAttemptRow(event)),
+    ...requests.flatMap(buildRows)
+  ].filter((row) => row && row.requestKey > lowest);
 
   return { rows, maxSeq: restarted ? newest : Math.max(newest, maxSeq), restarted };
 }
 
 /**
- * Turn one pushed event (`pending` or `entry`) into rows. Unlike a full
- * payload, a single event says nothing about the rest of the log, so it cannot
- * signal a gateway restart: an old call that is still running legitimately has
- * a lower sequence number than newer calls that already finished.
+ * Turn one pushed event (`attempt`, `pending` or `entry`) into cards. Unlike a
+ * full payload, a single event says nothing about the rest of the log, so it
+ * cannot signal a gateway restart: an old call that is still running legitimately
+ * has a lower sequence number than newer calls that already finished.
  */
 export function ingestEvent(event, { floor = 0, maxSeq = 0 } = {}) {
-  const entry = event?.data;
-  if (!entry || typeof entry !== "object" || !isNum(entry.seq ?? entry.startSeq)) {
-    return { rows: [], maxSeq };
+  const data = event?.data;
+  if (!data || typeof data !== "object") return { rows: [], maxSeq };
+
+  if (event.event === "attempt") {
+    const row = buildAttemptRow(data);
+    if (!row) return { rows: [], maxSeq };
+    return {
+      rows: row.requestKey > floor ? [row] : [],
+      maxSeq: Math.max(row.requestKey, maxSeq)
+    };
   }
-  const row = buildRow(entry);
-  const newest = Math.max(entry.seq ?? 0, entry.startSeq ?? 0);
+
+  if (!isNum(data.seq ?? data.startSeq)) return { rows: [], maxSeq };
+  const newest = Math.max(data.seq ?? 0, data.startSeq ?? 0);
   return {
-    rows: row && row.key > floor ? [row] : [],
+    rows: buildRows(data).filter((row) => row.requestKey > floor),
     maxSeq: Math.max(newest, maxSeq)
   };
 }
@@ -281,11 +308,8 @@ function haystack(row) {
   return [
     row.state, row.requestId, row.provider, row.model, row.protocol, row.pool, row.requestedModel,
     Number.isInteger(row.keyIndex) ? `key ${row.keyIndex}` : "",
-    row.status, row.reason,
-    ...(row.steps ?? []).flatMap((attempt) => [
-      attempt.provider, attempt.model, Number.isInteger(attempt.keyIndex) ? `key ${attempt.keyIndex}` : "",
-      attempt.status, attempt.reason, attempt.detail
-    ])
+    Number.isInteger(row.callIndex) ? `call ${row.callIndex}` : "",
+    row.status, row.reason, row.detail
   ].filter((part) => part !== null && part !== undefined && part !== "").join(" ").toLowerCase();
 }
 
@@ -316,8 +340,15 @@ export function isNearBottom({ scrollTop, scrollHeight, clientHeight }, threshol
   return scrollHeight - scrollTop - clientHeight <= threshold;
 }
 
+/**
+ * A short, still-distinguishing form of a request id. The gateway's own ids
+ * (`req-<boot>-<000042>`) differ only at the end, so they shorten to `req-42`;
+ * anything else (a client-supplied id) keeps its first characters.
+ */
 export function shortRequestId(id, length = 8) {
   if (!id) return null;
   const text = String(id);
+  const own = /^req-[0-9a-f]+-(\d+)$/i.exec(text);
+  if (own) return `req-${own[1].replace(/^0+(?=\d)/, "")}`;
   return text.length > length ? text.slice(0, length) : text;
 }

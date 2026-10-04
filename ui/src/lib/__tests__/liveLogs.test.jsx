@@ -2,277 +2,394 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  MAX_ROWS, STATE, STEP, buildRow, filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows
+  MAX_ROWS, STATE, buildAttemptRow, buildRequestRow, buildRows, filterRows, ingestEvent, ingestPayload,
+  isLive, isNearBottom, mergeRows, shortRequestId
 } from "../liveLogs.js";
 import { createSseParser } from "../../api/liveStream.js";
-import { LiveLogList, LiveLogRow, describeOutcome, describeStepOutcome, formatClock, formatRowsAsText } from "../../components/domain/LiveLogList.jsx";
+import { LiveLogList, LiveLogRow, describeOutcome, formatClock, formatRowsAsText } from "../../components/domain/LiveLogList.jsx";
 
 const SECRET = "sk-super-secret-provider-key-1234567890";
 const T0 = Date.UTC(2026, 9, 1, 14, 2, 11);
 
-/** key 0 -> 429, key 1 -> 200, same provider and model. */
-function finished(overrides = {}) {
+/**
+ * An attempt event as the gateway sends it (`attempt` push, snapshot or
+ * `/api/attempts`). `n` is the attempt's number: it makes the id, the order and
+ * the start time, so a test reads in the order things happened.
+ */
+function attempt(n, overrides = {}) {
+  return {
+    attemptId: `att-test-${String(n).padStart(6, "0")}`,
+    attemptSeq: n,
+    requestId: "req-a1b2c3-000001",
+    requestSeq: 1,
+    sessionId: "default",
+    pool: "text",
+    protocol: "openai-chat",
+    requestedModel: "model-b",
+    phase: null,
+    callIndex: 1,
+    provider: "groq",
+    model: "model-b",
+    keyIndex: 0,
+    state: "success",
+    ok: true,
+    status: 200,
+    startedAt: T0 + n * 1000,
+    completedAt: T0 + n * 1000 + 120,
+    latencyMs: 120,
+    errorMessage: null,
+    ...overrides
+  };
+}
+
+const failed = (n, status, overrides = {}) =>
+  attempt(n, { state: "failed", ok: false, status, errorMessage: "boom", ...overrides });
+
+const calling = (n, overrides = {}) =>
+  attempt(n, { state: "calling", ok: false, status: null, completedAt: null, latencyMs: null, ...overrides });
+
+const row = (event, ctx) => buildAttemptRow(event, ctx);
+const rowsOf = (...events) => events.map((event) => row(event));
+const render = (rows, now = T0 + 90_000) => renderToStaticMarkup(<LiveLogList rows={rows} now={now} />);
+const cards = (html) => (html.match(/<li class="livelog__card /g) ?? []).length;
+const attemptIds = (html) => [...html.matchAll(/data-attempt-id="([^"]+)"/g)].map((m) => m[1]);
+
+/** A finished request entry as `/api/requests` lists it, attempts nested. */
+function entry(overrides = {}) {
   return {
     seq: 5,
     startSeq: 1,
-    id: "abc12345-aaaa",
-    protocol: "gemini",
-    requestedModel: "gemini-3.7-flash",
+    requestId: "req-a1b2c3-000001",
+    id: "default",
+    protocol: "openai-chat",
+    pool: "text",
+    requestedModel: "model-b",
     receivedAt: T0,
     totalMs: 1820,
     outcome: "success",
     httpStatus: 200,
-    finalProvider: "gemini",
-    finalModel: "gemini-3.7-flash",
-    finalKeyIndex: 1,
-    attempts: [
-      { index: 1, provider: "gemini", model: "gemini-3.7-flash", keyIndex: 0, ok: false, status: 429, startedAt: T0, latencyMs: 410, errorMessage: "quota" },
-      { index: 2, provider: "gemini", model: "gemini-3.7-flash", keyIndex: 1, ok: true, status: 200, startedAt: T0 + 1100, latencyMs: 612, errorMessage: null }
-    ],
-    ...overrides
-  };
-}
-
-function running(overrides = {}) {
-  return {
-    startSeq: 2,
-    id: "run00001-bbbb",
-    protocol: "anthropic",
-    requestedModel: "Qwen/Qwen2.5-Coder-32B-Instruct",
-    receivedAt: T0,
-    outcome: "pending",
+    finalProvider: "groq",
+    finalModel: "model-b",
+    finalKeyIndex: 0,
     attempts: [],
-    attemptCount: 0,
-    fallbackCount: 0,
-    inflight: null,
     ...overrides
   };
 }
 
-const wire = { provider: "huggingface", model: "Qwen/Qwen2.5-Coder-32B-Instruct", keyIndex: 0, startedAt: T0 + 5 };
-const render = (rows, now = T0 + 2500) => renderToStaticMarkup(<LiveLogList rows={rows} now={now} />);
-const cards = (html) => (html.match(/livelog__card /g) ?? []).length;
-const boxes = (html) => (html.match(/data-step-state=/g) ?? []).length;
+describe("one real upstream attempt is one card", () => {
+  it("two calls to the very same target in one request are two cards (Call #3 and Call #4)", () => {
+    const call3 = attempt(3, { callIndex: 3 });
+    const call4 = attempt(4, { callIndex: 4 });
 
-describe("one full card per model tried", () => {
-  it("a finished call with a fallback is two cards, each with its own box", () => {
-    const row = buildRow(finished());
-    expect(row.state).toBe(STATE.SUCCESS);
-    const html = render([row]);
+    const rows = mergeRows([], rowsOf(call3, call4));
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.callIndex)).toEqual([3, 4]);
+    expect(rows[0].key).not.toBe(rows[1].key);
+
+    const html = render(rows);
     expect(cards(html)).toBe(2);
-    expect(boxes(html)).toBe(2);
+    expect(attemptIds(html)).toEqual([call3.attemptId, call4.attemptId]);
+    expect(html).toContain("Call #3");
+    expect(html).toContain("Call #4");
   });
 
-  it("every card has the same shape: a header (time, state, protocol, request id) above its box", () => {
-    const html = render([buildRow(finished())]);
-    const parts = html.split("livelog__card ").slice(1);
-    expect(parts).toHaveLength(2);
-    for (const part of parts) {
-      expect(part).toContain("livelog__card-head");
-      expect(part).toContain("abc12345");
-      expect(part).toContain("gemini · gemini-3.7-flash");
-      expect(part).toContain("data-step-state");
-    }
-    // The failed model's card carries its own state; the last card carries the call's.
-    expect(parts[0]).toContain("FAILED");
-    expect(parts[1]).toContain("SUCCESS");
-    expect(parts[1]).toContain("200 · 1.82 s");
+  it("the same target succeeding on two consecutive requests is two cards", () => {
+    const first = attempt(1, { requestId: "req-a1b2c3-000001", requestSeq: 1 });
+    const second = attempt(2, { requestId: "req-a1b2c3-000002", requestSeq: 2 });
+
+    const rows = mergeRows([], rowsOf(first, second));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.state === STATE.SUCCESS && r.provider === "groq" && r.keyIndex === 0)).toBe(true);
+    expect(rows.map((r) => r.requestId)).toEqual(["req-a1b2c3-000001", "req-a1b2c3-000002"]);
+    expect(cards(render(rows))).toBe(2);
   });
 
-  it("a single-model call is one card, same shape, no FALLBACK line", () => {
-    const html = render([buildRow(finished({ attempts: [{ provider: "gemini", model: "m", keyIndex: 1, ok: true, status: 200, latencyMs: 90 }] }))]);
-    expect(cards(html)).toBe(1);
-    expect(html).not.toContain("FALLBACK");
+  it("the same target failing on two consecutive requests is two cards", () => {
+    const rows = mergeRows([], rowsOf(
+      failed(1, 429, { requestSeq: 1, requestId: "req-a1b2c3-000001" }),
+      failed(2, 429, { requestSeq: 2, requestId: "req-a1b2c3-000002" })
+    ));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.state === STATE.FAILED && r.status === 429)).toBe(true);
   });
 
-  it("the FALLBACK line sits between two cards, not inside one", () => {
-    const html = render([buildRow(finished())]);
-    const first = html.indexOf("livelog__card ");
-    const second = html.indexOf("livelog__card ", first + 1);
-    const fallback = html.indexOf("livelog__fallback");
-    expect(first).toBeLessThan(fallback);
-    expect(fallback).toBeLessThan(second);
+  it("a fallback chain is one card per attempt, in the order they were made", () => {
+    const events = [
+      failed(1, 429, { provider: "gemini", model: "model-a", keyIndex: 0, callIndex: 1 }),
+      failed(2, 500, { provider: "gemini", model: "model-a", keyIndex: 1, callIndex: 2 }),
+      attempt(3, { provider: "groq", model: "model-b", keyIndex: 0, callIndex: 3 })
+    ];
+    // Arrive out of order, as a snapshot and a push can.
+    const rows = mergeRows([], rowsOf(events[2], events[0], events[1]));
+
+    expect(rows.map((r) => r.attemptId)).toEqual(events.map((e) => e.attemptId));
+    expect(rows.map((r) => [r.provider, r.keyIndex, r.status, r.state])).toEqual([
+      ["gemini", 0, 429, STATE.FAILED], ["gemini", 1, 500, STATE.FAILED], ["groq", 0, 200, STATE.SUCCESS]
+    ]);
+    expect(new Set(rows.map((r) => r.requestId)).size).toBe(1);
+
+    const html = render(rows);
+    expect(cards(html)).toBe(3);
+    // A FALLBACK line joins each failed attempt to the next, and only those.
+    expect((html.match(/livelog__fallback/g) ?? []).length).toBe(2);
+    expect(html).toContain("FALLBACK · 429");
+    expect(html).toContain("FALLBACK · 500");
   });
 
-  it("each attempt is a box: the failed one first, then the one that answered", () => {
-    const row = buildRow(finished());
-    expect(row).toMatchObject({ provider: "gemini", keyIndex: 1, status: 200, durationMs: 1820 });
-    expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.SUCCESS]);
-    expect(row.steps[0]).toMatchObject({ keyIndex: 0, status: 429, reason: "rate limited" });
-
-    const html = render([row]);
-    expect(html).toContain("Gemini · gemini-3.7-flash");
-    expect(html).toContain("key 0 · 429 · 410 ms");
-    expect(html).toContain("key 1 · 200 · 1.82 s");
-    expect(html).toContain("abc12345");
+  it("a card says only what its own attempt says", () => {
+    const html = render(rowsOf(failed(1, 429), attempt(2, { callIndex: 2 })));
+    const [firstCard, secondCard] = html.split('<li class="livelog__card ').filter((part) => part.includes("data-attempt-id"));
+    expect(firstCard).toContain("429");
+    expect(firstCard).toContain("FAILED");
+    expect(firstCard).not.toContain("SUCCESS");
+    expect(secondCard).toContain("SUCCESS");
+    expect(secondCard).not.toContain("429");
   });
 
-  it("a FALLBACK line sits between a failed box and the next box, and only there", () => {
-    const html = render([buildRow(finished())]);
-    expect(html).toContain("FALLBACK · 429 · rate limited");
-    expect((html.match(/FALLBACK/g) ?? [])).toHaveLength(1);
-    expect(html.indexOf("data-step-state=\"FAILED\"")).toBeLessThan(html.indexOf("FALLBACK"));
-    expect(html.indexOf("FALLBACK")).toBeLessThan(html.indexOf("data-step-state=\"SUCCESS\""));
+  it("the same provider/model/key shown again later never reuses an older card", () => {
+    let rows = mergeRows([], rowsOf(attempt(1)));
+    const held = rows[0];
+    rows = mergeRows(rows, rowsOf(attempt(2, { requestSeq: 2, requestId: "req-a1b2c3-000002" })));
+    rows = mergeRows(rows, rowsOf(attempt(3, { requestSeq: 3, requestId: "req-a1b2c3-000003" })));
+
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toBe(held);
   });
 
-  it("a plain success is a single box and no fallback line", () => {
-    const row = buildRow(finished({ attempts: [{ provider: "gemini", model: "m", keyIndex: 1, ok: true, status: 200, latencyMs: 90 }] }));
-    expect(row.steps).toHaveLength(1);
-    const html = render([row]);
-    expect(html).not.toContain("FALLBACK");
-    expect(boxes(html)).toBe(1);
+  it("an id is the only thing that makes a card: target, session and request never do", () => {
+    // Identical in every respect except the attempt id.
+    const a = attempt(1);
+    const b = { ...a, attemptId: "att-test-OTHER", attemptSeq: 2 };
+    expect(mergeRows([], rowsOf(a, b))).toHaveLength(2);
   });
 
-  it("different models each get their own box", () => {
-    const row = buildRow(finished({
+  it("a skipped target is not an attempt and gets no card", () => {
+    expect(buildAttemptRow({ skipped: true, provider: "groq", model: "m", keyIndex: 0, index: 1 }, { startSeq: 1 })).toBeNull();
+    const rows = buildRows(entry({
       attempts: [
-        { provider: "groq", model: "model-a", keyIndex: 0, ok: false, status: 503, latencyMs: 80 },
-        { provider: "cerebras", model: "model-b", keyIndex: 0, ok: true, status: 200, latencyMs: 120 }
+        { index: 1, skipped: true, skipReason: "cooldown", provider: "groq", model: "m", keyIndex: 0, ok: false },
+        { ...attempt(1), index: 2 }
       ]
     }));
-    const html = render([row]);
-    expect(html).toContain("model-a");
-    expect(html).toContain("model-b");
-    expect(boxes(html)).toBe(2);
-  });
-
-  it("a failed call shows every failed box and the reason", () => {
-    const row = buildRow(finished({
-      outcome: "failed",
-      httpStatus: 502,
-      errorMessage: "All routing targets failed",
-      finalProvider: "gemini", finalModel: "m", finalKeyIndex: 1,
-      attempts: [
-        { provider: "gemini", model: "m", keyIndex: 0, ok: false, status: 429, latencyMs: 50 },
-        { provider: "gemini", model: "m", keyIndex: 1, ok: false, status: 500, latencyMs: 60 }
-      ]
-    }));
-    expect(row.state).toBe(STATE.FAILED);
-    expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.FAILED]);
-    const html = render([row]);
-    expect(html).toContain("FAILED");
-    expect(html).toContain("All routing targets failed");
-    expect(html).toContain("502");
-    expect(html).not.toContain("SUCCESS");
-  });
-
-  it("represents a request that never reached a provider", () => {
-    const row = buildRow({ seq: 3, id: "r3", receivedAt: T0, httpStatus: 401, outcome: "failed", errorMessage: "client authentication failed", attempts: [] });
-    expect(row).toMatchObject({ state: STATE.FAILED, status: 401, reason: "client authentication failed", key: 3 });
-    expect(row.steps).toEqual([]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].attemptId).toBe("att-test-000001");
   });
 });
 
-describe("a row moves through the call", () => {
-  it("ROUTING: received, nothing on the wire yet", () => {
-    const row = buildRow(running());
-    expect(row.state).toBe(STATE.ROUTING);
-    expect(isLive(row)).toBe(true);
-    const html = render([row]);
-    expect(html).toContain("ROUTING");
-    expect(html).toContain("livelog__type--live");
-    expect(html).toContain("anthropic · Qwen/Qwen2.5-Coder-32B-Instruct");
-    expect(row.steps.map((step) => step.state)).toEqual([STEP.ROUTING]);
+describe("an attempt moves once, and only that attempt moves", () => {
+  it("CALLING becomes SUCCESS or FAILED on the same card, not on a new one", () => {
+    let rows = mergeRows([], rowsOf(calling(1)));
+    expect(rows[0].state).toBe(STATE.CALLING);
+    expect(isLive(rows[0])).toBe(true);
+
+    rows = mergeRows(rows, rowsOf(attempt(1)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe(STATE.SUCCESS);
+    expect(rows[0].status).toBe(200);
+    expect(isLive(rows[0])).toBe(false);
+
+    let other = mergeRows([], rowsOf(calling(2)));
+    other = mergeRows(other, rowsOf(failed(2, 500)));
+    expect(other).toHaveLength(1);
+    expect(other[0].state).toBe(STATE.FAILED);
   });
 
-  it("RUNNING: the first attempt is on the wire", () => {
-    const row = buildRow(running({ inflight: wire }));
-    expect(row.state).toBe(STATE.RUNNING);
-    expect(row.steps.map((step) => step.state)).toEqual([STEP.CALLING]);
-    const html = render([row]);
-    expect(html).toContain("CALLING");
-    expect(html).toContain("Hugging Face · Qwen/Qwen2.5-Coder-32B-Instruct");
-    expect(html).toContain("key 0 · 2.50 s");
+  it("a later attempt never changes an earlier attempt's card", () => {
+    let rows = mergeRows([], rowsOf(failed(1, 429)));
+    const first = rows[0];
+
+    rows = mergeRows(rows, rowsOf(calling(2, { callIndex: 2 })));
+    rows = mergeRows(rows, rowsOf(attempt(2, { callIndex: 2 })));
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toBe(first);
+    expect(rows[0].state).toBe(STATE.FAILED);
+    expect(rows[0].status).toBe(429);
   });
 
-  it("RETRYING: a failure happened and the next target is on the wire", () => {
-    const row = buildRow(running({
-      attempts: [{ provider: "huggingface", model: "m", keyIndex: 0, ok: false, status: 429, latencyMs: 300 }],
-      attemptCount: 1,
-      inflight: { provider: "huggingface", model: "m", keyIndex: 1, startedAt: T0 + 400 }
-    }));
-    expect(row.state).toBe(STATE.RETRYING);
-    expect(row.keyIndex).toBe(1);
-    const html = render([row]);
-    expect(html).toContain("RETRYING");
-    expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.CALLING]);
-    expect(html).toContain("FALLBACK · 429 · rate limited");
-    expect(html).toContain("Hugging Face · m");
-    expect(html).toContain("key 0 · 429 · 300 ms");
-    expect(html).toContain("key 1 · ");
+  it("a stale snapshot never turns a finished attempt back into CALLING", () => {
+    let rows = mergeRows([], rowsOf(attempt(1)));
+    rows = mergeRows(rows, rowsOf(calling(1)));
+    expect(rows[0].state).toBe(STATE.SUCCESS);
   });
 
-  it("after a failure with nothing on the wire yet, the next box is a ROUTING placeholder", () => {
-    const row = buildRow(running({
-      attempts: [{ provider: "groq", model: "m", keyIndex: 0, ok: false, status: 500, latencyMs: 40 }],
-      attemptCount: 1
-    }));
-    expect(row.state).toBe(STATE.RETRYING);
-    expect(row.steps.map((step) => step.state)).toEqual([STEP.FAILED, STEP.ROUTING]);
-    expect(render([row])).toContain("Choosing next target");
+  it("a finished attempt is final: a conflicting report cannot rewrite it", () => {
+    let rows = mergeRows([], rowsOf(failed(1, 429)));
+    const held = rows[0];
+    rows = mergeRows(rows, rowsOf(attempt(1)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toBe(held);
+    expect(rows[0].status).toBe(429);
   });
 
-  it("a call whose last attempt succeeded but is still finishing is RUNNING, not RETRYING", () => {
-    const row = buildRow(running({
-      attempts: [{ provider: "groq", model: "m", keyIndex: 0, ok: true, status: 200, latencyMs: 40 }],
-      attemptCount: 1
-    }));
-    expect(row.state).toBe(STATE.RUNNING);
-    expect(row.steps.map((step) => step.state)).toEqual([STEP.SUCCESS]);
+  it("a request with nothing on the wire yet is one ROUTING card that a real attempt replaces", () => {
+    const routing = buildRows(entry({ outcome: "pending", attempts: [], inflight: null, totalMs: null, httpStatus: null }));
+    expect(routing).toHaveLength(1);
+    expect(routing[0]).toMatchObject({ kind: "request", state: STATE.ROUTING, key: "req:1" });
+
+    let rows = mergeRows([], routing);
+    expect(isLive(rows[0])).toBe(true);
+    rows = mergeRows(rows, rowsOf(calling(1)));
+    expect(rows.map((r) => r.kind)).toEqual(["attempt"]);
   });
 
-  it("the same call keeps one key from start to finish, so it updates in place", () => {
-    const rows = [
-      buildRow(running({ startSeq: 7 })),
-      buildRow(running({ startSeq: 7, inflight: wire })),
-      buildRow({ ...finished({ startSeq: 7, seq: 9 }) })
-    ];
-    expect(new Set(rows.map((row) => row.key))).toEqual(new Set([7]));
+  it("a request rejected before any provider was tried is a single request card", () => {
+    const [card] = buildRows(entry({ outcome: "failed", httpStatus: 503, errorType: "no_route", errorMessage: "No route", attempts: [], finalProvider: null, finalModel: null, finalKeyIndex: null }));
+    expect(card).toMatchObject({ kind: "request", state: STATE.FAILED, status: 503, reason: "No route" });
+    const html = render([card]);
+    expect(cards(html)).toBe(1);
+    expect(html).not.toContain("data-step-state");
+  });
+});
 
-    let current = [];
-    for (const row of rows) current = mergeRows(current, [row]);
-    expect(current).toHaveLength(1);
-    expect(current[0].state).toBe(STATE.SUCCESS);
+describe("live and historical logs use the same attempt events", () => {
+  it("an `attempt` push becomes a card; the same id later updates it, a new id is a new card", () => {
+    const first = ingestEvent({ event: "attempt", data: calling(1) });
+    expect(first.rows).toHaveLength(1);
+    expect(first.rows[0].state).toBe(STATE.CALLING);
+
+    let rows = mergeRows([], first.rows);
+    rows = mergeRows(rows, ingestEvent({ event: "attempt", data: attempt(1) }).rows);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe(STATE.SUCCESS);
+
+    // The same target once more: a new attempt id, a new card.
+    rows = mergeRows(rows, ingestEvent({ event: "attempt", data: calling(2, { requestSeq: 2, requestId: "req-a1b2c3-000002" }) }).rows);
+    rows = mergeRows(rows, ingestEvent({ event: "attempt", data: attempt(2, { requestSeq: 2, requestId: "req-a1b2c3-000002" }) }).rows);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.state)).toEqual([STATE.SUCCESS, STATE.SUCCESS]);
   });
 
-  it("the elapsed time of a running call follows the clock; a finished call is fixed", () => {
-    const row = buildRow(running({ inflight: wire }));
-    expect(describeOutcome(row, T0 + 1500)).toBe("1.50 s");
-    expect(describeOutcome(row, T0 + 4200)).toBe("4.20 s");
-    expect(describeOutcome(buildRow(finished()), T0 + 99_000)).toBe("200 · 1.82 s");
+  it("every real attempt pushed one after another is appended, never replaced", () => {
+    let rows = [];
+    for (const event of [calling(1), failed(1, 429), calling(2), failed(2, 500), calling(3), attempt(3)]) {
+      rows = mergeRows(rows, ingestEvent({ event: "attempt", data: event }).rows);
+    }
+    expect(rows.map((r) => [r.callIndex ?? 1, r.status])).toEqual([[1, 429], [1, 500], [1, 200]]);
+    expect(rows).toHaveLength(3);
   });
 
-  it("a CALLING box ticks from its own start; finished boxes are fixed", () => {
-    const [calling] = buildRow(running({ inflight: wire })).steps;
-    expect(describeStepOutcome(calling, wire.startedAt + 1500)).toBe("1.50 s");
-    const [failed] = buildRow(finished()).steps;
-    expect(describeStepOutcome(failed, T0 + 99_000)).toBe("429 · 410 ms");
+  it("a snapshot lists every attempt as its own card, including identical targets", () => {
+    const payload = {
+      entries: [entry({
+        attempts: [
+          { ...failed(1, 429, { provider: "gemini", model: "model-a" }), index: 1 },
+          { ...attempt(2, { callIndex: 2 }), index: 2 },
+          { ...attempt(3, { callIndex: 3 }), index: 3 }
+        ]
+      })],
+      pending: [],
+      attempts: [failed(1, 429, { provider: "gemini", model: "model-a" }), attempt(2, { callIndex: 2 }), attempt(3, { callIndex: 3 })]
+    };
+    const { rows } = ingestPayload(payload);
+    const merged = mergeRows([], rows);
+
+    // The listed events and the request's nested attempts are the same attempts: no duplicates.
+    expect(merged).toHaveLength(3);
+    expect(merged.map((r) => r.attemptId)).toEqual(["att-test-000001", "att-test-000002", "att-test-000003"]);
+    expect(merged[1].provider).toBe(merged[2].provider);
+    expect(merged[1].key).not.toBe(merged[2].key);
+  });
+
+  it("a history built from nested attempts alone (no event list) is the same cards", () => {
+    const nested = entry({ attempts: [{ ...failed(1, 429), index: 1 }, { ...attempt(2, { callIndex: 2 }), index: 2 }] });
+    const viaEntry = mergeRows([], ingestPayload({ entries: [nested], pending: [] }).rows);
+    const viaEvents = mergeRows([], ingestPayload({ entries: [], pending: [], attempts: [failed(1, 429), attempt(2, { callIndex: 2 })] }).rows);
+    expect(viaEntry.map((r) => [r.attemptId, r.state, r.status])).toEqual(viaEvents.map((r) => [r.attemptId, r.state, r.status]));
+  });
+
+  it("a running request's attempt on the wire is a CALLING card; its finished attempts keep theirs", () => {
+    const pending = entry({
+      outcome: "pending", totalMs: null, httpStatus: null,
+      attempts: [{ ...failed(1, 429), index: 1 }],
+      inflight: { attemptId: "att-test-000002", provider: "groq", model: "model-b", keyIndex: 1, protocol: "openai-chat", startedAt: T0 + 2000 }
+    });
+    const rows = mergeRows([], buildRows(pending));
+    expect(rows.map((r) => [r.attemptId, r.state])).toEqual([["att-test-000001", STATE.FAILED], ["att-test-000002", STATE.CALLING]]);
+  });
+
+  it("an older gateway with no attempt ids still gets one card per attempt, never shared across requests", () => {
+    const a = { index: 1, provider: "groq", model: "m", keyIndex: 0, ok: true, status: 200, startedAt: T0, latencyMs: 5 };
+    const rows = mergeRows([], [
+      ...buildRows(entry({ startSeq: 1, seq: 1, attempts: [a] })),
+      ...buildRows(entry({ startSeq: 2, seq: 2, attempts: [a] }))
+    ]);
+    expect(rows).toHaveLength(2);
+  });
+
+  it("does not bring back cleared cards, and starts over when the gateway restarts", () => {
+    const payload = { entries: [], pending: [], attempts: [attempt(1, { requestSeq: 3 })] };
+    expect(ingestPayload(payload, { floor: 3 }).rows).toEqual([]);
+    expect(ingestEvent({ event: "attempt", data: attempt(1, { requestSeq: 3 }) }, { floor: 3 }).rows).toEqual([]);
+    expect(ingestPayload(payload, { floor: 2 }).rows).toHaveLength(1);
+
+    const afterRestart = ingestPayload({ entries: [], pending: [], attempts: [attempt(1, { requestSeq: 1, attemptId: "att-new-000001" })] }, { maxSeq: 40 });
+    expect(afterRestart.restarted).toBe(true);
+    expect(afterRestart.rows).toHaveLength(1);
+  });
+
+  it("ignores malformed events and payloads", () => {
+    expect(ingestEvent({ event: "attempt", data: null }).rows).toEqual([]);
+    expect(ingestEvent({ event: "attempt", data: { provider: "groq" } }).rows).toEqual([]);
+    expect(ingestEvent({ event: "pending", data: { nope: true } }).rows).toEqual([]);
+    expect(ingestPayload({}).rows).toEqual([]);
+    expect(buildRows(null)).toEqual([]);
+    expect(buildRequestRow(null)).toBeNull();
+  });
+});
+
+describe("text and vision attempts stay apart", () => {
+  it("an identical target in each pool gives two independent cards, each tagged with its pool", () => {
+    const text = attempt(1, { pool: "text", requestSeq: 1, requestId: "req-a1b2c3-000001" });
+    const vision = attempt(2, { pool: "vision", requestSeq: 2, requestId: "req-a1b2c3-000002" });
+    const rows = mergeRows([], rowsOf(text, vision));
+
+    expect(rows.map((r) => r.pool)).toEqual(["text", "vision"]);
+    expect(filterRows(rows, { pool: "vision" }).map((r) => r.attemptId)).toEqual([vision.attemptId]);
+    expect(filterRows(rows, { pool: "text" }).map((r) => r.attemptId)).toEqual([text.attemptId]);
+    expect(filterRows(rows, { search: "vision" })).toHaveLength(1);
+
+    const html = render(rows);
+    expect(cards(html)).toBe(2);
+    expect(html).toContain("livelog__pool--text");
+    expect(html).toContain("livelog__pool--vision");
+  });
+
+  it("defaults to text, and an unknown pool never becomes vision", () => {
+    expect(row(attempt(1, { pool: undefined })).pool).toBe("text");
+    expect(row(attempt(1, { pool: "sideways" })).pool).toBe("text");
+    expect(row(attempt(1, { pool: "vision" })).pool).toBe("vision");
+  });
+
+  it("vision attempts keep their own independent fallback chain", () => {
+    const rows = mergeRows([], rowsOf(
+      failed(1, 429, { pool: "vision", provider: "openrouter", requestSeq: 1 }),
+      attempt(2, { pool: "vision", provider: "mistral", callIndex: 2, requestSeq: 1 }),
+      attempt(3, { pool: "text", requestSeq: 2, requestId: "req-a1b2c3-000002" })
+    ));
+    expect(rows.map((r) => r.pool)).toEqual(["vision", "vision", "text"]);
+    expect((render(rows).match(/livelog__fallback/g) ?? []).length).toBe(1);
   });
 });
 
 describe("rendering safety", () => {
   it("does not crash on sparse rows", () => {
     const rows = [
-      buildRow({}), buildRow(null), buildRow({ seq: 9, attempts: [null, {}, { ok: true }] }),
-      buildRow({ startSeq: 4, outcome: "pending" })
-    ].filter(Boolean);
+      ...buildRows({}), ...buildRows(null),
+      ...buildRows({ seq: 9, startSeq: 9, attempts: [null, {}, { ok: true }] }),
+      ...buildRows({ startSeq: 4, outcome: "pending" })
+    ];
     expect(() => render(rows)).not.toThrow();
     expect(renderToStaticMarkup(<LiveLogRow row={null} />)).toBe("");
     expect(formatClock(undefined)).toBe("—");
   });
 
   it("never renders secrets or credential-bearing text", () => {
-    const row = buildRow(finished({
-      errorMessage: `all failed: Authorization: Bearer ${SECRET}`,
-      outcome: "failed",
-      attempts: [{
-        provider: "gemini", model: "gemini-3.7-flash", keyIndex: 0, ok: false, status: 401, latencyMs: 50,
-        errorMessage: `invalid key ${SECRET} (x-goog-api-key rejected, api_key=${SECRET})`,
-        apiKey: SECRET, authorization: `Bearer ${SECRET}`, headers: { authorization: `Bearer ${SECRET}` }
-      }]
-    }));
-
-    const html = render([row]);
+    const rows = [row(failed(1, 401, {
+      errorMessage: `invalid key ${SECRET} (x-goog-api-key rejected, api_key=${SECRET}) Authorization: Bearer ${SECRET}`,
+      apiKey: SECRET, authorization: `Bearer ${SECRET}`, headers: { authorization: `Bearer ${SECRET}` }
+    }))];
+    const html = render(rows);
     expect(html).not.toContain(SECRET);
     expect(html).not.toMatch(/Bearer/i);
     expect(html).not.toMatch(/authorization/i);
@@ -283,8 +400,8 @@ describe("rendering safety", () => {
   it("scrubs secrets even when handed an unsanitized row directly", () => {
     const html = renderToStaticMarkup(
       <LiveLogRow row={{
-        key: 1, state: STATE.FAILED, provider: "groq", keyIndex: 2, reason: `boom ${SECRET}`,
-        steps: [{ state: STEP.FAILED, provider: "groq", keyIndex: 2, status: 500, detail: `x ${SECRET}`, reason: `y ${SECRET}` }]
+        key: "att-x", kind: "attempt", state: STATE.FAILED, provider: "groq", keyIndex: 2, status: 500,
+        reason: `y ${SECRET}`, detail: `x ${SECRET}`
       }} />
     );
     expect(html).not.toContain(SECRET);
@@ -292,58 +409,80 @@ describe("rendering safety", () => {
   });
 });
 
-describe("ingestion and filtering", () => {
-  it("builds rows from both finished entries and running ones", () => {
-    const { rows, maxSeq } = ingestPayload({ entries: [finished()], pending: [running({ startSeq: 8 })] });
-    expect(rows.map((row) => row.state).sort()).toEqual([STATE.ROUTING, STATE.SUCCESS]);
-    expect(maxSeq).toBe(8);
+describe("the card", () => {
+  it("shows the time, state, pool, call number, request id, then the model and the key/status/time", () => {
+    const html = render(rowsOf(attempt(1, { keyIndex: 3, callIndex: 2 })));
+    expect(html).toContain("14:02:12".slice(0, 3)); // a clock is present
+    expect(html).toContain("SUCCESS");
+    expect(html).toContain("TEXT");
+    expect(html).toContain("Call #2");
+    expect(html).toContain("req-1");
+    expect(html).toContain("key 3 · 200 · 120 ms");
+    expect(html).toContain("Groq · model-b");
   });
 
-  it("a running call becomes its finished row on the next poll", () => {
-    const first = ingestPayload({ entries: [], pending: [running({ startSeq: 3, inflight: wire })] });
-    const after = ingestPayload({ entries: [finished({ startSeq: 3, seq: 4 })], pending: [] }, { maxSeq: first.maxSeq });
-
-    const merged = mergeRows(mergeRows([], first.rows), after.rows);
-    expect(merged).toHaveLength(1);
-    expect(merged[0].state).toBe(STATE.SUCCESS);
+  it("the model box is just the model: no key, no status", () => {
+    const html = render(rowsOf(attempt(1)));
+    const box = /livelog__target mono" title="([^"]*)"/.exec(html)[1];
+    expect(box).toBe("Groq · model-b");
   });
 
-  it("does not bring back rows that were cleared", () => {
-    const { rows } = ingestPayload({ entries: [finished({ startSeq: 1, seq: 2 }), finished({ startSeq: 3, seq: 4, id: "later" })] }, { floor: 2, maxSeq: 4 });
-    expect(rows.map((row) => row.requestId)).toEqual(["later"]);
+  it("a CALLING card ticks from its own start; a finished card is fixed", () => {
+    const r = row(calling(1));
+    expect(describeOutcome(r, r.ts + 1500)).toBe("1.50 s");
+    expect(describeOutcome(r, r.ts + 4000)).toBe("4.00 s");
+    const done = row(attempt(1));
+    expect(describeOutcome(done, done.ts + 99_000)).toBe(describeOutcome(done, done.ts + 1));
   });
 
-  it("detects a gateway restart (sequence counter reset)", () => {
-    const result = ingestPayload({ entries: [finished({ startSeq: 1, seq: 2, id: "fresh" })] }, { floor: 50, maxSeq: 57 });
-    expect(result.restarted).toBe(true);
-    expect(result.rows.map((row) => row.requestId)).toEqual(["fresh"]);
+  it("a failed card says why", () => {
+    const html = render(rowsOf(failed(1, 429, { errorMessage: "quota exhausted" })));
+    expect(html).toContain("livelog__detail--failed");
+    expect(html).toContain("quota exhausted");
   });
 
-  it("merges chronologically with the newest last, de-duplicated and capped", () => {
-    const early = buildRow(finished({ startSeq: 1, receivedAt: T0 }));
-    const late = buildRow(finished({ startSeq: 2, receivedAt: T0 + 60_000, id: "late" }));
-
-    const merged = mergeRows([late], [early]);
-    expect(merged.map((row) => row.key)).toEqual([1, 2]);
-    expect(mergeRows(merged, [early])).toHaveLength(2);
-    expect(mergeRows(merged, [buildRow(finished({ startSeq: 3, receivedAt: T0 + 120_000 }))], { max: 2 })).toHaveLength(2);
+  it("marks the first card of each request, so requests read as groups", () => {
+    const html = render(rowsOf(
+      failed(1, 429), attempt(2, { callIndex: 2 }),
+      attempt(3, { requestSeq: 2, requestId: "req-a1b2c3-000002" })
+    ));
+    expect((html.match(/livelog__card--first/g) ?? []).length).toBe(2);
   });
+});
+
+describe("filtering", () => {
+  const rows = mergeRows([], rowsOf(
+    failed(1, 429, { provider: "gemini", model: "model-a" }),
+    calling(2, { callIndex: 2, provider: "groq" }),
+    attempt(3, { callIndex: 3, provider: "groq" }),
+    attempt(4, { requestId: "req-a1b2c3-000009", requestSeq: 9 })
+  ));
 
   it("filters by provider, status, search and request id", () => {
-    const all = [
-      buildRow(finished({ startSeq: 1, id: "abc123" })),
-      buildRow(finished({ startSeq: 2, id: "zzz999", finalProvider: "groq", attempts: [{ provider: "groq", model: "model-a", keyIndex: 0, ok: true, status: 200, latencyMs: 90 }] })),
-      buildRow(finished({ startSeq: 3, id: "bad", outcome: "failed", httpStatus: 502, errorMessage: "boom" })),
-      buildRow(running({ startSeq: 4, id: "live1", inflight: wire }))
-    ];
+    expect(filterRows(rows, { provider: "gemini" }).map((r) => r.attemptId)).toEqual(["att-test-000001"]);
+    expect(filterRows(rows, { status: "failed" })).toHaveLength(1);
+    expect(filterRows(rows, { status: "running" }).map((r) => r.attemptId)).toEqual(["att-test-000002"]);
+    expect(filterRows(rows, { status: "success" })).toHaveLength(2);
+    expect(filterRows(rows, { search: "429" })).toHaveLength(1);
+    expect(filterRows(rows, { search: "call 3" })).toHaveLength(1);
+    expect(filterRows(rows, { requestId: "000009" }).map((r) => r.attemptId)).toEqual(["att-test-000004"]);
+    expect(filterRows(rows, {})).toHaveLength(4);
+  });
+});
 
-    expect(filterRows(all, { provider: "groq" }).map((row) => row.requestId)).toEqual(["zzz999"]);
-    expect(filterRows(all, { status: "failed" }).map((row) => row.requestId)).toEqual(["bad"]);
-    expect(filterRows(all, { status: "success" })).toHaveLength(2);
-    expect(filterRows(all, { status: "running" }).map((row) => row.requestId)).toEqual(["live1"]);
-    expect(filterRows(all, { requestId: "zzz" }).map((row) => row.requestId)).toEqual(["zzz999"]);
-    expect(filterRows(all, { search: "rate limited" }).map((row) => row.requestId)).toContain("abc123");
-    expect(filterRows(all, {})).toHaveLength(all.length);
+describe("the request id is not the attempt id", () => {
+  it("short ids keep what tells requests apart", () => {
+    expect(shortRequestId("req-0996e6-000042")).toBe("req-42");
+    expect(shortRequestId("req-0996e6-000001")).not.toBe(shortRequestId("req-0996e6-000002"));
+    expect(shortRequestId("abc12345-aaaa")).toBe("abc12345");
+    expect(shortRequestId(null)).toBeNull();
+  });
+
+  it("a card carries both: the request it belongs to and its own attempt", () => {
+    const r = row(attempt(7, { requestId: "req-a1b2c3-000004" }));
+    expect(r.requestId).toBe("req-a1b2c3-000004");
+    expect(r.attemptId).toBe("att-test-000007");
+    expect(r.key).toBe(r.attemptId);
   });
 });
 
@@ -352,77 +491,6 @@ describe("auto-scroll", () => {
     expect(isNearBottom({ scrollTop: 480, scrollHeight: 1000, clientHeight: 500 })).toBe(true);
     expect(isNearBottom({ scrollTop: 100, scrollHeight: 1000, clientHeight: 500 })).toBe(false);
     expect(isNearBottom({})).toBe(true);
-  });
-});
-
-describe("the model box is just the model; key and figures live in the card header", () => {
-  it("the box shows `Provider · model` only, with no key and no status or time", () => {
-    const html = render([buildRow(finished())]);
-    const boxHtml = [...html.matchAll(/<div class="livelog__step livelog__step--[a-z]+[^"]*"[\s\S]*?<\/div><\/div>/g)].map((m) => m[0]);
-    expect(boxHtml).toHaveLength(2);
-    for (const box of boxHtml) {
-      expect(box).toContain("Gemini · gemini-3.7-flash");
-      expect(box).not.toMatch(/key \d/);
-      expect(box).not.toMatch(/\b(200|429)\b/);
-      expect(box).not.toMatch(/\d\s?(ms|s)\b/);
-    }
-  });
-
-  it("the header shows the key first, then status and time", () => {
-    const html = render([buildRow(finished())]);
-    expect(html).toContain("key 0 · 429 · 410 ms");
-    expect(html).toContain("key 1 · 200 · 1.82 s");
-  });
-});
-
-describe("pushed events", () => {
-  it("an event becomes a row; an old running call is not mistaken for a gateway restart", () => {
-    const { rows, maxSeq } = ingestEvent({ event: "pending", data: running({ startSeq: 3, inflight: wire }) }, { maxSeq: 40 });
-    expect(rows).toHaveLength(1);
-    expect(rows[0].state).toBe(STATE.RUNNING);
-    expect(maxSeq).toBe(40);
-  });
-
-  it("ignores malformed events and respects the cleared floor", () => {
-    expect(ingestEvent({ event: "pending", data: null }).rows).toEqual([]);
-    expect(ingestEvent({ event: "entry", data: finished({ startSeq: 2, seq: 3 }) }, { floor: 3 }).rows).toEqual([]);
-  });
-
-  it("each pushed step updates the same card: ROUTING -> CALLING -> fallback -> SUCCESS", () => {
-    const events = [
-      running({ startSeq: 7 }),
-      running({ startSeq: 7, inflight: wire }),
-      running({ startSeq: 7, attempts: [{ provider: "huggingface", model: "m", keyIndex: 0, ok: false, status: 429, latencyMs: 90 }], inflight: null }),
-      running({ startSeq: 7, attempts: [{ provider: "huggingface", model: "m", keyIndex: 0, ok: false, status: 429, latencyMs: 90 }], inflight: { ...wire, keyIndex: 1 } })
-    ];
-    let current = [];
-    const seen = [];
-    for (const data of events) {
-      current = mergeRows(current, ingestEvent({ event: "pending", data }).rows);
-      seen.push(current[0].steps.map((step) => step.state).join(","));
-    }
-    current = mergeRows(current, ingestEvent({ event: "entry", data: finished({ startSeq: 7, seq: 9 }) }).rows);
-    seen.push(current[0].steps.map((step) => step.state).join(","));
-
-    expect(current).toHaveLength(1);
-    expect(seen).toEqual([
-      "ROUTING", "CALLING", "FAILED,ROUTING", "FAILED,CALLING", "FAILED,SUCCESS"
-    ]);
-  });
-
-  it("a stale snapshot never turns a finished call back into a running one", () => {
-    const done = buildRow(finished({ startSeq: 5, seq: 6 }));
-    const stale = buildRow(running({ startSeq: 5, inflight: wire }));
-    expect(mergeRows([done], [stale])[0].state).toBe(STATE.SUCCESS);
-  });
-
-  it("a stale snapshot never moves a running call backwards", () => {
-    const calling = buildRow(running({ startSeq: 5, inflight: wire }));
-    const older = buildRow(running({ startSeq: 5 }));
-    expect(mergeRows([calling], [older])[0].state).toBe(STATE.RUNNING);
-
-    const retrying = buildRow(running({ startSeq: 5, attempts: [{ provider: "g", model: "m", keyIndex: 0, ok: false, status: 500, latencyMs: 1 }], inflight: wire }));
-    expect(mergeRows([retrying], [calling])[0].steps).toHaveLength(2);
   });
 });
 
@@ -436,9 +504,9 @@ describe("SSE parser", () => {
 
   it("parses events split across chunks and ignores heartbeats", () => {
     const out = collect([
-      ": ping\n\nevent: pending\nda", 'ta: {"a":1}\n', '\nevent: entry\ndata: {"b":2}\n\n'
+      ": ping\n\nevent: attempt\nda", 'ta: {"a":1}\n', '\nevent: entry\ndata: {"b":2}\n\n'
     ]);
-    expect(out).toEqual([{ event: "pending", data: { a: 1 } }, { event: "entry", data: { b: 2 } }]);
+    expect(out).toEqual([{ event: "attempt", data: { a: 1 } }, { event: "entry", data: { b: 2 } }]);
   });
 
   it("handles CRLF and skips malformed data without throwing", () => {
@@ -447,91 +515,66 @@ describe("SSE parser", () => {
   });
 });
 
-describe("only the last 50 calls are kept", () => {
-  const call = (n) => buildRow(finished({ startSeq: n, seq: n, id: `id-${n}`, receivedAt: T0 + n * 1000 }));
+describe("only the last 50 cards are kept", () => {
+  const one = (n) => row(attempt(n, { requestSeq: n, requestId: `req-a1b2c3-${String(n).padStart(6, "0")}` }));
 
   it("keeps 50", () => {
     expect(MAX_ROWS).toBe(50);
   });
 
-  it("drops the oldest call as soon as a newer one arrives past 50", () => {
+  it("drops the oldest card as soon as a newer one arrives past 50", () => {
     let rows = [];
-    for (let n = 1; n <= 50; n += 1) rows = mergeRows(rows, [call(n)]);
+    for (let n = 1; n <= 50; n += 1) rows = mergeRows(rows, [one(n)]);
     expect(rows).toHaveLength(50);
-    expect(rows[0].requestId).toBe("id-1");
+    expect(rows[0].attemptId).toBe("att-test-000001");
 
-    rows = mergeRows(rows, [call(51)]);
+    rows = mergeRows(rows, [one(51)]);
     expect(rows).toHaveLength(50);
-    expect(rows[0].requestId).toBe("id-2");
-    expect(rows.at(-1).requestId).toBe("id-51");
+    expect(rows[0].attemptId).toBe("att-test-000002");
+    expect(rows.at(-1).attemptId).toBe("att-test-000051");
   });
 
-  it("a burst of new calls keeps only the newest 50, in order", () => {
-    const rows = mergeRows([], Array.from({ length: 120 }, (_, i) => call(i + 1)));
+  it("a burst of new cards keeps only the newest 50, in order", () => {
+    const rows = mergeRows([], Array.from({ length: 120 }, (_, i) => one(i + 1)));
     expect(rows).toHaveLength(50);
-    expect(rows[0].requestId).toBe("id-71");
-    expect(rows.at(-1).requestId).toBe("id-120");
+    expect(rows[0].attemptId).toBe("att-test-000071");
+    expect(rows.at(-1).attemptId).toBe("att-test-000120");
   });
 
-  it("updating a call already shown does not push another one out", () => {
-    let rows = mergeRows([], Array.from({ length: 50 }, (_, i) => call(i + 1)));
-    rows = mergeRows(rows, [call(50)]);
+  it("settling an attempt already shown does not push another card out", () => {
+    let rows = mergeRows([], Array.from({ length: 50 }, (_, i) => one(i + 1)));
+    rows = mergeRows(rows, [row(calling(50, { requestSeq: 50 }))]);
     expect(rows).toHaveLength(50);
-    expect(rows[0].requestId).toBe("id-1");
+    expect(rows[0].attemptId).toBe("att-test-000001");
   });
 });
 
 describe("copy logs as text", () => {
-  it("writes every model tried, the fallback line and the failure reason", () => {
-    const text = formatRowsAsText([buildRow(finished())]);
-    expect(text).toContain("SUCCESS");
-    expect(text).toContain("1. FAILED");
-    expect(text).toContain("↓ FALLBACK · 429");
-    expect(text).toContain("2. SUCCESS");
-    expect(text).toContain("key 0");
-    expect(text).toContain("key 1");
-    expect(text).toContain("quota");
+  it("writes one block per attempt, with its call number, ids, target, key and failure reason", () => {
+    const text = formatRowsAsText(rowsOf(failed(1, 429, { errorMessage: "quota" }), attempt(2, { callIndex: 2, keyIndex: 1 })));
+    const [first, second] = text.split("\n\n");
+    expect(first).toContain("FAILED");
+    expect(first).toContain("call #1");
+    expect(first).toContain("attempt att-test-000001");
+    expect(first).toContain("key 0");
+    expect(first).toContain("quota");
+    expect(second).toContain("SUCCESS");
+    expect(second).toContain("call #2");
+    expect(second).toContain("attempt att-test-000002");
+    expect(second).toContain("key 1");
+  });
+
+  it("prints the pool", () => {
+    expect(formatRowsAsText(rowsOf(attempt(1, { pool: "vision" })))).toContain("VISION");
+    expect(formatRowsAsText(rowsOf(attempt(1)))).toContain("TEXT");
   });
 
   it("never leaks a credential-shaped string", () => {
-    const row = buildRow(finished({
-      attempts: [{ index: 1, provider: "gemini", model: "m", keyIndex: 0, ok: false, status: 500, startedAt: T0, latencyMs: 5, errorMessage: `bad key ${SECRET}` }],
-      outcome: "failed", httpStatus: 500
-    }));
-    expect(formatRowsAsText([row])).not.toContain(SECRET);
+    expect(formatRowsAsText(rowsOf(failed(1, 500, { errorMessage: `bad key ${SECRET}` })))).not.toContain(SECRET);
   });
 
   it("is empty for no rows", () => {
     expect(formatRowsAsText([])).toBe("");
     expect(formatRowsAsText(null)).toBe("");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Routing pool
-// ---------------------------------------------------------------------------
-
-describe("the log identifies the routing pool", () => {
-  it("defaults to text and preserves an explicit vision pool", () => {
-    expect(buildRow(finished()).pool).toBe("text");
-    expect(buildRow(finished({ pool: "vision" })).pool).toBe("vision");
-    // A gateway that never sends the field must not be mislabelled.
-    expect(buildRow(finished({ pool: "sideways" })).pool).toBe("text");
-  });
-
-  it("filters by pool and searches on it", () => {
-    const rows = [
-      buildRow(finished({ startSeq: 1, id: "t1", pool: "text" })),
-      buildRow(finished({ startSeq: 2, id: "v1", pool: "vision" }))
-    ];
-    expect(filterRows(rows, { pool: "vision" }).map((row) => row.requestId)).toEqual(["v1"]);
-    expect(filterRows(rows, { pool: "text" }).map((row) => row.requestId)).toEqual(["t1"]);
-    expect(filterRows(rows, { search: "vision" }).map((row) => row.requestId)).toEqual(["v1"]);
-    expect(filterRows(rows, {})).toHaveLength(2);
-  });
-
-  it("prints the pool in the copied transcript", () => {
-    expect(formatRowsAsText([buildRow(finished({ pool: "vision" }))])).toContain("VISION");
-    expect(formatRowsAsText([buildRow(finished())])).toContain("TEXT");
   });
 });
