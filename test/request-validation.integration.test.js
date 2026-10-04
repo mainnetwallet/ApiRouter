@@ -120,3 +120,77 @@ test("validateRequestShape: unit coverage of accepted and rejected shapes", () =
   // Messages never echo client-controlled values.
   assert.ok(!String(validateRequestShape("openai-chat", { messages: "secret-value-xyz" })).includes("secret-value-xyz"));
 });
+
+// ---- Anthropic: null / non-object entries inside content and tools ----------
+// These used to pass shape validation, reach the bridge, throw a TypeError there
+// and come back as a 502 "upstream_error" carrying the raw JavaScript message.
+
+const ANTHROPIC_NULL_ENTRIES = [
+  ["content:[null]", { model: "m", max_tokens: 8, messages: [{ role: "user", content: [null] }] }],
+  ["messages:[], tools:[null]", { model: "m", max_tokens: 8, messages: [], tools: [null] }],
+  ["tools:[5]", { model: "m", max_tokens: 8, messages: [{ role: "user", content: "hi" }], tools: [5] }],
+  ["content:[5]", { model: "m", max_tokens: 8, messages: [{ role: "user", content: [5] }] }],
+  ["null block in a later message", { model: "m", max_tokens: 8, messages: [{ role: "user", content: "hi" }, { role: "assistant", content: [{ type: "text", text: "a" }, null] }] }],
+  ["tools with a valid entry then null", { model: "m", max_tokens: 8, messages: [{ role: "user", content: "hi" }], tools: [{ name: "f", input_schema: { type: "object" } }, null] }]
+];
+
+test("anthropic: null entries in content/tools return a sanitized 400 with zero upstream calls", async (t) => {
+  const { router, upstreamCalls } = await boot(t);
+
+  for (const [label, body] of ANTHROPIC_NULL_ENTRIES) {
+    const res = await router.request("/v1/messages", postJson(body));
+    const raw = await res.text();
+    assert.equal(res.status, 400, `${label} -> ${res.status} ${raw}`);
+    const json = JSON.parse(raw);
+    assert.equal(json.error.type, "invalid_request_error", label);
+    assert.ok(!/All routing targets failed/.test(raw), label);
+    // No internal JavaScript error, stack frame or file path may reach the client.
+    assert.ok(!/TypeError|Cannot read propert|undefined|\bat \S+ \(|node_modules|[\\/]src[\\/]|\.js:\d+/.test(raw), `${label} leaked internals: ${raw}`);
+    assert.equal(upstreamCalls(), 0, `${label} reached the upstream`);
+  }
+  assert.equal(upstreamCalls(), 0);
+});
+
+test("anthropic: the same null entries are rejected on count_tokens without routing", async (t) => {
+  const { router, upstreamCalls } = await boot(t);
+  for (const [label, body] of ANTHROPIC_NULL_ENTRIES) {
+    const res = await router.request("/v1/messages/count_tokens", postJson(body));
+    assert.equal(res.status, 400, label);
+  }
+  assert.equal(upstreamCalls(), 0);
+});
+
+test("anthropic: valid content blocks, tools and tool results are unaffected (control cases)", async (t) => {
+  const { router, upstreamCalls } = await boot(t);
+  const tool = { name: "f", description: "d", input_schema: { type: "object", properties: {} } };
+  const cases = [
+    { messages: [{ role: "user", content: "hi" }] },
+    { messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] },
+    { messages: [{ role: "user", content: [] }] },
+    { messages: [{ role: "user", content: "hi" }], tools: [tool], tool_choice: { type: "auto" } },
+    { messages: [{ role: "user", content: "hi" }], tools: [] },
+    { messages: [{ role: "user", content: "hi" }], tools: null },
+    { messages: [{ role: "user", content: "hi" }], system: [{ type: "text", text: "s" }] },
+    { messages: [
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "f", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "r" }] }] }
+    ], tools: [tool] }
+  ];
+  for (const extra of cases) {
+    const res = await router.request("/v1/messages", postJson({ model: "m", max_tokens: 8, ...extra }));
+    assert.equal(res.status, 200, `${JSON.stringify(extra)} -> ${res.status} ${await res.text()}`);
+  }
+  assert.equal(upstreamCalls(), cases.length);
+});
+
+test("validateRequestShape(anthropic): null entries are rejected, valid shapes pass, values are never echoed", () => {
+  assert.match(validateRequestShape("anthropic", { messages: [{ role: "user", content: [null] }] }), /"messages\[0\]\.content\[0\]" must be an object/);
+  assert.match(validateRequestShape("anthropic", { messages: [], tools: [null] }), /"tools\[0\]" must be an object/);
+  assert.equal(validateRequestShape("anthropic", { messages: [{ role: "user", content: [{ type: "text", text: "x" }] }], tools: [{ name: "f" }] }), null);
+  assert.equal(validateRequestShape("anthropic", { messages: [{ role: "user", content: "x" }] }), null);
+  assert.equal(validateRequestShape("anthropic", {}), null);
+  // Only anthropic gets the stricter check; openai-chat behavior is untouched.
+  assert.equal(validateRequestShape("openai-chat", { messages: [{ role: "user", content: [null] }] }), null);
+  assert.ok(!String(validateRequestShape("anthropic", { messages: [{ role: "user", content: ["secret-value-xyz"] }] })).includes("secret-value-xyz"));
+});

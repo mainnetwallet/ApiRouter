@@ -60,7 +60,12 @@ import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage, registerConfiguredSecrets } from "./observability/sanitize.js";
 import { validateRequestShape } from "./request-validation.js";
 
-const config = loadConfig();
+let config;
+try { config = loadConfig(); }
+catch (error) {
+  console.error(`Configuration error: ${error.message}`);
+  process.exit(1);
+}
 
 // Everything the router holds that must never be echoed back: provider keys
 // (both pools), Cloudflare account ids (they sit in the upstream URL path) and

@@ -45,6 +45,28 @@ function validateMessages(body) {
 }
 
 /**
+ * Anthropic Messages, on top of the generic `messages` check. The bridge reads
+ * `.type` off every content block and `.name` off every tool, so a `null` (or
+ * other non-object) entry there is a client mistake that would otherwise surface
+ * as an internal TypeError and a 502. A string `content` and a non-array `tools`
+ * stay accepted exactly as before; only array ENTRIES must be objects.
+ */
+function validateAnthropic(body) {
+  const messageError = validateMessages(body);
+  if (messageError) return messageError;
+  if (Array.isArray(body.messages)) {
+    for (let index = 0; index < body.messages.length; index += 1) {
+      const { content } = body.messages[index];
+      if (!Array.isArray(content)) continue;
+      const blockError = checkEntries(`messages[${index}].content`, content);
+      if (blockError) return blockError;
+    }
+  }
+  if (Array.isArray(body.tools)) return checkEntries("tools", body.tools);
+  return null;
+}
+
+/**
  * Responses API: `input` is a string or an array of items. An absent `input` is
  * left to the upstream (the Responses API allows requests without one).
  */
@@ -83,8 +105,9 @@ export function validateRequestShape(protocol, body) {
   if (!isPlainObject(body)) return "Request body must be a JSON object";
   switch (protocol) {
     case "openai-chat":
-    case "anthropic":
       return validateMessages(body);
+    case "anthropic":
+      return validateAnthropic(body);
     case "openai-responses":
       return validateResponsesInput(body);
     case "gemini":

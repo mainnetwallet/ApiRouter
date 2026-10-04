@@ -11,6 +11,21 @@ export const PROVIDER_IDS = ["agentrouter", "gemini", "groq", "huggingface", "mi
 
 const split = (value) => String(value || "").split(",").map((v) => v.trim()).filter(Boolean);
 
+/**
+ * Numeric env settings fail fast. An unset or empty variable keeps its default;
+ * anything else must be a valid number inside the stated bounds, otherwise
+ * startup stops with a clear message. A bad value must never degrade into NaN,
+ * 0 or "no limit" (`size > NaN` is never true, which would disable the body cap).
+ */
+function readNumber(env, name, fallback, { integer = true, min, max = Infinity, expected }) {
+  const raw = env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
+  const value = Number(String(raw).trim());
+  const valid = Number.isFinite(value) && (!integer || Number.isSafeInteger(value)) && value >= min && value <= max;
+  if (!valid) throw new Error(`Invalid ${name}: expected ${expected}, got "${String(raw).slice(0, 40)}"`);
+  return value;
+}
+
 const CLOUDFLARE_API_ROOT = "https://api.cloudflare.com/client/v4/accounts";
 
 /**
@@ -101,10 +116,12 @@ export function loadConfig(env = process.env) {
     .map(Number).filter((v) => Number.isInteger(v) && v >= 100 && v <= 599);
   return {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
-    port: Number(env.PORT || 8788),
-    timeoutMs: Number(env.REQUEST_TIMEOUT_MS || 120000),
-    maxBodyBytes: Math.max(1, Number(env.MAX_REQUEST_BODY_MB || 32)) * 1024 * 1024,
-    connectTimeoutMs: Number(env.STREAM_CONNECT_TIMEOUT_MS || 30000),
+    port: readNumber(env, "PORT", 8788, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
+    timeoutMs: readNumber(env, "REQUEST_TIMEOUT_MS", 120000, { min: 1, expected: "a positive integer" }),
+    // Fractions are allowed; as before, anything under 1 MB is raised to 1 MB.
+    maxBodyBytes: Math.max(1, readNumber(env, "MAX_REQUEST_BODY_MB", 32, { integer: false, min: Number.MIN_VALUE, expected: "a positive number" })) * 1024 * 1024,
+    // 0 is meaningful here: server.js then uses the full request timeout for streams.
+    connectTimeoutMs: readNumber(env, "STREAM_CONNECT_TIMEOUT_MS", 30000, { min: 0, expected: "a non-negative integer (0 disables the separate connect timeout)" }),
     retryableStatus: new Set(retryableValues),
     // Sticky target lifetime after a success: 15 minutes (STICKY_TTL_MS only
     // exists so tests can use a short real-clock TTL).
