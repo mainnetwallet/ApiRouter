@@ -44,8 +44,8 @@ npm start
 After pulling updates (`git pull`), rebuild only what changed:
 
 ```powershell
-npm install          # only if package.json changed
-npm run ui:build     # only if ui/ changed
+cd MultiAI-Router
+npm run ui:build    
 npm start
 ```
 
