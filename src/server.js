@@ -57,9 +57,19 @@ import {
 } from "./gemini-bridge.js";
 import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
-import { sanitizeMessage } from "./observability/sanitize.js";
+import { sanitizeMessage, registerConfiguredSecrets } from "./observability/sanitize.js";
+import { validateRequestShape } from "./request-validation.js";
 
 const config = loadConfig();
+
+// Everything the router holds that must never be echoed back: provider keys
+// (both pools), Cloudflare account ids (they sit in the upstream URL path) and
+// the router's own client keys. Registered once, before any request is served.
+registerConfiguredSecrets([
+  ...(config.routerApiKeys || []),
+  ...[config.providers, config.visionProviders].flatMap((group) => Object.values(group || {}).flatMap((p) => p?.apiKeys || [])),
+  ...[config.providers, config.visionProviders].flatMap((group) => group?.cloudflare?.accountIds || [])
+]);
 const textTargets = buildTargets(config.providers);
 const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
 // Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
@@ -159,6 +169,11 @@ function getSession(req, protocol, pool = TEXT_POOL) {
 
   return { id, state };
 }
+
+// Upstream error bodies are allowed up to 2000 characters; a client-facing
+// message keeps that room so the diagnostic survives, minus any credential.
+const CLIENT_MESSAGE_MAX = 2000;
+const clientMessage = (value) => sanitizeMessage(value, { maxLength: CLIENT_MESSAGE_MAX });
 
 function publicFailure(error) {
   return (error?.failures || []).map((item) => ({
@@ -289,7 +304,25 @@ async function proxy(req, res, protocol, pathname) {
       errorMessage: sanitizeMessage(error.message),
       attempts
     });
-    return json(res, error.status || 400, { error: { message: error.message, type: "invalid_request_error" } });
+    return json(res, error.status || 400, { error: { message: clientMessage(error.message), type: "invalid_request_error" } });
+  }
+
+  // Basic request-shape check, before the pool, session or any target is
+  // chosen: a request no adapter can read must fail here, locally, as a 400 and
+  // never reach routing, an upstream or the fallback walk.
+  const shapeError = validateRequestShape(protocol, body);
+  if (shapeError) {
+    recordRequest({
+      pendingSeq: liveSeq,
+      receivedAt,
+      protocol,
+      httpStatus: 400,
+      outcome: "failed",
+      errorType: "invalid_request_error",
+      errorMessage: shapeError,
+      attempts
+    });
+    return json(res, 400, { error: { message: shapeError, type: "invalid_request_error" } });
   }
 
   const geminiPathModel = protocol === "gemini"
@@ -341,7 +374,7 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: "invalid_request_error", errorMessage: pin.error, attempts
     });
-    return json(res, 400, { error: { message: pin.error, type: "invalid_request_error" } }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, 400, { error: { message: clientMessage(pin.error), type: "invalid_request_error" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
   // Nothing in this pool at all. Reported before capability validation, because
@@ -721,7 +754,9 @@ async function proxy(req, res, protocol, pathname) {
       errorMessage: sanitizeMessage(error?.message || "All routing targets failed"),
       outcome: "failed"
     });
-    return json(res, error.status || 502, { error: { message: error.message || "All routing targets failed", type: "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
+    // `error.message` can be raw upstream text (an all-400 walk and non-retryable
+    // statuses surface it), so it is scrubbed like every other outbound message.
+    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 }
 
@@ -832,9 +867,11 @@ async function handleRequest(req, res) {
     if (!authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
     try {
       const body = await readJsonBody(req);
+      const shapeError = validateRequestShape("anthropic", body);
+      if (shapeError) return json(res, 400, { error: { message: shapeError, type: "invalid_request_error" } });
       return json(res, 200, { input_tokens: estimateInputTokens(body) });
     } catch (error) {
-      return json(res, error.status || 400, { error: { message: error.message, type: "invalid_request_error" } });
+      return json(res, error.status || 400, { error: { message: clientMessage(error.message), type: "invalid_request_error" } });
     }
   }
 
