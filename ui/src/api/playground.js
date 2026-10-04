@@ -47,9 +47,6 @@ export function endpointFor(protocol, model) {
  * Auto Route omits `model`, which is what makes the gateway widen to every
  * protocol-compatible target instead of pinning one.
  */
-/** Sent only for Anthropic-protocol requests, whose API makes `max_tokens` mandatory. */
-export const ANTHROPIC_UNLIMITED_MAX_TOKENS = 64000;
-
 /** Parse the Max tokens field: blank, zero or garbage all mean "no limit". */
 export function parseMaxTokens(value) {
   const text = String(value ?? "").trim();
@@ -79,9 +76,7 @@ export function buildRequestBody({
   if (protocol === "anthropic") {
     return {
       ...(includeModel ? { model } : {}),
-      // Anthropic's API requires this field, so "no limit" still sends a value:
-      // a high one, rather than the old 1024 cap.
-      max_tokens: limited ? maxTokens : ANTHROPIC_UNLIMITED_MAX_TOKENS,
+      ...(limited ? { max_tokens: maxTokens } : {}),
       ...(system ? { system } : {}),
       ...(Number.isFinite(temperature) ? { temperature } : {}),
       messages: [{

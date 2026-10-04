@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  ANTHROPIC_UNLIMITED_MAX_TOKENS, buildPinHeaders, buildRequestBody, endpointFor, extractDelta, extractStreamMeta, extractText,
+  buildPinHeaders, buildRequestBody, endpointFor, extractDelta, extractStreamMeta, extractText,
   parseMaxTokens
 } from "../playground.js";
 
@@ -142,9 +142,11 @@ describe("max tokens", () => {
     expect(body.max_tokens).toBe(500000);
   });
 
-  it("gives Anthropic a high value because its API requires the field", () => {
-    const body = buildRequestBody({ protocol: "anthropic", model: "m", autoRoute: false, prompt: "hi", maxTokens: null });
-    expect(body.max_tokens).toBe(ANTHROPIC_UNLIMITED_MAX_TOKENS);
+  it("omits max_tokens for Anthropic when there is no limit, and sends an explicit one unchanged", () => {
+    const none = buildRequestBody({ protocol: "anthropic", model: "m", autoRoute: false, prompt: "hi", maxTokens: null });
+    expect(none).not.toHaveProperty("max_tokens");
+    const set = buildRequestBody({ protocol: "anthropic", model: "m", autoRoute: false, prompt: "hi", maxTokens: 500000 });
+    expect(set.max_tokens).toBe(500000);
   });
 });
 
