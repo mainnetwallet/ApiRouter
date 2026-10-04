@@ -109,30 +109,27 @@ of a base URL. Nothing is shared with the normal `<PROVIDER>_API_KEYS` /
 - Requests pinned with the `x-multi-ai-pin-*` headers are matched inside the pool
   the request belongs to (vision pool for images, normal pool otherwise).
 
-### Vercel AI Gateway
+### Providers
 
-- Provider ID: `vercel`, OpenAI-compatible (`https://ai-gateway.vercel.sh/v1`).
-- Text pool: `VERCEL_API_KEYS`, `VERCEL_BASE_URL`, `VERCEL_MODELS`.
-- Separate vision pool: `VERCEL_VISION_API_KEYS`, `VERCEL_VISION_BASE_URL`, `VERCEL_VISION_MODELS`.
-- Several keys (`key1,key2`) each become their own routable target.
-- Goes through the normal fallback, health monitoring, streaming and pin headers
-  (`x-multi-ai-pin-provider: vercel`). Model ids are sent exactly as configured.
-- The model list is what you configure; the router does not discover models.
+Common to every provider below:
 
-Free-model availability and quotas are controlled by Vercel and can change.
+- OpenAI-compatible. The base URL already contains `/v1`: chat goes to `.../v1/chat/completions`,
+  health probes to `.../v1/models`.
+- Keys and models are comma-separated. Every key x model pair is a target, in the configured order,
+  and joins the normal fallback chain, health monitoring, streaming and pin headers
+  (`x-multi-ai-pin-provider: <id>`).
+- Model ids are sent exactly as configured. The router does not discover models and keeps no
+  per-model capability data.
+- Text requests use `<PROVIDER>_API_KEYS` / `_MODELS` / `_BASE_URL`. Image requests use only the
+  `<PROVIDER>_VISION_*` variables; a model receives images only if it is listed in the vision pool.
+  With no vision pool, images get `503 no_vision_route`.
+- Free availability, quotas and model lists are controlled by each provider and can change.
 
-### OpenCode Zen
+**Vercel AI Gateway** (`vercel`): `https://ai-gateway.vercel.sh/v1`
 
-- Provider ID: `opencode`, OpenAI-compatible (`https://opencode.ai/zen/v1`; the base URL already
-  contains `/v1`, so requests go to `.../zen/v1/chat/completions` and health probes to `.../zen/v1/models`).
-- Text pool: `OPENCODE_API_KEYS`, `OPENCODE_BASE_URL`, `OPENCODE_MODELS` (order is the priority order).
-- Separate vision pool: `OPENCODE_VISION_API_KEYS`, `OPENCODE_VISION_BASE_URL`, `OPENCODE_VISION_MODELS`.
-  Without it, image requests fail with `503 no_vision_route`.
-- Several keys each become their own target; fallback, health, streaming and pin headers work as for every provider.
+**OpenCode Zen** (`opencode`): `https://opencode.ai/zen/v1`. `OPENCODE_MODELS` order is the priority order.
 
-Free-model availability is controlled by OpenCode and can change.
-
-### NVIDIA Build
+**NVIDIA Build** (`nvidia`): `https://integrate.api.nvidia.com/v1`. Needs a valid NVIDIA API key.
 
 ```env
 NVIDIA_API_KEYS=
@@ -144,33 +141,22 @@ NVIDIA_VISION_MODELS=
 NVIDIA_VISION_BASE_URL=https://integrate.api.nvidia.com/v1
 ```
 
-- Provider ID: `nvidia`. NVIDIA Build is OpenAI-compatible; the base URL already contains `/v1`
-  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
-- Text/coding requests use `NVIDIA_MODELS`; image requests use `NVIDIA_VISION_MODELS`.
-  Vision never falls back to NVIDIA text models: with no vision pool, images get `503 no_vision_route`.
-- Keys and models are comma-separated; every key x model pair is a target, in the configured order.
-- Free endpoint availability and limits may change, and real access needs a valid NVIDIA API key.
-
-### Nous Portal
+**Nous Portal** (`nous`): the text pool is ordered for coding/agent fallback (Laguna S 2.1 → Step 3.7 Flash →
+LongCat 2.5 Preview → Ling 3.0 Flash Fin → LongCat 2.0 → Laguna XS 2.1 → Ling 3.0 Flash Sante → Solar Pro 4).
+The vision pool is **Step 3.7 Flash**. Free routes use the `:free` model IDs (Free plan: free models only,
+standard rate limits). Full defaults are in `.env.example`.
 
 ```env
 NOUS_API_KEYS=
 NOUS_BASE_URL=https://inference-api.nousresearch.com/v1
-NOUS_MODELS=poolside/laguna-s-2.1:free,stepfun/step-3.7-flash:free,meituan/longcat-2.5-preview:free,inclusionai/ling-3.0-flash-fin:free,meituan/longcat-2.0:free,poolside/laguna-xs-2.1:free,inclusionai/ling-3.0-flash-sante:free,upstage/solar-pro4:free
-
 NOUS_VISION_API_KEYS=
 NOUS_VISION_BASE_URL=https://inference-api.nousresearch.com/v1
 NOUS_VISION_MODELS=stepfun/step-3.7-flash:free
 ```
 
-- Provider ID: `nous`. Nous Portal is OpenAI-compatible at `https://inference-api.nousresearch.com/v1`.
-- The text pool is ordered for coding/agent fallback: Laguna S 2.1 → Step 3.7 Flash → LongCat 2.5 Preview → Ling 3.0 Flash Fin → LongCat 2.0 → Laguna XS 2.1 → Ling 3.0 Flash Sante → Solar Pro 4.
-- The vision pool is separate and currently uses **Step 3.7 Flash**, which supports native image input as well as coding/agent workflows.
-- Free routes use the `:free` model IDs. Nous says the Free plan provides free models only, with standard rate limits and $0 monthly credits; availability can change.
-- Several keys are comma-separated and become independent fallback targets.
-- Vision requests never fall back to the Nous text pool; if `NOUS_VISION_API_KEYS` is empty, image requests return `503 no_vision_route`.
-
-### Pollinations
+**Pollinations** (`pollinations`): `https://gen.pollinations.ai/v1`. Bills usage in Pollen, and prices and
+access rules change. The router does not check whether a model is free: confirm price and image-input
+support in `GET /v1/models` first. Ids like `community/owner/model` are sent as configured.
 
 ```env
 POLLINATIONS_API_KEYS=
@@ -182,16 +168,8 @@ POLLINATIONS_VISION_MODELS=
 POLLINATIONS_VISION_BASE_URL=https://gen.pollinations.ai/v1
 ```
 
-- Provider ID: `pollinations`. OpenAI-compatible; the base URL already contains `/v1`
-  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
-- Text requests use `POLLINATIONS_MODELS`; image requests use only `POLLINATIONS_VISION_MODELS`
-  and `POLLINATIONS_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
-- Model ids are sent exactly as configured, including `community/owner/model` ids.
-- Pollinations bills usage in Pollen, and model availability, prices and access rules change.
-  The router does not check whether a configured model is free: confirm each model's price and
-  image-input support in the current Pollinations catalog (`GET /v1/models`) before relying on it.
-
-### SiliconFlow
+**SiliconFlow** (`siliconflow`): only the models in the vision pool receive images
+(`Qwen/Qwen3.5-4B`, `PaddlePaddle/PaddleOCR-VL-1.5`); the others are text-only.
 
 ```env
 SILICONFLOW_API_KEYS=
@@ -202,16 +180,6 @@ SILICONFLOW_VISION_API_KEYS=
 SILICONFLOW_VISION_MODELS=Qwen/Qwen3.5-4B,PaddlePaddle/PaddleOCR-VL-1.5
 SILICONFLOW_VISION_BASE_URL=https://api.siliconflow.cn/v1
 ```
-
-- Provider ID: `siliconflow` (shown as **SiliconFlow**). OpenAI-compatible; the base URL already contains `/v1`
-  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
-- Text requests use `SILICONFLOW_MODELS` and `SILICONFLOW_API_KEYS`; image requests use only
-  `SILICONFLOW_VISION_MODELS` and `SILICONFLOW_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
-- Capabilities are decided by pool membership: only the models listed in the vision pool receive images
-  (`Qwen/Qwen3.5-4B` and `PaddlePaddle/PaddleOCR-VL-1.5`); the other models are text-only.
-- Keys and models are comma-separated; every key x model pair is a target, in the configured order, and
-  SiliconFlow joins the normal fallback chain like any other provider.
-- Free-model availability and limits may change; confirm them in the current SiliconFlow catalog.
 
 ### ModelScope
 
@@ -225,15 +193,8 @@ MODELSCOPE_VISION_MODELS=deepseek-ai/DeepSeek-V4.1-Flash,Qwen/Qwen3.8-Flash-Next
 MODELSCOPE_VISION_BASE_URL=https://api-inference.modelscope.cn/v1
 ```
 
-- Provider ID: `modelscope` (shown as **ModelScope**). OpenAI-compatible; the base URL already contains `/v1`
-  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
-- Text requests use `MODELSCOPE_MODELS` and `MODELSCOPE_API_KEYS`; image requests use only
-  `MODELSCOPE_VISION_MODELS` and `MODELSCOPE_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
-- A model receives images only if it is listed in the vision pool; the router keeps no per-model capability data.
-- Keys and models are comma-separated; every key x model pair is a target, in the configured order, and
-  ModelScope joins the normal fallback chain like any other provider.
-- ModelScope API-Inference is quota-based. Free availability, quotas and the model list can change, so check
-  your account's current limits and the live model catalog; nothing here promises unlimited free usage.
+- Provider ID: `modelscope`. API-Inference is quota-based: check your account's current limits and the live
+  model catalog; nothing here promises unlimited free usage.
 
 ### LLM7
 
@@ -247,16 +208,9 @@ LLM7_VISION_MODELS=kimi-k3,llama-4-maverick,minimax-m3
 LLM7_VISION_BASE_URL=https://api.llm7.io/v1
 ```
 
-- Provider ID: `llm7` (shown as **LLM7**). OpenAI-compatible; the base URL already contains `/v1`
-  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
-- LLM7 provides a **free-token quota**, not permanently free model pricing: the models themselves have
-  model-level pricing. Quotas, limits and model availability can change, so check your account's current
-  quota; nothing here promises unlimited usage.
-- Text requests use `LLM7_MODELS` and `LLM7_API_KEYS`; image requests use only `LLM7_VISION_MODELS` and
-  `LLM7_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
-- A model receives images only if it is listed in the vision pool; the router keeps no per-model capability data.
-- Keys and models are comma-separated; every key x model pair is a target, in the configured order, and
-  LLM7 joins the normal fallback chain like any other provider.
+- Provider ID: `llm7`. LLM7 provides a **free-token quota**, not permanently free model pricing: the models
+  themselves have model-level pricing. Quotas, limits and model availability can change, so check your
+  account's current quota; nothing here promises unlimited usage.
 
 Retryable statuses:
 
