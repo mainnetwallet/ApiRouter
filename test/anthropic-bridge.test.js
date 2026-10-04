@@ -75,7 +75,7 @@ test("toOpenAIChatRequest converts system, text, tools and tool results", () => 
 
   assert.equal(out.model, "llama-x");
   assert.equal(out.stream, true);
-  assert.equal(out.max_tokens, 8192, "max_tokens is capped");
+  assert.equal(out.max_tokens, 64000, "the client's max_tokens is forwarded unchanged, never capped");
   assert.equal(out.temperature, 0.2);
   assert.equal(out.tool_choice, "required");
   assert.deepEqual(out.messages[0], { role: "system", content: "Be brief.\nBe kind." });
@@ -87,15 +87,15 @@ test("toOpenAIChatRequest converts system, text, tools and tool results", () => 
   assert.equal(out.tools[0].function.parameters.type, "object");
 });
 
-test("toOpenAIChatRequest honours BRIDGE_MAX_TOKENS and maps images to image_url", () => {
+test("toOpenAIChatRequest forwards max_tokens and maps images to image_url", () => {
   const out = toOpenAIChatRequest({
     max_tokens: 100,
     messages: [{ role: "user", content: [
       { type: "text", text: "see" },
       { type: "image", source: { type: "base64", media_type: "image/png", data: "AAA" } }
     ] }]
-  }, "m", { BRIDGE_MAX_TOKENS: "50" });
-  assert.equal(out.max_tokens, 50);
+  }, "m");
+  assert.equal(out.max_tokens, 100);
   assert.equal(out.messages[0].content[1].image_url.url, "data:image/png;base64,AAA");
 });
 

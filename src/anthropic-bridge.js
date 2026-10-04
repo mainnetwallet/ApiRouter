@@ -9,8 +9,6 @@ import { randomUUID } from "node:crypto";
  * Claude Code request can fall back to ANY configured provider.
  */
 
-const DEFAULT_MAX_TOKENS_CAP = 8192;
-
 /** Which upstream protocol a target is called with for an Anthropic client. */
 export function bridgeProtocol(target) {
   const protocols = Array.isArray(target?.protocols) ? target.protocols : [];
@@ -57,12 +55,6 @@ function systemText(system) {
   if (!system) return "";
   if (typeof system === "string") return system;
   return textOfBlocks(system);
-}
-
-function maxTokensFor(body, env = process.env) {
-  const cap = Number(env.BRIDGE_MAX_TOKENS) || DEFAULT_MAX_TOKENS_CAP;
-  const asked = Number(body.max_tokens) || cap;
-  return Math.min(asked, cap);
 }
 
 function safeParse(text) {
@@ -116,7 +108,7 @@ export function cleanSchemaForGemini(schema) {
 
 // ------------------------------------------------- request -> OpenAI chat
 
-export function toOpenAIChatRequest(body, model, env = process.env) {
+export function toOpenAIChatRequest(body, model) {
   const messages = [];
   const sys = systemText(body.system);
   if (sys) messages.push({ role: "system", content: sys });
@@ -167,7 +159,9 @@ export function toOpenAIChatRequest(body, model, env = process.env) {
     }
   }
 
-  const payload = { model, messages, max_tokens: maxTokensFor(body, env), stream: body.stream === true };
+  const payload = { model, messages, stream: body.stream === true };
+  // The client's own limit is forwarded as sent; when it sends none, none is added.
+  if (body.max_tokens !== undefined && body.max_tokens !== null) payload.max_tokens = body.max_tokens;
   if (typeof body.temperature === "number") payload.temperature = body.temperature;
   if (typeof body.top_p === "number") payload.top_p = body.top_p;
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length) {
@@ -207,7 +201,7 @@ export function signatureFor(id) {
   return signatures.get(id);
 }
 
-export function toGeminiRequest(body, env = process.env) {
+export function toGeminiRequest(body) {
   const toolNames = new Map();
   for (const msg of body.messages || []) {
     for (const b of blocksOf(msg.content)) if (b.type === "tool_use") toolNames.set(b.id, b.name);
@@ -247,10 +241,9 @@ export function toGeminiRequest(body, env = process.env) {
     push(msg.role === "assistant" ? "model" : "user", parts);
   }
 
-  const payload = {
-    contents,
-    generationConfig: { maxOutputTokens: maxTokensFor(body, env) }
-  };
+  const payload = { contents, generationConfig: {} };
+  // The client's own limit is forwarded as sent; when it sends none, none is added.
+  if (body.max_tokens !== undefined && body.max_tokens !== null) payload.generationConfig.maxOutputTokens = body.max_tokens;
   const sys = systemText(body.system);
   if (sys) payload.systemInstruction = { parts: [{ text: sys }] };
   if (typeof body.temperature === "number") payload.generationConfig.temperature = body.temperature;
