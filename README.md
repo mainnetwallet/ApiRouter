@@ -32,6 +32,26 @@ http://localhost:8788
 
 Open `http://localhost:8788` for the control panel.
 
+### Running again (second time onwards)
+
+The clone, `npm install` and `.env` setup are one-time steps. Next time, just:
+
+```powershell
+cd MultiAI-Router
+npm start
+```
+
+After pulling updates (`git pull`), rebuild only what changed:
+
+```powershell
+npm install          # only if package.json changed
+npm run ui:build     # only if ui/ changed
+npm start
+```
+
+Do not run `Copy-Item .env.example .env` again — it would overwrite your keys.
+Stop the router with `Ctrl + C`.
+
 ### Windows `Router` command
 
 Install the repository launcher once from PowerShell:
