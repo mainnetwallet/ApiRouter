@@ -1,8 +1,20 @@
+import { randomBytes } from "node:crypto";
 import { sanitizeMessage } from "./sanitize.js";
 
 export const DEFAULT_MAX_ENTRIES = 500;
 
 export const OUTCOMES = Object.freeze({
+  SUCCESS: "success",
+  FAILED: "failed"
+});
+
+/**
+ * Lifecycle of ONE upstream attempt. An attempt is created `calling` when the
+ * call goes on the wire and moves exactly once, to `success` or `failed`. It
+ * never moves again, and no later attempt can touch it.
+ */
+export const ATTEMPT_STATES = Object.freeze({
+  CALLING: "calling",
   SUCCESS: "success",
   FAILED: "failed"
 });
@@ -24,12 +36,21 @@ const normalizePool = (value) => (value === POOLS.VISION ? POOLS.VISION : POOLS.
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING = 200;
 
-function normalizeAttempts(list) {
-  return (Array.isArray(list) ? list : []).map((attempt, index) => ({
+const PHASES = ["sticky", "priority", "fallback"];
+const pad = (value) => String(value).padStart(6, "0");
+
+/**
+ * The allow-listed, request-independent part of one attempt row. Identity
+ * (`attemptId`, `attemptSeq`, `callIndex`) is added by the log, never by the
+ * caller's position in an array.
+ */
+function plainAttempt(attempt, index) {
+  return {
     index: index + 1,
+    attemptId: typeof attempt?.attemptId === "string" && attempt.attemptId ? attempt.attemptId : null,
     // "sticky" | "priority" | "fallback" | null (older callers); and whether this row was
     // skipped without a network call (cooldown / already attempted).
-    phase: attempt?.phase === "sticky" || attempt?.phase === "priority" || attempt?.phase === "fallback" ? attempt.phase : null,
+    phase: PHASES.includes(attempt?.phase) ? attempt.phase : null,
     skipped: attempt?.skipped === true,
     skipReason: attempt?.skipped === true && typeof attempt?.skipReason === "string" ? attempt.skipReason : null,
     provider: attempt?.provider ?? null,
@@ -41,9 +62,10 @@ function normalizeAttempts(list) {
     ok: attempt?.ok === true,
     status: Number.isInteger(attempt?.status) ? attempt.status : null,
     startedAt: Number.isFinite(attempt?.startedAt) ? attempt.startedAt : null,
+    completedAt: Number.isFinite(attempt?.completedAt) ? attempt.completedAt : null,
     latencyMs: Number.isFinite(attempt?.latencyMs) ? attempt.latencyMs : null,
     errorMessage: sanitizeMessage(attempt?.errorMessage)
-  }));
+  };
 }
 
 /**
@@ -60,12 +82,49 @@ function normalizeAttempts(list) {
  * upstream error text contained them.
  */
 export class RequestLog {
-  constructor({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) {
+  constructor({ maxEntries = DEFAULT_MAX_ENTRIES, maxAttemptEvents = maxEntries * 4 } = {}) {
     this.maxEntries = maxEntries;
+    this.maxAttemptEvents = maxAttemptEvents;
     this.entries = new Map();
     this.pendingEntries = new Map();
     this.sequence = 0;
     this.listeners = new Set();
+
+    // Identity. A request id names one client request; an attempt id names one
+    // real upstream call. Both come from this log only, from counters that never
+    // repeat, so nothing about a target (provider/model/key) or a session can
+    // ever stand in for them. The boot id keeps ids from a previous process
+    // from colliding with this one's.
+    this.bootId = randomBytes(3).toString("hex");
+    this.requestCounter = 0;
+    this.attemptSequence = 0;
+    /** attemptId -> frozen attempt event, oldest first (insertion order). */
+    this.attemptEvents = new Map();
+  }
+
+  #mintRequestId() {
+    this.requestCounter += 1;
+    return `req-${this.bootId}-${pad(this.requestCounter)}`;
+  }
+
+  #mintAttempt() {
+    this.attemptSequence += 1;
+    return { attemptSeq: this.attemptSequence, attemptId: `att-${this.bootId}-${pad(this.attemptSequence)}` };
+  }
+
+  /**
+   * Store a new snapshot of one attempt and announce it. Snapshots are frozen:
+   * a listener can hold one, and a later state of the same attempt is a new
+   * object, never a mutation of the old one.
+   */
+  #putAttemptEvent(event) {
+    const frozen = Object.freeze({ ...event });
+    this.attemptEvents.set(frozen.attemptId, frozen);
+    while (this.attemptEvents.size > this.maxAttemptEvents) {
+      this.attemptEvents.delete(this.attemptEvents.keys().next().value);
+    }
+    this.#emit("attempt", frozen);
+    return frozen;
   }
 
   /**
@@ -88,13 +147,91 @@ export class RequestLog {
     }
   }
 
+  /** Drop a pending request; an attempt it left on the wire can no longer finish. */
+  #dropPending(key) {
+    const entry = this.pendingEntries.get(key);
+    this.pendingEntries.delete(key);
+    const open = entry?.inflight?.attemptId;
+    if (open) this.finishAttempt(open, { ok: false, errorMessage: "request abandoned before the attempt answered" });
+  }
+
   #prunePending(now = Date.now()) {
     for (const [key, entry] of this.pendingEntries) {
-      if (now - (entry.receivedAt ?? now) > PENDING_TTL_MS) this.pendingEntries.delete(key);
+      if (now - (entry.receivedAt ?? now) > PENDING_TTL_MS) this.#dropPending(key);
     }
     while (this.pendingEntries.size > MAX_PENDING) {
-      this.pendingEntries.delete(this.pendingEntries.keys().next().value);
+      this.#dropPending(this.pendingEntries.keys().next().value);
     }
+  }
+
+  /**
+   * Turn the attempts a caller reports into rows that carry identity. A real
+   * attempt keeps the id it was given when it went on the wire; one reported
+   * without an id (older callers) is given a fresh one, once, and recorded as
+   * an already-finished event. A skipped target never reached the network, so it
+   * is not an attempt and has no id. Whatever state an attempt event has already
+   * reached is final and wins over anything re-reported later.
+   */
+  #normalizeAttempts(list, ctx, previous = []) {
+    let calls = 0;
+    return (Array.isArray(list) ? list : []).map((raw, index) => {
+      const row = plainAttempt(raw, index);
+      row.requestId = ctx.requestId;
+      row.requestSeq = ctx.requestSeq;
+      row.pool = ctx.pool;
+
+      if (row.skipped) return { ...row, attemptId: null, attemptSeq: null, callIndex: null };
+
+      calls += 1;
+      // Same position in a later report of the same list is the same attempt.
+      const reused = previous[index];
+      if (!row.attemptId && reused && !reused.skipped) row.attemptId = reused.attemptId ?? null;
+
+      let event = row.attemptId ? this.attemptEvents.get(row.attemptId) : null;
+      if (!row.attemptId) {
+        const { attemptSeq, attemptId } = this.#mintAttempt();
+        row.attemptId = attemptId;
+        event = this.#putAttemptEvent({
+          attemptId,
+          attemptSeq,
+          requestId: ctx.requestId,
+          requestSeq: ctx.requestSeq,
+          sessionId: ctx.sessionId,
+          pool: ctx.pool,
+          requestedModel: ctx.requestedModel ?? null,
+          protocol: row.protocol ?? ctx.protocol ?? null,
+          phase: row.phase,
+          callIndex: calls,
+          provider: row.provider,
+          model: row.model,
+          keyIndex: row.keyIndex,
+          state: row.ok ? ATTEMPT_STATES.SUCCESS : ATTEMPT_STATES.FAILED,
+          ok: row.ok,
+          status: row.status,
+          startedAt: row.startedAt,
+          completedAt: row.completedAt ?? (row.startedAt !== null && row.latencyMs !== null ? row.startedAt + row.latencyMs : null),
+          latencyMs: row.latencyMs,
+          errorMessage: row.errorMessage
+        });
+      } else if (event && event.state === ATTEMPT_STATES.CALLING) {
+        event = this.finishAttempt(row.attemptId, row);
+      }
+
+      if (event) {
+        row.attemptSeq = event.attemptSeq;
+        row.callIndex = event.callIndex;
+        row.ok = event.ok;
+        row.status = event.status;
+        row.startedAt = event.startedAt;
+        row.completedAt = event.completedAt;
+        row.latencyMs = event.latencyMs;
+        row.errorMessage = event.errorMessage;
+      } else {
+        row.attemptSeq = null;
+        row.callIndex = calls;
+      }
+      return row;
+    });
   }
 
   /**
@@ -108,6 +245,9 @@ export class RequestLog {
     const startSeq = this.sequence;
     this.pendingEntries.set(startSeq, {
       startSeq,
+      // `requestId` names this one request; `id` is the (sticky) session id the
+      // client sees, which many requests can share.
+      requestId: typeof entry.requestId === "string" && entry.requestId ? entry.requestId : this.#mintRequestId(),
       id: entry.id ?? null,
       receivedAt: Number.isFinite(entry.receivedAt) ? entry.receivedAt : Date.now(),
       protocol: entry.protocol ?? null,
@@ -117,6 +257,7 @@ export class RequestLog {
       attempts: [],
       attemptCount: 0,
       fallbackCount: 0,
+      attemptsStarted: 0,
       inflight: null
     });
     this.#prunePending();
@@ -132,7 +273,10 @@ export class RequestLog {
     const pending = this.pendingEntries.get(startSeq);
     if (!pending) return;
     if (attempts !== undefined) {
-      pending.attempts = normalizeAttempts(attempts);
+      pending.attempts = this.#normalizeAttempts(attempts, {
+        requestId: pending.requestId, requestSeq: startSeq, sessionId: pending.id, pool: pending.pool,
+        protocol: pending.protocol, requestedModel: pending.requestedModel
+      }, pending.attempts);
       const real = pending.attempts.filter((a) => !a.skipped).length;
       pending.attemptCount = real;
       pending.fallbackCount = Math.max(0, real - 1);
@@ -140,6 +284,7 @@ export class RequestLog {
     if (inflight !== undefined) {
       pending.inflight = inflight
         ? {
+          attemptId: typeof inflight.attemptId === "string" ? inflight.attemptId : null,
           provider: inflight.provider ?? null,
           model: inflight.model ?? null,
           keyIndex: Number.isInteger(inflight.keyIndex) ? inflight.keyIndex : null,
@@ -149,6 +294,109 @@ export class RequestLog {
         : null;
     }
     this.#emit("pending", pending);
+  }
+
+  /**
+   * ONE REAL UPSTREAM ATTEMPT = ONE NEW EVENT. Call this the moment a call goes
+   * on the wire. It always creates a brand-new attempt, with a new `attemptId`,
+   * whatever provider/model/key it targets and however many times that target
+   * was called before. Returns the `attemptId` (or `null` when the request is
+   * not being tracked); hand it to `finishAttempt` when the call answers.
+   */
+  startAttempt(startSeq, target = {}) {
+    const pending = this.pendingEntries.get(startSeq);
+    if (!pending) return null;
+
+    const { attemptSeq, attemptId } = this.#mintAttempt();
+    pending.attemptsStarted += 1;
+    const startedAt = Number.isFinite(target.startedAt) ? target.startedAt : Date.now();
+    const protocol = target.protocol ?? pending.protocol ?? null;
+
+    this.#putAttemptEvent({
+      attemptId,
+      attemptSeq,
+      requestId: pending.requestId,
+      requestSeq: startSeq,
+      sessionId: pending.id,
+      pool: pending.pool,
+      requestedModel: pending.requestedModel,
+      protocol,
+      phase: PHASES.includes(target.phase) ? target.phase : null,
+      callIndex: pending.attemptsStarted,
+      provider: target.provider ?? null,
+      model: target.model ?? null,
+      keyIndex: Number.isInteger(target.keyIndex) ? target.keyIndex : null,
+      state: ATTEMPT_STATES.CALLING,
+      ok: false,
+      status: null,
+      startedAt,
+      completedAt: null,
+      latencyMs: null,
+      errorMessage: null
+    });
+
+    pending.inflight = {
+      attemptId,
+      provider: target.provider ?? null,
+      model: target.model ?? null,
+      keyIndex: Number.isInteger(target.keyIndex) ? target.keyIndex : null,
+      protocol,
+      startedAt
+    };
+    this.#emit("pending", pending);
+    return attemptId;
+  }
+
+  /**
+   * Settle ONE attempt: `calling` becomes `success` or `failed`, once. The
+   * result is a new frozen snapshot with the same `attemptId`; every other
+   * attempt is untouched. An attempt that already has a final state keeps it
+   * (the existing snapshot is returned unchanged), so a late or repeated report
+   * can never rewrite history.
+   */
+  finishAttempt(attemptId, result = {}) {
+    const current = this.attemptEvents.get(attemptId);
+    if (!current || current.state !== ATTEMPT_STATES.CALLING) return current ?? null;
+
+    const ok = result.ok === true;
+    const completedAt = Number.isFinite(result.completedAt) ? result.completedAt : Date.now();
+    const latencyMs = Number.isFinite(result.latencyMs)
+      ? result.latencyMs
+      : (Number.isFinite(current.startedAt) ? Math.max(0, completedAt - current.startedAt) : null);
+
+    const done = this.#putAttemptEvent({
+      ...current,
+      state: ok ? ATTEMPT_STATES.SUCCESS : ATTEMPT_STATES.FAILED,
+      ok,
+      status: Number.isInteger(result.status) ? result.status : null,
+      completedAt,
+      latencyMs,
+      errorMessage: sanitizeMessage(result.errorMessage)
+    });
+
+    const pending = this.pendingEntries.get(current.requestSeq);
+    if (pending?.inflight?.attemptId === attemptId) pending.inflight = null;
+    return done;
+  }
+
+  /**
+   * Attempt events, oldest first: the order the upstream calls were made.
+   * `afterSeq` resumes after an attempt; `limit` keeps the newest N matches.
+   * These are the very same events the live stream pushes as `attempt`.
+   */
+  listAttempts({ limit = 200, afterSeq = 0, requestId = null, pool = null, state = null, provider = null } = {}) {
+    const size = Math.max(1, Math.min(Number(limit) || 200, this.maxAttemptEvents));
+    const after = Number.isFinite(Number(afterSeq)) ? Number(afterSeq) : 0;
+    const filtered = [...this.attemptEvents.values()].filter((event) => {
+      if (event.attemptSeq <= after) return false;
+      if (requestId && event.requestId !== requestId) return false;
+      if ((pool === POOLS.TEXT || pool === POOLS.VISION) && event.pool !== pool) return false;
+      if (state && event.state !== state) return false;
+      if (provider && event.provider !== provider) return false;
+      return true;
+    });
+    const entries = filtered.length > size ? filtered.slice(filtered.length - size) : filtered;
+    return { entries, returned: entries.length, matched: filtered.length, total: this.attemptEvents.size };
   }
 
   /** Requests currently in flight, oldest first. */
@@ -177,8 +425,25 @@ export class RequestLog {
   record(entry = {}) {
     this.sequence += 1;
 
-    const attempts = normalizeAttempts(entry.attempts);
     const startSeq = Number.isInteger(entry.pendingSeq) ? entry.pendingSeq : null;
+    const pending = startSeq !== null ? this.pendingEntries.get(startSeq) ?? null : null;
+    const requestId = pending?.requestId
+      ?? (typeof entry.requestId === "string" && entry.requestId ? entry.requestId : this.#mintRequestId());
+    const requestSeq = startSeq ?? this.sequence;
+    const pool = normalizePool(entry.pool ?? pending?.pool);
+
+    const attempts = this.#normalizeAttempts(entry.attempts, {
+      requestId, requestSeq, sessionId: entry.id ?? pending?.id ?? null, pool,
+      protocol: entry.protocol ?? pending?.protocol ?? null,
+      requestedModel: sanitizeMessage(entry.requestedModel ?? pending?.requestedModel, { maxLength: 120 })
+    }, pending?.attempts);
+
+    // A request that ends while a call is still on the wire: that call can
+    // never answer now, so settle it rather than leave it `calling` forever.
+    const open = pending?.inflight?.attemptId;
+    if (open) {
+      this.finishAttempt(open, { ok: false, errorMessage: entry.errorMessage ?? "request ended before the attempt answered" });
+    }
     if (startSeq !== null) this.pendingEntries.delete(startSeq);
 
     const stored = {
@@ -186,11 +451,12 @@ export class RequestLog {
       // Order the request *began* in. Equals `seq` for a request that was never
       // registered as pending, so it is a stable key for a live view either way.
       startSeq: startSeq ?? this.sequence,
+      requestId,
       id: entry.id ?? null,
       receivedAt: entry.receivedAt ?? null,
       completedAt: entry.completedAt ?? null,
       protocol: entry.protocol ?? null,
-      pool: normalizePool(entry.pool),
+      pool,
       requestedModel: sanitizeMessage(entry.requestedModel, { maxLength: 120 }),
       autoRouted: entry.autoRouted === true,
       streamed: entry.streamed === true,
@@ -284,6 +550,7 @@ export class RequestLog {
   clear() {
     this.entries.clear();
     this.pendingEntries.clear();
+    this.attemptEvents.clear();
   }
 }
 

@@ -14,12 +14,14 @@ test("subscribe() hears begin, progress and record, and stops after unsubscribe"
   log.progress(seq, { attempts: [{ provider: "groq", model: "m", keyIndex: 0, ok: false, status: 500 }], inflight: null });
   log.record({ id: "a", pendingSeq: seq, outcome: "failed", httpStatus: 502 });
 
-  assert.deepEqual(heard.map((h) => h[0]), ["pending", "pending", "pending", "entry"]);
-  assert.equal(heard[3][1], "failed");
+  // The attempt reported without an id is registered once as its own `attempt`
+  // event (a real upstream call is always an event), between the pending updates.
+  assert.deepEqual(heard.map((h) => h[0]), ["pending", "pending", "attempt", "pending", "entry"]);
+  assert.equal(heard[4][1], "failed");
 
   off();
   log.begin({ id: "b" });
-  assert.equal(heard.length, 4, "no events after unsubscribe");
+  assert.equal(heard.length, 5, "no events after unsubscribe");
 });
 
 test("a throwing listener never breaks the request log", () => {

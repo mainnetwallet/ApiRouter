@@ -26,9 +26,12 @@ const PAGE_LIMIT = MAX_ROWS;
 /**
  * Live execution log.
  *
- * One card per API call. The gateway pushes every change over a server-sent
- * event stream (`GET /api/requests/stream`), so a box appears in the same
- * instant the router starts, retries or finishes an attempt. Each (re)connect
+ * One card per real upstream attempt. The gateway pushes every change over a
+ * server-sent event stream (`GET /api/requests/stream`): an `attempt` event for
+ * each call the router makes (when it goes on the wire, and when it answers), so
+ * a new card appears in the same instant the router starts an attempt. Every
+ * attempt is its own card, even when the same provider/model/key is called
+ * again; only the *same* attempt updates its card. Each (re)connect
  * begins with a snapshot, so nothing is missed. If the stream cannot be opened
  * the page falls back to polling `GET /api/requests` until it can. Nothing is
  * predicted or reconstructed (see `lib/liveLogs.js`).
@@ -85,8 +88,8 @@ export default function LiveLogs() {
     if (log.data) applyPayload(log.data);
   }, [log.data, applyPayload]);
 
-  // The live stream. A running row is replaced by its next state the moment the
-  // gateway reports it, rather than duplicated.
+  // The live stream. An attempt's card moves from CALLING to its outcome the
+  // moment the gateway reports it; the next attempt is a new card.
   useEffect(() => {
     if (paused) return undefined;
     return openRequestStream({
@@ -96,7 +99,7 @@ export default function LiveLogs() {
         setLastEventAt(Date.now());
         if (event.event === "snapshot") {
           applyPayload(event.data);
-        } else if (event.event === "pending" || event.event === "entry") {
+        } else if (event.event === "attempt" || event.event === "pending" || event.event === "entry") {
           const { rows: fresh, maxSeq: next } = ingestEvent(event, {
             floor: floor.current,
             maxSeq: maxSeq.current
@@ -171,7 +174,7 @@ export default function LiveLogs() {
     <div className="page page--livelog">
       <PageHeader
         title="Live Logs"
-        description="One row per API call, updating live as the router works through it"
+        description="One card per upstream attempt, appearing live as the router works through a request"
         lastUpdatedAt={streaming ? lastEventAt : log.lastUpdatedAt}
         refreshing={streaming ? false : log.refreshing}
         paused={paused}
@@ -217,7 +220,7 @@ export default function LiveLogs() {
         <FilterBar
           actions={
             <span className="tiny dim nowrap">
-              {filtering ? `${visible.length} of ${rows.length} calls` : `${rows.length} calls`} · keeps last {MAX_ROWS}
+              {filtering ? `${visible.length} of ${rows.length} attempts` : `${rows.length} attempts`} · keeps last {MAX_ROWS}
             </span>
           }
         >

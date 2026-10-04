@@ -250,6 +250,21 @@ function beginRequest(fields) {
   try { return requestLog.begin(fields); } catch { return null; }
 }
 
+/**
+ * One real upstream call is going on the wire: open its own attempt event.
+ * Returns the new attempt's id (or null when the live view is unavailable).
+ */
+function startAttemptEvent(startSeq, target) {
+  if (startSeq === null || startSeq === undefined) return null;
+  try { return requestLog.startAttempt(startSeq, target); } catch { return null; }
+}
+
+/** That call answered: settle ITS event, and only its. */
+function finishAttemptEvent(attemptId, result) {
+  if (!attemptId) return;
+  try { requestLog.finishAttempt(attemptId, result); } catch { /* observability only */ }
+}
+
 function progressRequest(startSeq, update) {
   if (startSeq === null || startSeq === undefined) return;
   try { requestLog.progress(startSeq, update); } catch { /* observability only */ }
@@ -500,14 +515,15 @@ async function proxy(req, res, protocol, pathname) {
           : config.timeoutMs;
         const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
         const attemptStartedAt = Date.now();
-        progressRequest(liveSeq, {
-          inflight: {
-            provider: target.provider,
-            model: target.model,
-            keyIndex: target.keyIndex,
-            protocol: upstreamProtocol,
-            startedAt: attemptStartedAt
-          }
+        // Every invoke is a new attempt with its own id, even when the very same
+        // provider/model/key was called a moment ago (or by an earlier request).
+        const attemptId = startAttemptEvent(liveSeq, {
+          phase: phase ?? null,
+          provider: target.provider,
+          model: target.model,
+          keyIndex: target.keyIndex,
+          protocol: upstreamProtocol,
+          startedAt: attemptStartedAt
         });
 
         // Records one real upstream attempt, in the order `withFallback` makes
@@ -516,7 +532,9 @@ async function proxy(req, res, protocol, pathname) {
         let recorded = false;
         const attempt = (ok, status, errorMessage) => {
           recorded = true;
+          const completedAt = Date.now();
           attempts.push({
+            attemptId,
             phase: phase ?? null,
             provider: target.provider,
             model: target.model,
@@ -527,8 +545,16 @@ async function proxy(req, res, protocol, pathname) {
             // Wall-clock start, so the Live Logs view can place each real
             // attempt on a timeline instead of guessing from request totals.
             startedAt: attemptStartedAt,
-            latencyMs: Date.now() - attemptStartedAt,
+            completedAt,
+            latencyMs: completedAt - attemptStartedAt,
             errorMessage: sanitizeMessage(errorMessage)
+          });
+          finishAttemptEvent(attemptId, {
+            ok,
+            status,
+            completedAt,
+            latencyMs: completedAt - attemptStartedAt,
+            errorMessage
           });
           progressRequest(liveSeq, { attempts, inflight: null });
         };

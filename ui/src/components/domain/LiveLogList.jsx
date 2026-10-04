@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { STATE, STATE_TONE, STEP, STEP_TONE, isLive, shortRequestId } from "../../lib/liveLogs.js";
+import { STATE, STATE_TONE, isLive, shortRequestId } from "../../lib/liveLogs.js";
 import { sanitizeText } from "../../lib/sanitize.js";
 import { EMPTY, formatLatency, providerLabel } from "../../lib/format.js";
 
@@ -52,60 +52,43 @@ function requestText(row) {
 
 const STATE_HINT = Object.freeze({
   [STATE.ROUTING]: "Choosing a target",
-  [STATE.RUNNING]: "Waiting for the provider",
-  [STATE.RETRYING]: "A target failed; trying the next one"
+  [STATE.CALLING]: "Calling this model",
+  [STATE.SUCCESS]: "This model answered",
+  [STATE.FAILED]: "This model failed"
 });
 
-/** The figures on the right of one attempt box. */
-export function describeStepOutcome(step, now = Date.now()) {
-  if (step.state === STEP.CALLING) {
-    return isNum(step.startedAt) && isNum(now) ? formatLatency(Math.max(0, now - step.startedAt)) : "";
-  }
-  if (step.state === STEP.ROUTING) return "";
-  return [
-    Number.isInteger(step.status) ? String(step.status) : null,
-    isNum(step.durationMs) ? formatLatency(step.durationMs) : null
-  ].filter(Boolean).join(" · ");
-}
-
-const STEP_HINT = Object.freeze({
-  [STEP.ROUTING]: "Choosing the next target",
-  [STEP.CALLING]: "Calling this model",
-  [STEP.FAILED]: "This model failed",
-  [STEP.SUCCESS]: "This model answered"
-});
-
-/** One attempt: its own box with CALLING / FAILED / SUCCESS. */
-function StepBox({ step }) {
-  const tone = STEP_TONE[step.state] ?? "neutral";
-  const calling = step.state === STEP.CALLING;
-  const target = step.state === STEP.ROUTING
+/** One attempt's target, as its own box inside its card. */
+function TargetBox({ row, tone }) {
+  const calling = row.state === STATE.CALLING;
+  const target = row.kind === "request" && row.state === STATE.ROUTING
     ? "Choosing next target…"
-    : sanitizeText(describeModel(step));
-  const why = step.state === STEP.FAILED
-    ? sanitizeText([step.reason, step.detail].filter(Boolean).join(" · "))
+    : sanitizeText(describeModel(row));
+  const why = row.state === STATE.FAILED && row.kind === "attempt"
+    ? sanitizeText([row.reason, row.detail].filter(Boolean).join(" · "))
     : "";
 
   return (
-    <div
-      className={`livelog__step livelog__step--${tone}${calling ? " livelog__step--calling" : ""}`}
-      data-step-state={step.state}
-    >
-      <div className="livelog__step-head">
-        <span
-          className={`livelog__type livelog__type--${tone}${calling ? " livelog__type--live" : ""}`}
-          title={STEP_HINT[step.state]}
-        >
-          {step.state}
-        </span>
-        <span className="livelog__target mono" title={target}>{target}</span>
+    <div className="livelog__steps">
+      <div
+        className={`livelog__step livelog__step--${tone}${calling ? " livelog__step--calling" : ""}`}
+        data-step-state={row.state}
+      >
+        <div className="livelog__step-head">
+          <span
+            className={`livelog__type livelog__type--${tone}${calling ? " livelog__type--live" : ""}`}
+            title={STATE_HINT[row.state]}
+          >
+            {row.state}
+          </span>
+          <span className="livelog__target mono" title={target}>{target}</span>
+        </div>
+        {why ? <div className="livelog__detail livelog__detail--failed mono" title={why}>{why}</div> : null}
       </div>
-      {why ? <div className="livelog__detail livelog__detail--failed mono" title={why}>{why}</div> : null}
     </div>
   );
 }
 
-/** The line between a failed model's card and the next model's card. */
+/** The line between a failed attempt's card and the next attempt's card. */
 function FallbackLink({ from }) {
   const why = sanitizeText([
     Number.isInteger(from.status) ? String(from.status) : null,
@@ -118,17 +101,20 @@ function FallbackLink({ from }) {
   );
 }
 
-/** Time, state, protocol and request id: the top of every card. */
-function CardHead({ time, state, tone, live, request, outcome, row, rid, onSelectRequest }) {
-  const pool = row?.pool === "vision" ? "VISION" : "TEXT";
+/** Time, state, pool, call number, protocol and request id: the top of every card. */
+function CardHead({ row, outcome, request, rid, onSelectRequest }) {
+  const tone = STATE_TONE[row.state] ?? "neutral";
+  const live = isLive(row);
+  const pool = row.pool === "vision" ? "VISION" : "TEXT";
+  const call = Number.isInteger(row.callIndex) ? `#${row.callIndex}` : "";
   return (
     <div className="livelog__card-head">
-      <time className="livelog__time mono tabular">{formatClock(time)}</time>
+      <time className="livelog__time mono tabular">{formatClock(row.ts)}</time>
       <span
         className={`livelog__type livelog__type--${tone}${live ? " livelog__type--live" : ""}`}
-        title={STATE_HINT[state]}
+        title={STATE_HINT[row.state]}
       >
-        {state}
+        {row.state}
       </span>
       {/* Which pool served the call: text and vision are routed independently. */}
       <span
@@ -137,7 +123,7 @@ function CardHead({ time, state, tone, live, request, outcome, row, rid, onSelec
       >
         {pool}
       </span>
-      <span className="livelog__sub dim mono" title={request}>{request}</span>
+      <span className="livelog__sub dim mono" title={request}>{[call ? `Call ${call}` : null, request].filter(Boolean).join(" · ")}</span>
       <span className="livelog__outcome mono tabular">{outcome}</span>
       {rid ? (
         onSelectRequest ? (
@@ -160,134 +146,104 @@ function CardHead({ time, state, tone, live, request, outcome, row, rid, onSelec
 }
 
 /**
- * One API call. Every model the router tries gets its own full card (header,
- * then the model's box), the same shape whether the call needed one model or
- * five, with a FALLBACK line between a failed card and the next. The last card
- * carries the call's overall state and total time. Missing optional fields
- * simply drop out; nothing here can throw on a sparse row.
+ * ONE card for ONE upstream attempt: its header (time, state, pool, call number,
+ * key, status and time) above the box naming the model. The card shows only its
+ * own attempt; it knows nothing of the other attempts of the request, so
+ * a later attempt can never change what it says. A request that never reached a
+ * provider is a single card with no model box. Missing optional fields simply
+ * drop out; nothing here can throw on a sparse row.
  */
-export function LiveLogRow({ row, now = Date.now(), onSelectRequest = null }) {
+export function LiveLogRow({ row, now = Date.now(), first = true, onSelectRequest = null }) {
   if (!row) return null;
 
-  const steps = Array.isArray(row.steps) ? row.steps : [];
+  const tone = STATE_TONE[row.state] ?? "neutral";
+  const live = isLive(row);
   const request = sanitizeText(requestText(row));
   const rid = shortRequestId(row.requestId);
-  const live = isLive(row);
+  const cardClass = `livelog__card${first ? " livelog__card--first" : ""} livelog__card--${tone}${live ? " livelog__card--live" : ""}`;
+  const identity = {
+    "data-state": row.state,
+    "data-kind": row.kind,
+    "data-attempt-id": row.attemptId ?? undefined,
+    "data-request-id": row.requestId ?? undefined
+  };
 
   // Rejected before any provider was tried: one card, no model box.
-  if (steps.length === 0) {
-    const tone = STATE_TONE[row.state] ?? "neutral";
+  if (row.kind === "request") {
     const target = sanitizeText(describeTarget(row));
     const reason = row.reason ? sanitizeText(row.reason) : "";
     return (
-      <li
-        className={`livelog__card livelog__card--first livelog__card--${tone}${live ? " livelog__card--live" : ""}`}
-        data-state={row.state}
-        data-request-id={row.requestId ?? undefined}
-      >
-        <CardHead
-          time={row.ts} state={row.state} tone={tone} live={live} request={request}
-          outcome={describeOutcome(row, now)} row={row} rid={rid} onSelectRequest={onSelectRequest}
-        />
+      <li className={cardClass} {...identity}>
+        <CardHead row={row} request={request} rid={rid} outcome={describeOutcome(row, now)} onSelectRequest={onSelectRequest} />
         {target ? <div className="livelog__target mono livelog__lone" title={target}>{target}</div> : null}
         {reason ? <div className="livelog__detail mono livelog__reason" title={reason}>{reason}</div> : null}
       </li>
     );
   }
 
-  return (
-    <>
-      {steps.map((step, index) => {
-        const last = index === steps.length - 1;
-        const state = last ? row.state : step.state;
-        const tone = STEP_TONE[step.state] ?? "neutral";
-        const badgeTone = STATE_TONE[state] ?? STEP_TONE[state] ?? "neutral";
-        const cardLive = last && live;
-        const time = Number.isFinite(step.startedAt) ? step.startedAt : (index === 0 ? row.ts : null);
-        const reason = last && row.reason ? sanitizeText(row.reason) : "";
-        // The figures live in the header only: key, then status and time (the
-        // call's total on the last card, this model's own on the others).
-        const figures = [
-          Number.isInteger(step.keyIndex) ? `key ${step.keyIndex}` : null,
-          last ? describeOutcome(row, now) : describeStepOutcome(step, now)
-        ].filter(Boolean).join(" · ");
+  // The figures live in the header only: key, then status and time.
+  const figures = [
+    Number.isInteger(row.keyIndex) ? `key ${row.keyIndex}` : null,
+    describeOutcome(row, now)
+  ].filter(Boolean).join(" · ");
 
-        return (
-          <Fragment key={index}>
-            {index > 0 && steps[index - 1].state === STEP.FAILED ? <FallbackLink from={steps[index - 1]} /> : null}
-            <li
-              className={`livelog__card${index === 0 ? " livelog__card--first" : ""} livelog__card--${tone}${cardLive ? " livelog__card--live" : ""}`}
-              data-state={state}
-              data-request-id={row.requestId ?? undefined}
-            >
-              <CardHead
-                time={time} state={state} tone={badgeTone} live={cardLive} request={request}
-                outcome={figures}
-                row={row} rid={rid} onSelectRequest={onSelectRequest}
-              />
-              <div className="livelog__steps">
-                <StepBox step={step} />
-              </div>
-              {reason ? <div className="livelog__detail mono livelog__reason" title={reason}>{reason}</div> : null}
-            </li>
-          </Fragment>
-        );
-      })}
-    </>
+  return (
+    <li className={cardClass} {...identity}>
+      <CardHead row={row} request={request} rid={rid} outcome={figures} onSelectRequest={onSelectRequest} />
+      <TargetBox row={row} tone={tone} />
+    </li>
   );
 }
 
-/** The scrollable chronological list. Newest cards render last. */
+/**
+ * The scrollable chronological list, oldest first, newest last. Every row is its
+ * own card, keyed by its attempt id, so a new attempt always mounts a new card.
+ * A FALLBACK line joins a failed attempt to the next attempt of the same request.
+ */
 export function LiveLogList({ rows, now = Date.now(), onSelectRequest = null }) {
   return (
     <ol className="livelog__list" role="log" aria-live="off" aria-label="API calls">
-      {rows.map((row) => (
-        <LiveLogRow key={row.key} row={row} now={now} onSelectRequest={onSelectRequest} />
-      ))}
+      {rows.map((row, index) => {
+        const prev = index > 0 ? rows[index - 1] : null;
+        const sameRequest = prev !== null && prev.requestKey === row.requestKey;
+        const fallback = sameRequest && prev.kind === "attempt" && prev.state === STATE.FAILED && row.kind === "attempt";
+        return (
+          <Fragment key={row.key}>
+            {fallback ? <FallbackLink from={prev} /> : null}
+            <LiveLogRow row={row} now={now} first={!sameRequest} onSelectRequest={onSelectRequest} />
+          </Fragment>
+        );
+      })}
     </ol>
   );
 }
 
 /**
- * Plain-text transcript of the given calls (what is on screen), for pasting
- * into a bug report or chat. Free text is scrubbed like everything else shown;
- * only key indexes appear, never key values.
+ * Plain-text transcript of the given cards (what is on screen), for pasting
+ * into a bug report or chat: one block per attempt. Free text is scrubbed like
+ * everything else shown; only key indexes appear, never key values.
  */
 export function formatRowsAsText(rows) {
   const clean = (value) => sanitizeText(value, { maxLength: 1000 });
   const blocks = (Array.isArray(rows) ? rows : []).filter(Boolean).map((row) => {
-    const steps = Array.isArray(row.steps) ? row.steps : [];
+    const figures = describeOutcome(row, row.ts);
     const head = [
-      `[${formatClock(steps[0]?.startedAt ?? row.ts)}]`,
+      `[${formatClock(row.ts)}]`,
       row.state,
       row.pool === "vision" ? "VISION" : "TEXT",
+      Number.isInteger(row.callIndex) ? `call #${row.callIndex}` : null,
       clean(requestText(row)),
       row.requestId ? `id ${row.requestId}` : null,
-      describeOutcome(row, row.ts) ? `total ${describeOutcome(row, row.ts)}` : null
+      row.attemptId ? `attempt ${row.attemptId}` : null
     ].filter(Boolean).join("  ");
     const lines = [head];
 
-    if (steps.length === 0) {
-      const target = clean(describeTarget(row));
-      if (target) lines.push(`  ${target}`);
-      if (row.reason) lines.push(`  ${clean(row.reason)}`);
-      return lines.join("\n");
-    }
+    const target = clean(describeTarget(row));
+    if (target) lines.push(`  ${target}${figures && row.kind === "attempt" ? `  (${figures})` : ""}`);
+    if (row.kind === "request" && figures) lines.push(`  ${figures}`);
 
-    steps.forEach((step, index) => {
-      if (index > 0 && steps[index - 1].state === STEP.FAILED) {
-        const prev = steps[index - 1];
-        const why = clean([Number.isInteger(prev.status) ? String(prev.status) : null, prev.reason].filter(Boolean).join(" · "));
-        lines.push(`  ↓ FALLBACK${why ? ` · ${why}` : ""}`);
-      }
-      const figures = describeStepOutcome(step, step.startedAt);
-      lines.push(`  ${index + 1}. ${step.state}  ${clean(describeTarget(step))}${figures ? `  (${figures})` : ""}`);
-      if (step.state === STEP.FAILED) {
-        const why = clean([step.reason, step.detail].filter(Boolean).join(" · "));
-        if (why) lines.push(`     ${why}`);
-      }
-    });
-    if (row.reason) lines.push(`  ${clean(row.reason)}`);
+    const why = clean([row.reason, row.detail].filter(Boolean).join(" · "));
+    if (why) lines.push(`  ${why}`);
     return lines.join("\n");
   });
   return blocks.join("\n\n");

@@ -138,7 +138,10 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     send("snapshot", {
       generatedAt: new Date().toISOString(),
       ...requestLog.list({ limit: searchParams.get("limit") }),
-      pending: requestLog.pending()
+      pending: requestLog.pending(),
+      // Every real upstream attempt as its own event, oldest first: the same
+      // events the stream then pushes one by one as `attempt`.
+      attempts: requestLog.listAttempts({ limit: searchParams.get("attemptLimit") }).entries
     });
     heartbeat = setInterval(() => res.write(": ping\n\n"), STREAM_HEARTBEAT_MS);
     heartbeat.unref?.();
@@ -490,7 +493,24 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
         }),
         // Requests still running, so the Live Logs view can show them before
         // they finish. Never part of `entries`, so metrics are unaffected.
-        pending: requestLog.pending()
+        pending: requestLog.pending(),
+        attempts: requestLog.listAttempts({ limit: searchParams.get("attemptLimit") }).entries
+      });
+    }
+
+    // One event per real upstream attempt, oldest first. A request's attempts
+    // share its `requestId`; no two attempts ever share an `attemptId`.
+    if (pathname === "/api/attempts" && req.method === "GET") {
+      return sendJson(req, res, 200, {
+        generatedAt: new Date(now).toISOString(),
+        ...requestLog.listAttempts({
+          limit: searchParams.get("limit") ?? undefined,
+          afterSeq: searchParams.get("afterSeq") ?? 0,
+          requestId: searchParams.get("requestId"),
+          pool: searchParams.get("pool"),
+          state: searchParams.get("state"),
+          provider: searchParams.get("provider")
+        })
       });
     }
 

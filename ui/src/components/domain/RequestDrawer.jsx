@@ -116,7 +116,7 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
             </div>
             <div className="stack stack--tight">
               {(entry.attempts ?? []).map((attempt) => (
-                <div key={attempt.index} className={`chain__card chain__card--${attempt.ok ? "ok" : attempt.skipped ? "neutral" : "danger"}`}>
+                <div key={attempt.attemptId ?? `${entry.seq}:${attempt.index}`} className={`chain__card chain__card--${attempt.ok ? "ok" : attempt.skipped ? "neutral" : "danger"}`}>
                   <span className="chain__rank">{attempt.index}</span>
                   <div className="chain__main">
                     <div className="chain__target">
