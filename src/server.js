@@ -743,10 +743,42 @@ function isReserved(pathname) {
   );
 }
 
-const server = http.createServer(async (req, res) => {
+/**
+ * Last line of defence for a request. Malformed client input is answered with a
+ * 4xx at the point it is detected; anything that still escapes is a server-side
+ * fault. Either way it must never take the process (and every other client's
+ * routing) down, so it ends here as a JSON 500, or a dropped connection when
+ * the response has already started. The log line carries the error name, a
+ * credential-scrubbed message and a few stack frames, never the request.
+ */
+function respondUnexpected(res, error) {
+  try {
+    const frames = String(error?.stack || "").split("\n").slice(1, 4).map((line) => line.trim()).join(" | ");
+    console.error(`[router] unhandled request error: ${error?.name || "Error"}: ${sanitizeMessage(error?.message) ?? ""} ${frames}`.trim());
+  } catch { /* logging must not throw */ }
+  try {
+    if (res.headersSent || res.writableEnded) {
+      res.destroy();
+      return;
+    }
+    json(res, 500, { error: { message: "Internal server error", type: "internal_error" } });
+  } catch {
+    try { res.destroy(); } catch { /* nothing left to do */ }
+  }
+}
+
+async function handleRequest(req, res) {
   // "//v1/models" (base URL with trailing slash + "/v1/...") must not parse as a host.
-  const url = new URL(String(req.url).replace(/^\/{2,}/, "/"), "http://localhost");
-  const pathname = url.pathname.replace(/\/{2,}/g, "/");
+  // The request target is client-controlled and `new URL` throws on a malformed
+  // one (e.g. an absolute-form target with a bad host), so it is parsed guardedly.
+  let url;
+  let pathname;
+  try {
+    url = new URL(String(req.url).replace(/^\/{2,}/, "/"), "http://localhost");
+    pathname = url.pathname.replace(/\/{2,}/g, "/");
+  } catch {
+    return json(res, 400, { error: { message: "Invalid request target", type: "invalid_request_error" } });
+  }
 
   if (req.method === "GET" && pathname === "/health") {
     // Deterministic route order (priority, then Provider -> Key -> Models), not a
@@ -824,6 +856,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   return json(res, 404, { error: { message: "Not found", type: "not_found" } });
+}
+
+const server = http.createServer((req, res) => {
+  // handleRequest is async, so a synchronous throw inside it is also a rejection.
+  handleRequest(req, res).catch((error) => respondUnexpected(res, error));
 });
 
 const stopHealthMonitor = startHealthMonitor(targets, trackedCheckTargetHealth, HEALTH_CHECK_INTERVAL_MS);

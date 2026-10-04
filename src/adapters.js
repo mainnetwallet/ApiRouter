@@ -80,12 +80,22 @@ export async function readJsonBody(req, maxBytes = 10 * 1024 * 1024) {
     chunks.push(chunk);
   }
   if (chunks.length === 0) return {};
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  let parsed;
+  try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
   catch {
     const error = new Error("Invalid JSON request body");
     error.status = 400;
     throw error;
   }
+  // Every request body this gateway accepts is a JSON object. `null`, arrays and
+  // scalars parse fine but would crash the first `body.model` read, so they are
+  // rejected here, as a client error, before any routing code sees them.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    const error = new Error("Request body must be a JSON object");
+    error.status = 400;
+    throw error;
+  }
+  return parsed;
 }
 
 export function clientProtocol(pathname) {

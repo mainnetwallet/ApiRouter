@@ -500,7 +500,9 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     }
 
     if (pathname.startsWith("/api/requests/") && req.method === "GET") {
-      const id = decodeURIComponent(pathname.slice("/api/requests/".length));
+      let id;
+      try { id = decodeURIComponent(pathname.slice("/api/requests/".length)); }
+      catch { return fail(req, res, 400, "Malformed percent-encoding in request path", "invalid_request"); }
       // Accept either the client-visible request id or the internal sequence.
       const entry = requestLog.findById(id) ?? requestLog.get(id);
       if (!entry) return fail(req, res, 404, "Request not found", "not_found");
