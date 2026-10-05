@@ -121,9 +121,9 @@ export function loadConfig(env = process.env) {
     // 0 is meaningful here: server.js then uses the full request timeout for streams.
     connectTimeoutMs: readNumber(env, "STREAM_CONNECT_TIMEOUT_MS", 30000, { min: 0, expected: "a non-negative integer (0 disables the separate connect timeout)" }),
     retryableStatus: new Set(retryableValues),
-    // Sticky target lifetime after a success: 15 minutes (STICKY_TTL_MS only
+    // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
     // exists so tests can use a short real-clock TTL).
-    stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 15 * 60 * 1000,
+    stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 20 * 60 * 1000,
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,

@@ -49,8 +49,8 @@ export class SessionStore {
   }
 }
 
-/** A sticky target stays preferred for 15 minutes after its last success. */
-export const STICKY_TTL_MS = 15 * 60 * 1000;
+/** A sticky target stays preferred for 20 minutes after its last success. */
+export const STICKY_TTL_MS = 20 * 60 * 1000;
 
 export class RouteSession {
   constructor({ targetId = null, expiresAt = null, ttlMs = STICKY_TTL_MS } = {}) {
@@ -182,7 +182,7 @@ export async function withFallback(
         if (error?.skipCooldown) continue;
 
         // A 413 depends on the size of this one request (per-minute token caps
-        // reset quickly), so cool the target down briefly, not for 15 minutes.
+        // reset quickly), so cool the target down briefly, not for 20 minutes.
         health.markFailure(target, status, status === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : {});
 
         // Quota/auth failures hit the whole key. Cool the sibling models on the

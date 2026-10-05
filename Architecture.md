@@ -49,7 +49,7 @@ differs.
 
 ```text
 REQUEST -> TEXT pool | VISION pool (never mixed)
-  STICKY phase     the session's last successful target, only while its 15-minute TTL is valid
+  STICKY phase     the session's last successful target, only while its 20-minute TTL is valid
   PRIORITY phase   TEXT_/VISION_PRIORITY_MODELS entries, exact env order (optional)
   NORMAL fallback  Provider -> Key -> Models -> next Key -> Models -> next Provider
 ```
@@ -75,7 +75,7 @@ Sticky is a separate leading phase. It never edits the normal fallback list.
   recorded as `skipped` rows (`already_attempted`), cooling targets as
   `skipped` (`cooldown`); neither counts as an upstream attempt.
 - Health is the existing `HealthRegistry`: it only decides eligibility (cooldown,
-  default 15 minutes) and no longer reorders the plan. Priority has no state of
+  default 20 minutes) and no longer reorders the plan. Priority has no state of
   its own, so a failed priority target is tried again on the next request once
   its cooldown has elapsed.
 - Precedence: pin (strict: no sticky, no priority) > sticky > priority > normal.
@@ -83,7 +83,7 @@ Sticky is a separate leading phase. It never edits the normal fallback list.
   explicit model the pool serves is honoured first: only priority entries of
   that model apply, so a priority entry of a different model cannot outrank it.
   Every success stores `provider + key + model` as the session's sticky target
-  with `expiresAt = now + 15 min` (a timestamp checked at request time, no timer;
+  with `expiresAt = now + 20 min` (a timestamp checked at request time, no timer;
   `RouteSession.validTargetId`). Sticky is honoured only while valid, only for a
   target of the request's own pool and protocol, never over cooldown, and not
   over an explicit configured model the sticky target does not serve. If the
@@ -199,7 +199,7 @@ Every observation carries the timestamp at which it was taken. An observation is
 Default failed-target cooldown:
 
 ```text
-15 minutes
+20 minutes
 ```
 
 Default health refresh interval:
@@ -243,7 +243,7 @@ If absent, the router creates a UUID and returns:
 x-multi-ai-session-id: <session-id>
 ```
 
-A successful target becomes the session's sticky target for 15 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, the other keys of the same provider/model are tried next (key order), then the priority models listed after the sticky model (priority resumes there and never goes back to earlier entries; with no priority sticky, the whole list applies), then the normal fallback. Requests without the header share one default session per protocol and pool. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders the priority list or the normal fallback list.
+A successful target becomes the session's sticky target for 20 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, the other keys of the same provider/model are tried next (key order), then the priority models listed after the sticky model (priority resumes there and never goes back to earlier entries; with no priority sticky, the whole list applies), then the normal fallback. Requests without the header share one default session per protocol and pool. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders the priority list or the normal fallback list.
 
 ## Security
 

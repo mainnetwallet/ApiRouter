@@ -1,4 +1,4 @@
-const DEFAULT_COOLDOWN_MS = 15 * 60 * 1000;
+const DEFAULT_COOLDOWN_MS = 20 * 60 * 1000;
 const DEFAULT_HEALTH_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
 // Health probes run in parallel, but never unbounded: a large target list must

@@ -163,7 +163,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
       key: "sticky",
       label: "Session preference",
       detail: plan.sticky
-        ? "valid sticky target (15-minute TTL) is the first phase; priority and normal fallback follow unchanged"
+        ? "valid sticky target (20-minute TTL) is the first phase; priority and normal fallback follow unchanged"
         : stickyTargetId
           ? "the given sticky target does not apply to this request (other pool, not reachable, or a different explicit model)"
           : "no valid sticky target; routing starts at priority, then normal fallback",
