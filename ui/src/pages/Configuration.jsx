@@ -269,7 +269,7 @@ export default function Configuration() {
 
                   <dt className="dl__term">Sticky sessions</dt>
                   <dd className="dl__desc">
-                    A successful target stays the session's first choice for 15 minutes (refreshed by
+                    A successful target stays the session's first choice for 20 minutes (refreshed by
                     each success), then routing falls back to priority and the normal order. Clients may group requests with <code>X-Multi-AI-Session-ID</code>.
                   </dd>
                 </dl>
