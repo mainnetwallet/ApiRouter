@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
-import { invalidToolArguments, markStreamFailure } from "./bridge-errors.js";
+import { markStreamFailure, parseToolArguments } from "./bridge-errors.js";
 import { splitInlineDataUrl, unsupportedImageSource } from "./image-source.js";
 import { geminiModelsUrl } from "./upstream-url.js";
 
@@ -91,20 +91,6 @@ function argsString(args) {
   return JSON.stringify(args ?? {});
 }
 
-function argsObject(args) {
-  if (typeof args === "string") {
-    // A tool call with no arguments is legitimately empty; anything else that is
-    // not valid JSON must not be silently replaced by `{}`.
-    if (args.trim() === "") return {};
-    try {
-      return JSON.parse(args);
-    } catch {
-      throw invalidToolArguments("a tool call's arguments are not valid JSON");
-    }
-  }
-  return args && typeof args === "object" ? args : {};
-}
-
 function positiveInt(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
@@ -169,7 +155,7 @@ export function toGeminiFromChat(body, { sessionId = "" } = {}) {
       if (text) parts.push({ text });
       for (const call of message.tool_calls || []) {
         if (!call || typeof call.function?.name !== "string" || !call.function.name) continue;
-        const part = { functionCall: { name: call.function.name, args: argsObject(call.function.arguments) } };
+        const part = { functionCall: { name: call.function.name, args: parseToolArguments(call.function.arguments) } };
         // Echo the thoughtSignature a previous Gemini response returned with
         // this call, when the client sent the same tool-call id back.
         const signature = signatureFor(call.id, sessionId);

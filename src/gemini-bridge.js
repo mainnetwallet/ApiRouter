@@ -2,20 +2,10 @@ import { randomUUID } from "node:crypto";
 import { unsupportedImageSource } from "./image-source.js";
 import { openAiChatUrl } from "./upstream-url.js";
 import { cleanSchemaForGemini } from "./anthropic-bridge.js";
+import { INVALID_TOOL_ARGUMENTS, markStreamFailure, parseToolArguments } from "./bridge-errors.js";
 
 function id(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
-}
-
-/** Tool arguments arrive as a JSON string. A malformed one must not crash. */
-function parseArgs(value) {
-  if (typeof value !== "string") return value && typeof value === "object" ? value : {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
 }
 
 function textParts(parts = []) {
@@ -279,7 +269,7 @@ export function chatJsonToGemini(json) {
       functionCall: {
         id: call.id,
         name: fn.name,
-        args: parseArgs(fn.arguments)
+        args: parseToolArguments(fn.arguments)
       }
     });
   }
@@ -331,7 +321,7 @@ export async function* streamToGemini(events) {
           // the call back keeps a stable pairing.
           id: call.id || call.name || "tool",
           name: call.name || "tool",
-          args: parseArgs(call.arguments)
+          args: parseToolArguments(call.arguments)
         }
       };
     });
@@ -340,58 +330,68 @@ export async function* streamToGemini(events) {
     return parts;
   };
 
-  for await (const data of events) {
-    if (data === "[DONE]") break;
-    let parsed;
-    try { parsed = JSON.parse(data); } catch { continue; }
-    if (parsed?.error) {
-      yield sseData(parsed);
-      continue;
-    }
-
-    const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
-    for (const choice of choices) {
-      const delta = choice?.delta || {};
-      const parts = [];
-      if (typeof delta.content === "string" && delta.content) parts.push({ text: delta.content });
-
-      const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
-      for (const call of fragments) {
-        const key = call.index ?? call.id ?? order.length;
-        let entry = pending.get(key);
-        if (!entry) {
-          entry = { id: null, name: "", arguments: "" };
-          pending.set(key, entry);
-          order.push(key);
-        }
-        if (call.id) entry.id = call.id;
-        if (call.function?.name) entry.name += call.function.name;
-        if (typeof call.function?.arguments === "string") entry.arguments += call.function.arguments;
+  try {
+    for await (const data of events) {
+      if (data === "[DONE]") break;
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { continue; }
+      if (parsed?.error) {
+        yield sseData(parsed);
+        continue;
       }
 
-      const finishing = Boolean(choice?.finish_reason);
-      if (finishing) parts.push(...drainCalls());
+      const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+      for (const choice of choices) {
+        const delta = choice?.delta || {};
+        const parts = [];
+        if (typeof delta.content === "string" && delta.content) parts.push({ text: delta.content });
 
-      if (!parts.length && !finishing) continue;
-      yield sseData({
-        candidates: [{
-          content: { role: "model", parts },
-          finishReason: finishReason(choice.finish_reason, parts.some((part) => part.functionCall)),
-          index: 0
-        }]
-      });
+        const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+        for (const call of fragments) {
+          const key = call.index ?? call.id ?? order.length;
+          let entry = pending.get(key);
+          if (!entry) {
+            entry = { id: null, name: "", arguments: "" };
+            pending.set(key, entry);
+            order.push(key);
+          }
+          if (call.id) entry.id = call.id;
+          if (call.function?.name) entry.name += call.function.name;
+          if (typeof call.function?.arguments === "string") entry.arguments += call.function.arguments;
+        }
+
+        const finishing = Boolean(choice?.finish_reason);
+        if (finishing) parts.push(...drainCalls());
+
+        if (!parts.length && !finishing) continue;
+        const candidate = { content: { role: "model", parts }, index: 0 };
+        // `finishReason` is a terminal signal, so it may only appear on the
+        // chunk that actually carries one: announcing `STOP` on an intermediate
+        // chunk tells the client the answer is already over.
+        if (finishing) candidate.finishReason = finishReason(choice.finish_reason, parts.some((part) => part.functionCall));
+        yield sseData({ candidates: [candidate] });
+      }
     }
-  }
 
-  // A stream cut off before any finish reason still owes the client its calls.
-  const remaining = drainCalls();
-  if (remaining.length) {
-    yield sseData({
-      candidates: [{
-        content: { role: "model", parts: remaining },
-        finishReason: "STOP",
-        index: 0
-      }]
-    });
+    // A stream cut off before any finish reason still owes the client its calls,
+    // but no finish reason is invented for it: Gemini leaves `finishReason`
+    // unset until the model actually stopped, and the client stops at the end
+    // of the stream.
+    const remaining = drainCalls();
+    if (remaining.length) {
+      yield sseData({ candidates: [{ content: { role: "model", parts: remaining }, index: 0 }] });
+    }
+  } catch (error) {
+    if (error?.errorType === INVALID_TOOL_ARGUMENTS) {
+      // Gemini's own mid-stream error envelope (the same shape a native Gemini
+      // upstream sends), then the stream fails: never a silent `{}` and never a
+      // recorded success. Marked as a stream failure so the truncated request is
+      // classified as a truncation rather than a client abort.
+      yield sseData({
+        error: { code: 400, status: "INVALID_ARGUMENT", message: String(error.message || "invalid_tool_arguments").slice(0, 500) }
+      });
+      throw markStreamFailure(error);
+    }
+    throw error;
   }
 }

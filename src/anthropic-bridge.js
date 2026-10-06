@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { unsupportedImageSource } from "./image-source.js";
 import { geminiModelsUrl, openAiChatUrl } from "./upstream-url.js";
+import { parseToolArguments } from "./bridge-errors.js";
 
 /**
  * Anthropic Messages bridge.
@@ -62,10 +63,6 @@ function systemText(system) {
   if (!system) return "";
   if (typeof system === "string") return system;
   return textOfBlocks(system);
-}
-
-function safeParse(text) {
-  try { return JSON.parse(text); } catch { return {}; }
 }
 
 /** Gemini rejects most JSON-Schema extras; keep only what it understands. */
@@ -347,7 +344,7 @@ export function openAIJsonToAnthropic(json, model) {
       type: "tool_use",
       id: call.id || newId("toolu"),
       name: call.function?.name || "tool",
-      input: safeParse(call.function?.arguments || "{}")
+      input: parseToolArguments(call.function?.arguments)
     });
   }
   if (content.length === 0) content.push({ type: "text", text: "" });

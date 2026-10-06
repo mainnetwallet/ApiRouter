@@ -281,6 +281,22 @@ test("streamToChat turns a Gemini stream into chat.completion.chunk ending in [D
   assert.equal(parsed.at(-1).done, true, "the stream terminates with [DONE]");
 });
 
+test("streamToChat keeps intermediate chunks non-terminal (no premature finish_reason)", async () => {
+  const parsed = parseChatSse(await collect(streamToChat("gemini", lines(
+    JSON.stringify({ candidates: [{ content: { parts: [{ text: "a" }] } }] }),
+    JSON.stringify({ candidates: [{ content: { parts: [{ text: "b" }] } }] }),
+    JSON.stringify({ candidates: [{ content: { parts: [] }, finishReason: "MAX_TOKENS" }] })
+  ), "m")));
+
+  const chunks = parsed.filter((entry) => entry.chunk).map((entry) => entry.chunk);
+  const intermediates = chunks.slice(0, -1);
+  assert.equal(intermediates.length, 3, "role chunk plus one chunk per text delta");
+  for (const [index, chunk] of intermediates.entries()) {
+    assert.equal(chunk.choices[0].finish_reason, null, `intermediate ${index} must stay open`);
+  }
+  assert.equal(chunks.at(-1).choices[0].finish_reason, "length", "only the terminal chunk reports the reason");
+});
+
 test("streamToChat assembles streamed Gemini tool calls with indexed deltas", async () => {
   const parsed = parseChatSse(await collect(streamToChat("gemini", lines(
     JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: { name: "shell", args: { cmd: "ls" } } }] }, finishReason: "STOP" }] })

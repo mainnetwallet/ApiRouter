@@ -332,8 +332,13 @@ async function walkPlan(
      * a 200 that only carried headers is NOT a success — and calls this once
      * the body has been delivered or has failed. A client abort is never
      * charged to the provider.
+     *
+     * `skipCooldown` mirrors the walk's own `error.skipCooldown` rule: a
+     * translation-shape mismatch (e.g. a provider response whose tool arguments
+     * the client's protocol cannot represent) is not provider ill health, so
+     * the target is left untouched instead of being cooled.
      */
-    const commit = (ok, { status = 200, reason = null, clientAborted = false } = {}) => {
+    const commit = (ok, { status = 200, reason = null, clientAborted = false, skipCooldown = false } = {}) => {
       if (committed) return;
       committed = true;
       if (ok) {
@@ -342,6 +347,7 @@ async function walkPlan(
         return;
       }
       if (clientAborted) return;
+      if (skipCooldown) return;
       const code = Number(status) || 0;
       health.markFailure(target, code, code === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : { reason });
       if (KEY_LEVEL_STATUS_CODES.has(code)) coolKeySiblings(target, code);

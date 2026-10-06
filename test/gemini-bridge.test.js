@@ -417,3 +417,97 @@ test("a streamed tool call without an id keeps a name-based identity", async () 
   assert.equal(call.name, "lookup");
   assert.equal(call.id, "lookup", "a stable, echoable id rather than a random one");
 });
+
+// ---------------------------------------------------------------------------
+// Streaming finishReason: a terminal signal may only ride the terminal chunk.
+//
+// A Gemini client reads `finishReason` as "the model stopped", so announcing
+// STOP on an intermediate chunk ends the client's answer early. The translated
+// stream used to stamp a finishReason (defaulting to STOP) on *every* chunk,
+// because `finishReason(undefined)` returns STOP.
+// ---------------------------------------------------------------------------
+
+const payloadsOf = async (events) => {
+  const payloads = [];
+  for await (const event of streamToGemini(events)) payloads.push(JSON.parse(event.slice(5)));
+  return payloads;
+};
+
+test("intermediate translated chunks never carry a terminal finishReason", async () => {
+  async function* events() {
+    yield JSON.stringify({ choices: [{ delta: { content: "a" }, finish_reason: null }] });
+    yield JSON.stringify({ choices: [{ delta: { content: "b" }, finish_reason: null }] });
+    yield JSON.stringify({ choices: [{ delta: { content: "c" }, finish_reason: null }] });
+    yield JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] });
+    yield "[DONE]";
+  }
+
+  const payloads = await payloadsOf(events());
+
+  assert.equal(payloads.length, 4, "one chunk per content delta plus the terminal chunk");
+  for (const [index, payload] of payloads.slice(0, -1).entries()) {
+    const candidate = payload.candidates[0];
+    assert.ok(!("finishReason" in candidate), `intermediate chunk ${index} must omit finishReason entirely`);
+  }
+  assert.equal(payloads.at(-1).candidates[0].finishReason, "STOP", "only the terminal chunk may say STOP");
+});
+
+test("the terminal translated chunk maps every OpenAI finish_reason", async () => {
+  const terminal = async (reason) => {
+    async function* events() {
+      yield JSON.stringify({ choices: [{ delta: { content: "x" }, finish_reason: null }] });
+      yield JSON.stringify({ choices: [{ delta: {}, finish_reason: reason }] });
+    }
+    const payloads = await payloadsOf(events());
+    return { intermediate: payloads[0].candidates[0], last: payloads.at(-1).candidates[0] };
+  };
+
+  const cases = [
+    ["stop", "STOP"],
+    ["tool_calls", "STOP"],
+    ["length", "MAX_TOKENS"],
+    ["safety", "SAFETY"],
+    ["content_filter", "SAFETY"],
+    ["recitation", "RECITATION"]
+  ];
+  for (const [upstream, gemini] of cases) {
+    const { intermediate, last } = await terminal(upstream);
+    assert.ok(!("finishReason" in intermediate), `${upstream}: intermediate chunk stays open`);
+    assert.equal(last.finishReason, gemini, `${upstream} must map to ${gemini}`);
+  }
+});
+
+test("a translated stream that ends without a finish reason does not invent STOP", async () => {
+  async function* events() {
+    yield JSON.stringify({ choices: [{ delta: { content: "hi" }, finish_reason: null }] });
+  }
+
+  const payloads = await payloadsOf(events());
+
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].candidates[0].content.parts[0].text, "hi");
+  assert.ok(!("finishReason" in payloads[0].candidates[0]), "no finish reason may be fabricated");
+});
+
+test("streamed tool calls keep fragments non-terminal and complete on the terminal chunk", async () => {
+  async function* events() {
+    yield JSON.stringify({ choices: [{ delta: {
+      content: "checking ",
+      tool_calls: [{ index: 0, id: "c1", function: { name: "lookup" } }]
+    }, finish_reason: null }] });
+    yield JSON.stringify({ choices: [{ delta: {
+      tool_calls: [{ index: 0, function: { arguments: "{\"q\":\"x\"}" } }]
+    }, finish_reason: "tool_calls" }] });
+    yield "[DONE]";
+  }
+
+  const payloads = await payloadsOf(events());
+  const candidates = payloads.map((payload) => payload.candidates[0]);
+  const call = candidates.flatMap((candidate) => candidate.content.parts).find((part) => part.functionCall).functionCall;
+
+  assert.ok(!("finishReason" in candidates[0]), "the fragment chunk must not announce STOP");
+  assert.equal(candidates[0].content.parts[0].text, "checking ");
+  assert.equal(call.name, "lookup");
+  assert.deepEqual(call.args, { q: "x" }, "the assembled arguments survive the stream");
+  assert.equal(candidates.at(-1).finishReason, "STOP", "tool completion is a terminal STOP");
+});

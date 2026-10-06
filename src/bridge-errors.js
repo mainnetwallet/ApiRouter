@@ -30,6 +30,45 @@ export function invalidToolArguments(detail) {
 }
 
 /**
+ * Arguments for a destination that needs a real JSON *object* — Gemini's
+ * `functionCall.args`, Anthropic's `tool_use.input`.
+ *
+ * Both protocols that *carry* arguments as a JSON string (OpenAI Chat
+ * `function_call.arguments`, Responses `function_call.arguments`) and both
+ * protocols that carry them as an object reach these code paths, in the request
+ * direction (a chat client routed to Gemini) and in the response direction (a
+ * chat provider answering a Gemini client).
+ *
+ * Only three outcomes are allowed, in decreasing order of fidelity:
+ *   1. an object is carried through untouched;
+ *   2. an empty string means "no arguments" and becomes `{}`;
+ *   3. anything else is refused with a typed `invalid_tool_arguments` error.
+ *
+ * The historical fallback for case 3 was `{}`, which dropped the model's
+ * arguments while the response still answered 200 — silently destroying data.
+ * The error is `retryable` (an OpenAI-compatible target carries the raw string
+ * verbatim) with `skipCooldown` (a request/translation-shape mismatch is not
+ * provider ill health).
+ */
+export function parseToolArguments(value) {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
+  if (value === undefined || value === null) return {};
+  if (typeof value !== "string") throw invalidToolArguments("a tool call's arguments are not a JSON object");
+  if (value.trim() === "") return {};
+
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw invalidToolArguments("a tool call's arguments are not valid JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw invalidToolArguments("a tool call's arguments are not a JSON object");
+  }
+  return parsed;
+}
+
+/**
  * A translated stream that broke after the 200 headers were sent.
  *
  * The protocol bridges still emit their client-facing terminal event (an

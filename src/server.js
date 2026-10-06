@@ -59,6 +59,7 @@ import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage, registerConfiguredSecrets } from "./observability/sanitize.js";
 import { validateRequestShape } from "./request-validation.js";
+import { INVALID_TOOL_ARGUMENTS } from "./bridge-errors.js";
 
 let config;
 try { config = loadConfig(); }
@@ -808,6 +809,21 @@ async function proxy(req, res, protocol, pathname) {
                 ? chatJsonToGemini(upstreamJson)
                 : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx);
         } catch (error) {
+          // A provider that answered 200 but whose tool arguments cannot be
+          // represented in the client's protocol is a translation-shape
+          // mismatch, not provider ill health. Answer 4xx with the typed code
+          // and leave health untouched — never a silent `{}` and never a
+          // cooldown for a healthy target.
+          if (error?.errorType === INVALID_TOOL_ARGUMENTS) {
+            commit(false, { status: error.status || 400, skipCooldown: true, reason: sanitizeMessage(error.message) });
+            record("failed", {
+              errorType: error.errorType,
+              errorMessage: sanitizeMessage(error.message) || "Tool call arguments could not be translated"
+            });
+            if (clientAborted()) { res.destroy(); return undefined; }
+            const message = clientMessage(error.message) || "Tool call arguments could not be translated";
+            return json(res, error.status || 400, { error: { message, type: error.errorType } }, meta);
+          }
           // A 200 that could not be read or translated is not a success: cool
           // the target instead of recording it healthy.
           commit(false, clientAborted() ? { clientAborted: true } : { status: 502 });
@@ -869,10 +885,17 @@ async function proxy(req, res, protocol, pathname) {
           result.upstream.status,
           sanitizeMessage(streamError?.message) || "Upstream stream ended before completion"
         );
-        commit(false, { status: 502, reason: sanitizeMessage(streamError?.message) });
+        // A translated stream that died because the provider's tool arguments
+        // cannot be represented in the client's protocol is a translation-shape
+        // mismatch, not provider ill health: the request still fails (headers are
+        // already on the wire) but the target is not cooled.
+        const shapeMismatch = streamError?.errorType === INVALID_TOOL_ARGUMENTS;
+        commit(false, shapeMismatch
+          ? { status: result.upstream.status ?? 200, skipCooldown: true, reason: sanitizeMessage(streamError?.message) }
+          : { status: 502, reason: sanitizeMessage(streamError?.message) });
         record("failed", {
           streamOutcome,
-          errorType: "upstream_stream_error",
+          errorType: shapeMismatch ? INVALID_TOOL_ARGUMENTS : "upstream_stream_error",
           errorMessage: sanitizeMessage(streamError?.message) || "Upstream stream ended before completion"
         });
       }
