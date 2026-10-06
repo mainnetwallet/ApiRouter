@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
   anthropicMessagesUrl,
   geminiModelsUrl,
@@ -59,8 +58,6 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
   applyConfiguredClientHeaders(headers, target);
   return { url, options: { method: "POST", headers, body: JSON.stringify(payload) } };
 }
-
-export function createSessionId() { return randomUUID(); }
 
 export async function readJsonBody(req, { maxBytes = 0 } = {}) {
   // The gateway does not size request bodies (providers do); it only guards its

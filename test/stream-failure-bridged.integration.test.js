@@ -187,21 +187,31 @@ test("a completed translated stream is still a success and does become sticky", 
 
 test("a client abort on a translated stream is 'aborted', not truncated, and never cools the provider", async (t) => {
   // A client that walks away mid-stream is not a provider fault: the re-throw
-  // must preserve the "client" cause so the target is not cooled and the record
-  // stays distinct from an upstream truncation.
+  // must preserve the "client" cause so the target is not cooled, no health
+  // success is recorded and no sticky is saved. The record must stay distinct
+  // from an upstream truncation even though the server tears the response (and
+  // therefore the upstream read) down in both cases — the abort is recognised
+  // from the client signal, never from the fact that the socket closed.
   const geminiSse = [
     `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "po" }] } }] })}\n\n`,
     `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ng" }] }, finishReason: "STOP" }] })}\n\n`
   ];
-  const gemini = await startMockUpstream(() => ({
-    status: 200, headers: { "content-type": "text/event-stream" }, stream: geminiSse, stallAfter: 1
-  }));
+  // Streaming calls stall (only the client abort can end them). The follow-up
+  // non-streaming call in the same session answers normally, so it can prove
+  // that the abandoned request left no sticky target behind.
+  const gemini = await startMockUpstream((record) => record.url.includes("streamGenerateContent")
+    ? { status: 200, headers: { "content-type": "text/event-stream" }, stream: geminiSse, stallAfter: 1 }
+    : { status: 200, body: { candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }] } });
   const router = await startRouter({
     GEMINI_API_KEYS: "gk", GEMINI_MODELS: "gemini-flash", GEMINI_BASE_URL: gemini.baseUrl,
     // Long enough that only the client abort can end the request.
     STREAM_IDLE_TIMEOUT_MS: "60000"
   });
   t.after(async () => { await router.close(); await gemini.close(); });
+
+  // `health` is the per-target stats view, so this is the count a false success
+  // would move. A missing target fails the lookup loudly instead of tautology.
+  const successesBefore = (await healthOf(router)).health.find((r) => r.provider === "gemini").successes;
 
   const controller = new AbortController();
   const res = await router.request("/v1/chat/completions", {
@@ -227,4 +237,24 @@ test("a client abort on a translated stream is 'aborted', not truncated, and nev
   const health = await healthOf(router);
   assert.ok(!health.coolingTargets.some((r) => r.provider === "gemini"), "an aborted attempt is not cooled");
   assert.ok(health.rankedTargets.some((r) => r.provider === "gemini"), "the aborted target stays eligible");
+  assert.equal(
+    health.health.find((r) => r.provider === "gemini").successes,
+    successesBefore,
+    "an aborted stream is not a health success"
+  );
+
+  const [attempt] = await attemptsOf(router);
+  assert.equal(attempt.provider, "gemini");
+  assert.equal(attempt.state, "failed", "the aborted attempt is a failed attempt");
+  assert.equal(attempt.ok, false);
+
+  // The same session must not resume a sticky target: nothing was committed.
+  const second = await router.request("/v1/chat/completions", postJson(
+    { model: "gemini-flash", messages: [{ role: "user", content: "hi" }] },
+    { "x-multi-ai-session-id": "ba1" }
+  ));
+  assert.equal(second.status, 200);
+  const [latest] = await entries(router);
+  assert.equal(latest.finalProvider, "gemini");
+  assert.ok(!latest.attempts.some((a) => a.phase === "sticky"), "an aborted stream is never sticky");
 });
