@@ -56,6 +56,16 @@ async function waitForEntry(router) {
   throw new Error("the request was never recorded");
 }
 
+/** Polls until at least `count` requests have been recorded. */
+async function waitForEntries(router, count) {
+  for (let i = 0; i < 100; i += 1) {
+    const list = await entries(router);
+    if (list.length >= count) return list;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`expected ${count} recorded requests`);
+}
+
 test("a translated chat->Gemini stream that dies after the 200 is truncated, not a success", async (t) => {
   const geminiSse = [
     `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "po" }] } }] })}\n\n`,
@@ -149,6 +159,78 @@ test("a translated Responses->chat stream that dies after the 200 is truncated, 
   const health = await healthOf(router);
   assert.ok(!health.rankedTargets.some((r) => r.provider === "groq"), "the dead target is not healthy");
   assert.ok(health.coolingTargets.some((r) => r.provider === "groq" && r.cooldownUntil > Date.now()), "the target entered cooldown");
+});
+
+test("an explicit provider error event inside a 200 Gemini stream is a truncated failure, not a success", async (t) => {
+  // The upstream answers HTTP 200 and then sends an explicit provider error as
+  // an SSE event. The client keeps its Gemini error envelope, but the stream
+  // must fail: resolving it would file a provider failure as a completed
+  // success and leave the target healthy and sticky.
+  const groq = await startMockUpstream(() => ({
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+    stream: [`data: ${JSON.stringify({ error: { message: "provider exploded" } })}\n\n`]
+  }));
+  // A second compatible provider that answers normally, so the follow-up can
+  // prove the cooled target is skipped rather than reused.
+  const openrouter = await startMockUpstream(() => ({
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+    stream: [
+      `data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "served" }, finish_reason: null }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+      "data: [DONE]\n\n"
+    ]
+  }));
+  const router = await startRouter({
+    GROQ_API_KEYS: "k1", GROQ_MODELS: "m", GROQ_BASE_URL: groq.baseUrl,
+    OPENROUTER_API_KEYS: "o1", OPENROUTER_MODELS: "m", OPENROUTER_BASE_URL: openrouter.baseUrl
+  });
+  t.after(async () => { await router.close(); await groq.close(); await openrouter.close(); });
+
+  const ask = { contents: [{ role: "user", parts: [{ text: "hi" }] }], stream: true };
+  const res = await router.request(
+    "/v1beta/models/m:streamGenerateContent",
+    postJson(ask, { "x-multi-ai-session-id": "gerr1" })
+  );
+  assert.equal(res.status, 200, "the headers were already on the wire");
+  assert.equal(res.headers.get("x-multi-ai-provider"), "groq");
+
+  const raw = await readTolerant(res);
+  assert.match(raw, /provider exploded/, "the Gemini client still receives the provider's error envelope");
+
+  const [entry] = await waitForEntries(router, 1);
+  assert.equal(entry.finalProvider, "groq");
+  assert.equal(entry.outcome, "failed", "an explicit provider error is not a success");
+  assert.equal(entry.streamOutcome, "truncated");
+  assert.equal(entry.errorType, "upstream_stream_error");
+
+  const [attempt] = await attemptsOf(router);
+  assert.equal(attempt.provider, "groq");
+  assert.equal(attempt.state, "failed");
+  assert.equal(attempt.ok, false);
+
+  const health = await healthOf(router);
+  assert.ok(
+    health.coolingTargets.some((r) => r.provider === "groq" && r.cooldownUntil > Date.now()),
+    "the provider error cools the target"
+  );
+
+  // Not sticky: the next request in the same session must move on to the
+  // compatible backup target instead of resuming the failing provider.
+  const second = await router.request(
+    "/v1beta/models/m:streamGenerateContent",
+    postJson(ask, { "x-multi-ai-session-id": "gerr1" })
+  );
+  const secondRaw = await readTolerant(second);
+  assert.match(secondRaw, /served/, "the backup target served the follow-up");
+  assert.equal(openrouter.apiRequests.length, 1);
+
+  const list = await waitForEntries(router, 2);
+  // `/api/requests` is newest-first.
+  const latest = list[0];
+  assert.notEqual(latest.finalProvider, "groq", "the cooled target is skipped");
+  assert.ok(!latest.attempts.some((a) => a.phase === "sticky"), "a provider error event never becomes sticky");
 });
 
 test("a completed translated stream is still a success and does become sticky", async (t) => {

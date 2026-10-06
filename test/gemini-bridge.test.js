@@ -150,14 +150,23 @@ test("malformed upstream SSE events are skipped, not fatal", async () => {
   assert.match(chunks[1], /"finishReason":"STOP"/);
 });
 
-test("an upstream error event reaches the client", async () => {
+test("an upstream error event reaches the client and then fails the stream", async () => {
   async function* events() {
     yield JSON.stringify({ error: { message: "upstream exploded" } });
   }
   const chunks = [];
-  for await (const event of streamToGemini(events())) chunks.push(event);
-  assert.equal(chunks.length, 1);
+  let failure = null;
+  try {
+    for await (const event of streamToGemini(events())) chunks.push(event);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(chunks.length, 1, "the client still gets exactly one Gemini error envelope");
   assert.match(chunks[0], /upstream exploded/);
+  assert.ok(failure, "the stream must fail, not resolve as a completed success");
+  assert.equal(failure.streamCause, "upstream", "an explicit provider error is an upstream failure, not a client abort");
+  assert.equal(failure.failedAfterHeaders, true);
+  assert.equal(failure.errorType, undefined, "it must not be mistaken for the invalid_tool_arguments shape mismatch");
 });
 
 test("tool calls still arrive when the upstream never sends a finish reason", async () => {

@@ -336,8 +336,14 @@ export async function* streamToGemini(events) {
       let parsed;
       try { parsed = JSON.parse(data); } catch { continue; }
       if (parsed?.error) {
+        // The client keeps Gemini's error envelope, but an explicit provider
+        // error inside a 200 body is a FAILED stream, not a success: the throw
+        // (marked as an upstream failure, never a client abort) makes
+        // `pipeline()` reject so the server records a truncated request, cools
+        // the target and saves no sticky.
         yield sseData(parsed);
-        continue;
+        const message = typeof parsed.error === "string" ? parsed.error : parsed.error?.message;
+        throw markStreamFailure(new Error(message || "Upstream stream reported an error"));
       }
 
       const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
