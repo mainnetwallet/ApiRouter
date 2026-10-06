@@ -412,7 +412,10 @@ describe("rendering safety", () => {
 describe("the card", () => {
   it("shows the time, state, pool, call number, request id, then the model and the key/status/time", () => {
     const html = render(rowsOf(attempt(1, { keyIndex: 3, callIndex: 2 })));
-    expect(html).toContain("14:02:12".slice(0, 3)); // a clock is present
+    // A clock is present. Asserted as a shape, not a fixed hour: the fixture is
+    // UTC and the panel renders local time, so any literal "14:" only held in
+    // UTC (Asia/Dhaka renders 20:02:12 for the same instant).
+    expect(html).toMatch(/\d{2}:\d{2}:\d{2}/);
     expect(html).toContain("SUCCESS");
     expect(html).toContain("TEXT");
     expect(html).toContain("Call #2");

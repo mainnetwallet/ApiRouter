@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { useApi } from "../hooks/useApi.js";
 import { getHealth, refreshHealth } from "../api/health.js";
+import { isAlreadyRunning } from "../lib/errors.js";
 import { useConnection } from "./ConnectionContext.jsx";
 import { useToast } from "./ToastContext.jsx";
 
@@ -39,7 +40,7 @@ export function HealthProvider({ children }) {
       await refreshHealth();
       health.reload();
     } catch (error) {
-      if (error?.category === "cooldown") {
+      if (isAlreadyRunning(error)) {
         toast.info("A health cycle is already running");
       } else {
         toast.error(error?.label ?? "Health refresh failed", { detail: error?.hint ?? error?.message });

@@ -8,7 +8,7 @@ import { maskCredential, maskIdentifier, looksSecret } from "../mask.js";
 import { containsCredentialShapedText, sanitizeText } from "../sanitize.js";
 import {
   ApiError, CATEGORY, apiErrorFromResponse, classifyFailure, describeAttempt,
-  describeStatus, failureLabel, isRetryableStatus
+  describeStatus, failureLabel, isAlreadyRunning, isRetryableStatus
 } from "../errors.js";
 import {
   applyFilters, compareValues, matchesSearch, nextSort, paginate, sortAriaValue, sortRows
@@ -274,6 +274,23 @@ describe("error taxonomy", () => {
     expect(classifyFailure({ errorType: "no_route", httpStatus: 503 })).toBe("no route");
     expect(failureLabel("authentication")).toBe("Authentication failure");
     expect(failureLabel("quota exhausted")).toBe("Quota exhaustion");
+  });
+
+  it("treats only a 409 as 'another cycle is already running'", () => {
+    // The health refresh returns 409 while a monitor cycle is in flight; the
+    // panel must show its info toast for that and an error toast for anything
+    // else. A cancelled request shares the `client` category but is not a
+    // conflict, so it must not claim a cycle is running.
+    const conflict = apiErrorFromResponse(409, { error: { message: "A health cycle is already running", type: "conflict" } });
+    expect(conflict.category).toBe(CATEGORY.COOLDOWN_CLIENT);
+    expect(isAlreadyRunning(conflict)).toBe(true);
+
+    const cancelled = new ApiError({ kind: "abort" });
+    expect(cancelled.category).toBe(CATEGORY.COOLDOWN_CLIENT);
+    expect(isAlreadyRunning(cancelled)).toBe(false);
+
+    expect(isAlreadyRunning(apiErrorFromResponse(503, { error: { message: "down" } }))).toBe(false);
+    expect(isAlreadyRunning(null)).toBe(false);
   });
 });
 

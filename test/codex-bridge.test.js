@@ -24,6 +24,17 @@ async function collect(iter) {
   return out;
 }
 
+/** Collects chunks until the iterable throws, returning both the text and the error. */
+async function collectUntilError(iter) {
+  let out = "";
+  try {
+    for await (const part of iter) out += part;
+    return { out, error: null };
+  } catch (error) {
+    return { out, error };
+  }
+}
+
 const parseSse = (text) =>
   text.split("\n\n").filter(Boolean).map((block) => {
     const event = block.match(/^event: (.+)$/m)[1];
@@ -339,7 +350,7 @@ test("a truncated stream ends with response.incomplete", async () => {
   assert.equal(events.at(-1).data.response.incomplete_details.reason, "max_output_tokens");
 });
 
-test("streamToResponses skips unparsable chunks and turns upstream failure into response.failed", async () => {
+test("streamToResponses turns upstream failure into response.failed, then re-throws it", async () => {
   const ok = parseSse(await collect(streamToResponses("openai-chat", lines("not json", JSON.stringify({ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] })), "m")));
   assert.ok(ok.some((e) => e.data.delta === "ok"));
 
@@ -347,10 +358,16 @@ test("streamToResponses skips unparsable chunks and turns upstream failure into 
     yield JSON.stringify({ choices: [{ delta: { content: "partial" } }] });
     throw new Error("socket closed");
   }
-  const failed = parseSse(await collect(streamToResponses("openai-chat", broken(), "m")));
+  const { out, error } = await collectUntilError(streamToResponses("openai-chat", broken(), "m"));
+  const failed = parseSse(out);
   assert.equal(failed.at(-1).event, "response.failed");
   assert.equal(failed.at(-1).data.response.status, "failed");
   assert.match(failed.at(-1).data.response.error.message, /socket closed/);
+  // The terminal event is delivered, then the failure surfaces so the server
+  // files it as truncated instead of a success.
+  assert.match(error.message, /socket closed/);
+  assert.equal(error.streamCause, "upstream");
+  assert.equal(error.failedAfterHeaders, true);
 });
 
 test("estimateResponsesInputTokens returns a positive integer", () => {

@@ -150,14 +150,23 @@ test("malformed upstream SSE events are skipped, not fatal", async () => {
   assert.match(chunks[1], /"finishReason":"STOP"/);
 });
 
-test("an upstream error event reaches the client", async () => {
+test("an upstream error event reaches the client and then fails the stream", async () => {
   async function* events() {
     yield JSON.stringify({ error: { message: "upstream exploded" } });
   }
   const chunks = [];
-  for await (const event of streamToGemini(events())) chunks.push(event);
-  assert.equal(chunks.length, 1);
+  let failure = null;
+  try {
+    for await (const event of streamToGemini(events())) chunks.push(event);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(chunks.length, 1, "the client still gets exactly one Gemini error envelope");
   assert.match(chunks[0], /upstream exploded/);
+  assert.ok(failure, "the stream must fail, not resolve as a completed success");
+  assert.equal(failure.streamCause, "upstream", "an explicit provider error is an upstream failure, not a client abort");
+  assert.equal(failure.failedAfterHeaders, true);
+  assert.equal(failure.errorType, undefined, "it must not be mistaken for the invalid_tool_arguments shape mismatch");
 });
 
 test("tool calls still arrive when the upstream never sends a finish reason", async () => {
@@ -325,4 +334,189 @@ test("mode NONE is still representable with no tools declared", () => {
     "m"
   );
   assert.equal(out.tool_choice, "none");
+});
+
+// ---------------------------------------------------------------------------
+// Tool-call identity, ordering and finish reasons
+// ---------------------------------------------------------------------------
+
+test("a Gemini functionCall and its functionResponse are paired by name when there is no id", () => {
+  // Gemini's classic functionCall/functionResponse carry no id. The upstream
+  // chat provider matches a tool result to its call by `tool_call_id`, so
+  // inventing a random id here would strand the result on a call that never
+  // existed.
+  const out = toChatFromGemini({
+    contents: [
+      { role: "model", parts: [{ functionCall: { name: "lookup", args: { q: "x" } } }] },
+      { role: "user", parts: [{ functionResponse: { name: "lookup", response: { ok: true } } }] }
+    ]
+  }, "m");
+  assert.equal(out.messages.length, 2);
+  assert.equal(out.messages[0].tool_calls[0].id, "lookup");
+  assert.equal(out.messages[1].role, "tool");
+  assert.equal(out.messages[1].tool_call_id, "lookup");
+  assert.match(out.messages[1].content, /"ok":true/);
+});
+
+test("an explicit Gemini tool-call id wins over the name, on both sides", () => {
+  const out = toChatFromGemini({
+    contents: [
+      { role: "model", parts: [{ functionCall: { id: "call-9", name: "lookup", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { id: "call-9", name: "lookup", response: {} } }] }
+    ]
+  }, "m");
+  assert.equal(out.messages[0].tool_calls[0].id, "call-9");
+  assert.equal(out.messages[1].tool_call_id, "call-9");
+});
+
+test("tool results sit immediately after the assistant turn, before any trailing user text", () => {
+  const out = toChatFromGemini({
+    contents: [
+      { role: "model", parts: [{ functionCall: { name: "lookup", args: {} } }] },
+      { role: "user", parts: [
+        { functionResponse: { name: "lookup", response: { ok: true } } },
+        { text: "now summarise" }
+      ] }
+    ]
+  }, "m");
+  assert.deepEqual(out.messages.map((m) => m.role), ["assistant", "tool", "user"]);
+  assert.equal(out.messages[2].content, "now summarise");
+
+  // A response-only turn stays a bare tool message: an empty user message would
+  // separate the result from the call it answers.
+  const pure = toChatFromGemini({
+    contents: [
+      { role: "model", parts: [{ functionCall: { name: "lookup", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { name: "lookup", response: { ok: true } } }] }
+    ]
+  }, "m");
+  assert.deepEqual(pure.messages.map((m) => m.role), ["assistant", "tool"]);
+});
+
+test("finishReason keeps truncation and safety ahead of a tool call", () => {
+  const finish = (finish_reason, withTool = false) => chatJsonToGemini({
+    choices: [{
+      message: withTool
+        ? { content: null, tool_calls: [{ id: "c", type: "function", function: { name: "f", arguments: "{}" } }] }
+        : { content: "hi" },
+      finish_reason
+    }]
+  }).candidates[0].finishReason;
+
+  // A truncated answer is truncated whether or not it also asked for a tool.
+  assert.equal(finish("length", true), "MAX_TOKENS");
+  assert.equal(finish("length"), "MAX_TOKENS");
+  assert.equal(finish("content_filter"), "SAFETY");
+  assert.equal(finish("safety"), "SAFETY");
+  assert.equal(finish("recitation"), "RECITATION");
+  assert.equal(finish("tool_calls", true), "STOP");
+  assert.equal(finish("stop"), "STOP");
+});
+
+test("a streamed tool call without an id keeps a name-based identity", async () => {
+  async function* events() {
+    // The upstream chat provider sent the name and arguments but no id.
+    yield JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "lookup", arguments: "{\"q\":\"x\"}" } }] }, finish_reason: "tool_calls" }] });
+  }
+  const chunks = [];
+  for await (const event of streamToGemini(events())) chunks.push(event);
+  const call = chunks
+    .flatMap((c) => JSON.parse(c.slice(5)).candidates[0].content.parts)
+    .find((p) => p.functionCall).functionCall;
+  assert.equal(call.name, "lookup");
+  assert.equal(call.id, "lookup", "a stable, echoable id rather than a random one");
+});
+
+// ---------------------------------------------------------------------------
+// Streaming finishReason: a terminal signal may only ride the terminal chunk.
+//
+// A Gemini client reads `finishReason` as "the model stopped", so announcing
+// STOP on an intermediate chunk ends the client's answer early. The translated
+// stream used to stamp a finishReason (defaulting to STOP) on *every* chunk,
+// because `finishReason(undefined)` returns STOP.
+// ---------------------------------------------------------------------------
+
+const payloadsOf = async (events) => {
+  const payloads = [];
+  for await (const event of streamToGemini(events)) payloads.push(JSON.parse(event.slice(5)));
+  return payloads;
+};
+
+test("intermediate translated chunks never carry a terminal finishReason", async () => {
+  async function* events() {
+    yield JSON.stringify({ choices: [{ delta: { content: "a" }, finish_reason: null }] });
+    yield JSON.stringify({ choices: [{ delta: { content: "b" }, finish_reason: null }] });
+    yield JSON.stringify({ choices: [{ delta: { content: "c" }, finish_reason: null }] });
+    yield JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] });
+    yield "[DONE]";
+  }
+
+  const payloads = await payloadsOf(events());
+
+  assert.equal(payloads.length, 4, "one chunk per content delta plus the terminal chunk");
+  for (const [index, payload] of payloads.slice(0, -1).entries()) {
+    const candidate = payload.candidates[0];
+    assert.ok(!("finishReason" in candidate), `intermediate chunk ${index} must omit finishReason entirely`);
+  }
+  assert.equal(payloads.at(-1).candidates[0].finishReason, "STOP", "only the terminal chunk may say STOP");
+});
+
+test("the terminal translated chunk maps every OpenAI finish_reason", async () => {
+  const terminal = async (reason) => {
+    async function* events() {
+      yield JSON.stringify({ choices: [{ delta: { content: "x" }, finish_reason: null }] });
+      yield JSON.stringify({ choices: [{ delta: {}, finish_reason: reason }] });
+    }
+    const payloads = await payloadsOf(events());
+    return { intermediate: payloads[0].candidates[0], last: payloads.at(-1).candidates[0] };
+  };
+
+  const cases = [
+    ["stop", "STOP"],
+    ["tool_calls", "STOP"],
+    ["length", "MAX_TOKENS"],
+    ["safety", "SAFETY"],
+    ["content_filter", "SAFETY"],
+    ["recitation", "RECITATION"]
+  ];
+  for (const [upstream, gemini] of cases) {
+    const { intermediate, last } = await terminal(upstream);
+    assert.ok(!("finishReason" in intermediate), `${upstream}: intermediate chunk stays open`);
+    assert.equal(last.finishReason, gemini, `${upstream} must map to ${gemini}`);
+  }
+});
+
+test("a translated stream that ends without a finish reason does not invent STOP", async () => {
+  async function* events() {
+    yield JSON.stringify({ choices: [{ delta: { content: "hi" }, finish_reason: null }] });
+  }
+
+  const payloads = await payloadsOf(events());
+
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].candidates[0].content.parts[0].text, "hi");
+  assert.ok(!("finishReason" in payloads[0].candidates[0]), "no finish reason may be fabricated");
+});
+
+test("streamed tool calls keep fragments non-terminal and complete on the terminal chunk", async () => {
+  async function* events() {
+    yield JSON.stringify({ choices: [{ delta: {
+      content: "checking ",
+      tool_calls: [{ index: 0, id: "c1", function: { name: "lookup" } }]
+    }, finish_reason: null }] });
+    yield JSON.stringify({ choices: [{ delta: {
+      tool_calls: [{ index: 0, function: { arguments: "{\"q\":\"x\"}" } }]
+    }, finish_reason: "tool_calls" }] });
+    yield "[DONE]";
+  }
+
+  const payloads = await payloadsOf(events());
+  const candidates = payloads.map((payload) => payload.candidates[0]);
+  const call = candidates.flatMap((candidate) => candidate.content.parts).find((part) => part.functionCall).functionCall;
+
+  assert.ok(!("finishReason" in candidates[0]), "the fragment chunk must not announce STOP");
+  assert.equal(candidates[0].content.parts[0].text, "checking ");
+  assert.equal(call.name, "lookup");
+  assert.deepEqual(call.args, { q: "x" }, "the assembled arguments survive the stream");
+  assert.equal(candidates.at(-1).finishReason, "STOP", "tool completion is a terminal STOP");
 });

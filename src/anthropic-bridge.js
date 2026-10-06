@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { unsupportedImageSource } from "./image-source.js";
+import { geminiModelsUrl, openAiChatUrl } from "./upstream-url.js";
+import { parseToolArguments } from "./bridge-errors.js";
 
 /**
  * Anthropic Messages bridge.
@@ -47,7 +50,12 @@ function blocksOf(content) {
 
 function textOfBlocks(content) {
   return blocksOf(content)
-    .map((b) => (b?.type === "text" ? b.text ?? "" : b?.type === "image" ? "[image]" : ""))
+    .map((b) => {
+      // A text-only extraction must never silently discard an image: the
+      // caller has to preserve it (as inlineData / image_url) or refuse it.
+      if (b?.type === "image") throw unsupportedImageSource("an image inside a tool result");
+      return b?.type === "text" ? b.text ?? "" : "";
+    })
     .join("\n");
 }
 
@@ -55,10 +63,6 @@ function systemText(system) {
   if (!system) return "";
   if (typeof system === "string") return system;
   return textOfBlocks(system);
-}
-
-function safeParse(text) {
-  try { return JSON.parse(text); } catch { return {}; }
 }
 
 /** Gemini rejects most JSON-Schema extras; keep only what it understands. */
@@ -149,12 +153,21 @@ export function toOpenAIChatRequest(body, model) {
     } else {
       messages.push({
         role: "user",
-        content: rest.map((b) =>
-          b.type === "image" && b.source?.type === "base64"
-            ? { type: "image_url", image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } }
-            : b.type === "image" && b.source?.url
-              ? { type: "image_url", image_url: { url: b.source.url } }
-              : { type: "text", text: b.text ?? "" })
+        content: rest.map((b) => {
+          if (b.type === "image" && b.source?.type === "base64") {
+            if (!b.source.data) throw unsupportedImageSource("an Anthropic base64 image with no data");
+            return {
+              type: "image_url",
+              image_url: { url: `data:${b.source.media_type || "application/octet-stream"};base64,${b.source.data}` }
+            };
+          }
+          // OpenAI-compatible targets accept a remote image URL as-is.
+          if (b.type === "image" && b.source?.url) {
+            return { type: "image_url", image_url: { url: b.source.url } };
+          }
+          if (b.type === "image") throw unsupportedImageSource("an image file reference");
+          return { type: "text", text: b.text ?? "" };
+        })
       });
     }
   }
@@ -187,21 +200,31 @@ export function toOpenAIChatRequest(body, model) {
 
 // ------------------------------------------------------ request -> Gemini
 
-// Gemini 3 needs the thoughtSignature echoed back with a functionCall. The
-// Anthropic protocol has no field for it, so keep it keyed by tool id.
+// Gemini 3 needs the thoughtSignature echoed back with a functionCall. None of
+// the other client protocols has a field for it, so it is kept keyed by the
+// tool-call id *and* the request session: two unrelated sessions reusing the
+// same id (clients pick `call_1`, `toolu_1`, ... freely) must never exchange
+// signatures. Requests without an explicit X-Multi-AI-Session-ID share the
+// documented default session, exactly like sticky routing.
+//
+// Eviction is explicit: the store is a hard-bounded FIFO (oldest entry leaves
+// first) and it is volatile, so a restart starts empty. A missing signature
+// omits the field rather than emitting an empty one; Gemini then rejects the
+// request deterministically through the normal upstream-error path.
 const signatures = new Map();
 const MAX_SIGNATURES = 2000;
-export function rememberSignature(id, signature) {
+const signatureKey = (id, sessionId) => (sessionId ? `${sessionId}\u0000${String(id)}` : String(id));
+export function rememberSignature(id, signature, sessionId = "") {
   if (!signature) return;
-  signatures.set(id, signature);
+  signatures.set(signatureKey(id, sessionId), signature);
   while (signatures.size > MAX_SIGNATURES) signatures.delete(signatures.keys().next().value);
 }
 
-export function signatureFor(id) {
-  return signatures.get(id);
+export function signatureFor(id, sessionId = "") {
+  return signatures.get(signatureKey(id, sessionId));
 }
 
-export function toGeminiRequest(body) {
+export function toGeminiRequest(body, { sessionId = "" } = {}) {
   const toolNames = new Map();
   for (const msg of body.messages || []) {
     for (const b of blocksOf(msg.content)) if (b.type === "tool_use") toolNames.set(b.id, b.name);
@@ -222,10 +245,22 @@ export function toGeminiRequest(body) {
       if (b.type === "text") {
         if (b.text) parts.push({ text: b.text });
       } else if (b.type === "image" && b.source?.type === "base64") {
-        parts.push({ inlineData: { mimeType: b.source.media_type, data: b.source.data } });
+        if (!b.source.data) throw unsupportedImageSource("an Anthropic base64 image with no data");
+        parts.push({
+          inlineData: {
+            mimeType: b.source.media_type || b.source.mime_type || "application/octet-stream",
+            data: b.source.data
+          }
+        });
+      } else if (b.type === "image") {
+        // An Anthropic `url` or `file` source (or a malformed block) is not
+        // expressible as Gemini inlineData, and fetching it is an SSRF surface.
+        throw unsupportedImageSource(
+          b.source?.url ? "an image URL (the gateway never fetches it)" : "an image file reference"
+        );
       } else if (b.type === "tool_use") {
         const part = { functionCall: { name: b.name, args: b.input ?? {} } };
-        const sig = signatures.get(b.id);
+        const sig = signatureFor(b.id, sessionId);
         if (sig) part.thoughtSignature = sig;
         parts.push(part);
       } else if (b.type === "tool_result") {
@@ -269,13 +304,8 @@ export function toGeminiRequest(body) {
   return payload;
 }
 
-function joinUrl(baseUrl, suffix) {
-  const base = String(baseUrl || "").replace(/\/+$/, "");
-  return base + "/" + String(suffix || "").replace(/^\/+/, "");
-}
-
 /** Builds the upstream fetch request for a translated (non-Anthropic) target. */
-export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeaders = {}) {
+export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeaders = {}, { sessionId = "" } = {}) {
   const headers = { "content-type": "application/json" };
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
@@ -284,15 +314,14 @@ export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeade
   if (upstreamProtocol === "openai-chat") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers.authorization = "Bearer " + target.apiKey;
-    const url = joinUrl(base, base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions");
+    const url = openAiChatUrl(base);
     return { url, options: { method: "POST", headers, body: JSON.stringify(toOpenAIChatRequest(body, target.model)) } };
   }
   if (upstreamProtocol === "gemini") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
-    const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
-    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
-    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiRequest(body)) } };
+    const url = geminiModelsUrl(base, target.model, { stream });
+    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiRequest(body, { sessionId })) } };
   }
   throw new Error("Unsupported bridge protocol: " + upstreamProtocol);
 }
@@ -315,7 +344,7 @@ export function openAIJsonToAnthropic(json, model) {
       type: "tool_use",
       id: call.id || newId("toolu"),
       name: call.function?.name || "tool",
-      input: safeParse(call.function?.arguments || "{}")
+      input: parseToolArguments(call.function?.arguments)
     });
   }
   if (content.length === 0) content.push({ type: "text", text: "" });
@@ -335,7 +364,7 @@ export function openAIJsonToAnthropic(json, model) {
   };
 }
 
-export function geminiJsonToAnthropic(json, model) {
+export function geminiJsonToAnthropic(json, model, { sessionId = "" } = {}) {
   const candidate = json?.candidates?.[0] ?? {};
   const content = [];
   for (const part of candidate.content?.parts || []) {
@@ -346,7 +375,7 @@ export function geminiJsonToAnthropic(json, model) {
       else content.push({ type: "text", text: part.text });
     } else if (part.functionCall) {
       const id = newId("toolu");
-      rememberSignature(id, part.thoughtSignature);
+      rememberSignature(id, part.thoughtSignature, sessionId);
       content.push({ type: "tool_use", id, name: part.functionCall.name, input: part.functionCall.args ?? {} });
     }
   }
@@ -367,8 +396,8 @@ export function geminiJsonToAnthropic(json, model) {
   };
 }
 
-export function convertJsonResponse(upstreamProtocol, json, model) {
-  return upstreamProtocol === "gemini" ? geminiJsonToAnthropic(json, model) : openAIJsonToAnthropic(json, model);
+export function convertJsonResponse(upstreamProtocol, json, model, options = {}) {
+  return upstreamProtocol === "gemini" ? geminiJsonToAnthropic(json, model, options) : openAIJsonToAnthropic(json, model);
 }
 
 // -------------------------------------------------------- streaming
@@ -397,7 +426,7 @@ const sse = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n
  * Converts an upstream stream (OpenAI-chat or Gemini SSE) into Anthropic SSE.
  * `events` is an async iterable of raw `data:` strings.
  */
-export async function* streamToAnthropic(upstreamProtocol, events, model) {
+export async function* streamToAnthropic(upstreamProtocol, events, model, { sessionId = "" } = {}) {
   yield sse("message_start", {
     type: "message_start",
     message: {
@@ -446,7 +475,7 @@ export async function* streamToAnthropic(upstreamProtocol, events, model) {
           yield* closeText();
           const index = nextIndex++;
           const id = newId("toolu");
-          rememberSignature(id, part.thoughtSignature);
+          rememberSignature(id, part.thoughtSignature, sessionId);
           sawTool = true;
           yield sse("content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id, name: part.functionCall.name, input: {} } });
           yield sse("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(part.functionCall.args ?? {}) } });

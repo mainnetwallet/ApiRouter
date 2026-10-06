@@ -15,11 +15,11 @@ Protocol Detection
   ↓
 Compatible Targets
   ↓
-Health Ranking
+Pool Decision (TEXT / VISION)
   ↓
-Sticky Session
+Route Plan (sticky → priority → fallback)
   ↓
-Fallback Router
+Fallback Walk (cooldown / already-attempted filter)
   ↓
 Provider Adapter
   ↓
@@ -38,8 +38,8 @@ AI Provider
 8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. 401/402/403 also cool the same key's sibling models (they describe the key, not the model); other keys and providers are unaffected.
 9. The router calls targets sequentially.
 10. Retryable failures put the exact target into cooldown and move routing forward.
-11. A successful target becomes the session's sticky target.
-12. The upstream response is streamed back to the client.
+11. A target is only a success once its response body has been delivered completely. A 200 that stalls, truncates or errors after the headers is cooled like any other failure, and is never stored as the session's sticky target.
+12. The upstream response is streamed back to the client; a client that disconnects ends the walk before another target is called and is never charged to the provider.
 
 ## Priority and Key-Scoped Fallback
 
@@ -140,6 +140,26 @@ Gemini uses the native `generateContent` protocol and standard model path.
 
 The adapter converts the common gateway request into the provider request format.
 
+### Tool calls and thought signatures
+
+Cross-protocol tool calls keep a stable identity. An upstream-provided call id
+is preserved; when the target protocol needs one and upstream omitted it, the
+gateway generates it once and reuses that exact id for the matching tool
+result. Tool arguments are translated faithfully: a call whose arguments are
+not valid JSON is refused for a Gemini target with `400
+invalid_tool_arguments` (retryable, no cooldown) rather than silently becoming
+`{}`, so an OpenAI-compatible target in the same plan can still receive the raw
+string.
+
+Gemini 3 returns an opaque `thoughtSignature` with a `functionCall`. It is kept
+in memory, keyed by tool-call id **and** request session
+(`X-Multi-AI-Session-ID`), so two unrelated sessions that happen to reuse an id
+can never exchange a signature. The store is volatile (empty after a restart)
+and hard-bounded with explicit FIFO eviction; a missing signature is omitted,
+and Gemini then rejects the request deterministically through the normal
+upstream-error path. Requests without a session header share the same default
+session they already share for sticky routing.
+
 ## Health System
 
 Each target tracks:
@@ -194,7 +214,7 @@ Authentication failures are never reported as healthy.
 
 ### Observation ordering
 
-Every observation carries the timestamp at which it was taken. An observation is only applied when it is at least as new as the newest one already recorded. A slow health probe that started before a routing failure therefore cannot overwrite that failure or clear the cooldown it established, while a newer successful probe can still recover a cooled-down target.
+Every observation carries the timestamp at which it was taken. An observation is only applied when it is at least as new as the newest one already recorded. A slow health probe that started before a routing failure therefore cannot overwrite that failure or clear the cooldown it established, while a newer successful probe can still recover a cooled-down target. An inconclusive probe (`ok: null`) changes no health state either, but it still advances the newest-observation timestamp, so an older in-flight probe cannot apply its result after it.
 
 Default failed-target cooldown:
 
@@ -220,6 +240,20 @@ HTTP 400 from a provider also falls back to the next target. A generic 400
 (unsupported parameter, schema quirk) does not cool the target down, and if
 every target answers 400 the client receives the 400 instead of a 502.
 
+## Streams and Request Limits
+
+`fetch` resolves on response headers, so an upstream that answers `200` and then
+stalls must still be bounded:
+
+```env
+STREAM_CONNECT_TIMEOUT_MS=30000   # time-to-first-response for a streaming request
+STREAM_IDLE_TIMEOUT_MS=120000     # max gap between chunks after the headers (0 disables)
+MAX_REQUEST_BODY_BYTES=67108864   # gateway memory guard, not a provider limit (0 disables)
+```
+
+A stream that ends before completion is recorded with a terminal `streamOutcome`
+(`completed` / `truncated` / `aborted`) and is never filed as a success.
+
 ## Pinned Requests
 
 `x-multi-ai-pin-provider` (and optionally `x-multi-ai-pin-key-index`) narrow the
@@ -237,21 +271,36 @@ The client may send:
 X-Multi-AI-Session-ID: <session-id>
 ```
 
-If absent, the router creates a UUID and returns:
+If absent, every header-less request shares one default session per protocol and
+pool (Claude Code, Codex and the OpenAI SDKs never send one), and the chosen id
+is returned:
 
 ```http
 x-multi-ai-session-id: <session-id>
 ```
 
+The response also carries `x-multi-ai-request-id`, which identifies this single
+request (and the log row it becomes). It is deliberately separate from the
+sticky session id, which is shared by every request from the same client.
+`GET /api/requests/<id>` resolves that request id (or the internal sequence
+number); a session id is never accepted there, because it names many requests.
+Session lookup is the explicit `GET /api/requests?session=<id>` filter.
+
 A successful target becomes the session's sticky target for 20 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, the other keys of the same provider/model are tried next (key order), then the priority models listed after the sticky model (priority resumes there and never goes back to earlier entries; with no priority sticky, the whole list applies), then the normal fallback. Requests without the header share one default session per protocol and pool. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders the priority list or the normal fallback list.
 
 ## Security
 
-Router authentication is optional:
+Router authentication is optional. With no keys configured, only loopback
+callers (`127.0.0.1`, `::1`) may use the proxy or the admin/`/api` surface, so an
+unauthenticated gateway cannot be driven from another host:
 
 ```env
 MULTIAI_ROUTER_API_KEYS=
 ```
+
+Set keys to serve non-loopback clients, and/or `HOST=127.0.0.1` to keep the
+listener itself on loopback. The server refuses non-loopback requests (401)
+when keys are absent.
 
 Provider API keys remain server-side and are never returned in routing metadata.
 
@@ -304,11 +353,12 @@ health, provider configuration or the proxy path.
 ### Representing the routing decision
 
 The panel must not invent routing logic, so there is exactly one copy of it.
-`selectRouteTargets` (`src/observability/route-select.js`) is called by both
-`proxy()` and `/api/router/preview`, and ranking is delegated to
-`healthRegistry.rank`. The Router page therefore renders the decision the
-gateway will actually make, and cannot drift from it: any divergence is a
-compile-time-visible change to a shared function, not two implementations.
+`selectTargetsForProtocol` (`src/observability/route-select.js`), `buildRoutePlan`
+and `effectiveOrder` (`src/routing-plan.js`) are called by both `proxy()` and
+`/api/router/preview`. Health only filters eligibility; it never reorders. The
+Router page therefore renders the decision the gateway will actually make, and
+cannot drift from it: any divergence is a compile-time-visible change to a
+shared function, not two implementations.
 
 ### Request log
 
@@ -365,8 +415,8 @@ The core implementation is separated by responsibility:
 - `src/api.js` — the read-only control-panel API and its safe projections.
 - `src/static-files.js` — static serving for `ui/dist`, with traversal protection.
 - `src/config.js` — environment parsing and routing-target construction.
-- `src/router.js` — health-ranked fallback and sticky routing.
-- `src/health.js` — target health, scoring, cooldown and health-refresh infrastructure.
+- `src/router.js` — the route-plan walk (sticky, priority, hierarchical fallback) and sticky sessions.
+- `src/health.js` — target health, scoring, cooldown (eligibility only) and health-refresh infrastructure.
 - `src/health-checks.js` — provider-aware, quota-free health probes and status classification.
 - `src/adapters.js` — client protocol detection and upstream request construction.
 - `src/providers/catalog.js` — provider catalog.

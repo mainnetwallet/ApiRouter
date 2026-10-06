@@ -49,7 +49,8 @@ POST /v1/chat/completions
 
 ## Fallback
 
-Targets are health-ranked, so a request moves to the next available target on a
+Targets are tried in their configured order (sticky, then priority, then the
+normal fallback list), so a request moves to the next available target on a
 retryable failure. A chat-completions provider is called directly; a Gemini
 provider is reached through the router's translation bridge, so a Gemini-only
 setup still works.

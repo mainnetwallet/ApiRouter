@@ -2,6 +2,32 @@ import { providerProtocols } from "./adapters.js";
 import { readPriority } from "./routing-plan.js";
 
 const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529];
+
+/**
+ * Parse `RETRY_STATUS_CODES`. Unlike a free-form list, every entry has to be a
+ * real HTTP status code: a typo used to be filtered out silently, so
+ * `RETRY_STATUS_CODES=abc` quietly retried nothing while looking configured.
+ * An unset or empty variable keeps the default set.
+ */
+function readStatusCodes(env, name, fallback) {
+  const raw = env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return new Set(fallback);
+  const entries = String(raw).split(",").map((value) => value.trim()).filter((value) => value !== "");
+  if (entries.length === 0) {
+    throw new Error(`Invalid ${name}: expected a comma-separated list of HTTP status codes (100-599), got "${String(raw).slice(0, 40)}"`);
+  }
+  const codes = entries.map((entry) => {
+    const value = Number(entry);
+    if (!Number.isInteger(value) || value < 100 || value > 599) {
+      throw new Error(`Invalid ${name}: "${entry.slice(0, 20)}" is not an HTTP status code (100-599)`);
+    }
+    return value;
+  });
+  return new Set(codes);
+}
+
+/** Default request-body ceiling: large enough for real payloads, bounded. */
+export const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
 /**
  * The single source of truth for which providers exist. Every other list —
  * `providers/catalog.js`, the `/health` payload, the env-var audit — hangs off
@@ -112,15 +138,25 @@ export function readProviders(env, { vision = false } = {}) {
 export function loadConfig(env = process.env) {
   const providers = readProviders(env);
   const visionProviders = readProviders(env, { vision: true });
-  const retryableValues = split(env.RETRY_STATUS_CODES || DEFAULT_RETRY_STATUS_CODES.join(","))
-    .map(Number).filter((v) => Number.isInteger(v) && v >= 100 && v <= 599);
   return {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
     port: readNumber(env, "PORT", 8788, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
+    // Bind address. Unset keeps the historical behaviour (all interfaces);
+    // `HOST=127.0.0.1` keeps an unauthenticated gateway on loopback.
+    host: String(env.HOST || "").trim(),
     timeoutMs: readNumber(env, "REQUEST_TIMEOUT_MS", 120000, { min: 1, expected: "a positive integer" }),
     // 0 is meaningful here: server.js then uses the full request timeout for streams.
     connectTimeoutMs: readNumber(env, "STREAM_CONNECT_TIMEOUT_MS", 30000, { min: 0, expected: "a non-negative integer (0 disables the separate connect timeout)" }),
-    retryableStatus: new Set(retryableValues),
+    // After the headers arrive, a stream is bounded by the gap between chunks,
+    // not by the total duration: a provider that answers 200 and then stalls
+    // must not hold the client (and the walk) open forever. 0 disables it.
+    streamIdleTimeoutMs: readNumber(env, "STREAM_IDLE_TIMEOUT_MS", 120000, { min: 0, expected: "a non-negative integer (0 disables the idle timeout)" }),
+    retryableStatus: readStatusCodes(env, "RETRY_STATUS_CODES", DEFAULT_RETRY_STATUS_CODES),
+    // Request-body ceiling. The gateway forwards bodies to providers, so it
+    // cannot size them itself; it only guards its own memory. `0` disables the
+    // guard, and MAX_REQUEST_BODY_MB stays ignored for backwards compatibility
+    // (see .env.example).
+    maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", DEFAULT_MAX_BODY_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
     // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
     // exists so tests can use a short real-clock TTL).
     stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 20 * 60 * 1000,

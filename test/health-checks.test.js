@@ -163,6 +163,16 @@ test("a probe against a missing endpoint is passive, not healthy or failed", asy
   assert.equal(result.status, 404);
 });
 
+test("an unhealthy probe never follows a redirect", async () => {
+  // fetch follows redirects by default; the probe must not, or a redirecting
+  // provider could bounce the API key to a host the operator never configured.
+  const fetchImpl = stubFetch({ status: 302 });
+  const result = await probeTargetHealth(chatTarget(), { fetchImpl });
+  assert.equal(fetchImpl.calls[0].init.redirect, "manual");
+  assert.equal(result.status, 302);
+  assert.equal(result.ok, null, "a redirect establishes nothing about health");
+});
+
 test("an unreachable provider reports unhealthy without leaking error text", async () => {
   const target = chatTarget();
   const fetchImpl = async () => {

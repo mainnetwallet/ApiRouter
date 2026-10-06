@@ -7,6 +7,10 @@ import net from "node:net";
  * `script` is a function (request, index) => response descriptor:
  *   { status, headers, body }        - body: string | Buffer | object
  *   { status, stream: [chunk, ...] } - chunked/SSE response
+ *   { status, stream, truncateAfter: n } - write n chunks, then destroy the
+ *                                      socket (a stream that dies mid-body)
+ *   { status, stream, stallAfter: n }    - write n chunks, then stop writing
+ *                                      and never end (an idle, hung stream)
  *   { hang: true }                   - never responds (timeout tests)
  *
  * `options.health` scripts the health-probe (GET) response, which defaults to
@@ -75,6 +79,12 @@ export async function startMockUpstream(script, options = {}) {
         const writeNext = () => {
           if (stopped) return;
           if (i >= descriptor.stream.length) return res.end();
+          // A stream that dies after `truncateAfter` chunks: the client sees a
+          // 200 and a body that ends before the framing completes.
+          if (descriptor.truncateAfter !== undefined && i >= descriptor.truncateAfter) return res.destroy();
+          // A stream that goes silent after `stallAfter` chunks and holds the
+          // connection open (post-header inactivity).
+          if (descriptor.stallAfter !== undefined && i >= descriptor.stallAfter) return;
           res.write(descriptor.stream[i]);
           i += 1;
           setTimeout(writeNext, descriptor.delayMs || 0);

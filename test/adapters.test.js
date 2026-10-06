@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   buildUpstreamRequest,
   clientProtocol,
+  isGeminiStream,
+  parseGeminiPath,
   providerProtocols
 } from "../src/adapters.js";
 
@@ -11,6 +13,39 @@ test("client protocols are explicit", () => {
   assert.equal(clientProtocol("/v1/responses"), "openai-responses");
   assert.equal(clientProtocol("/v1/chat/completions"), "openai-chat");
   assert.equal(clientProtocol("/v1beta/models/gemini-model:generateContent"), "gemini");
+});
+
+// One parser decides detection, streaming and the model name, so the three can
+// never disagree. The previous regex only accepted `[^/]+:` and a bare method
+// name, so a nested model id, a percent-escape or `GenerateContent` was not
+// recognised at all.
+test("the Gemini endpoint parser accepts every real spelling and rejects the rest", () => {
+  assert.deepEqual(parseGeminiPath("/v1beta/models/gemini-2.5-flash:generateContent"), {
+    model: "gemini-2.5-flash", method: "generateContent", stream: false
+  });
+  assert.deepEqual(parseGeminiPath("/v1beta/models/gemini-2.5-flash:streamGenerateContent"), {
+    model: "gemini-2.5-flash", method: "streamGenerateContent", stream: true
+  });
+  // Google's own clients use both spellings; the method is case-insensitive.
+  assert.equal(parseGeminiPath("/v1beta/models/m:GenerateContent").method, "generateContent");
+  assert.equal(parseGeminiPath("/v1beta/models/m:STREAMGENERATECONTENT").stream, true);
+  // A model id may contain slashes and percent-escapes.
+  assert.equal(parseGeminiPath("/v1beta/models/google/gemini-2.5-flash:generateContent").model, "google/gemini-2.5-flash");
+  assert.equal(parseGeminiPath("/v1beta/models/google%2Fgemini:generateContent").model, "google/gemini");
+  // Anything else is not a Gemini generate/stream endpoint.
+  assert.equal(parseGeminiPath("/v1beta/models/m:countTokens"), null);
+  assert.equal(parseGeminiPath("/v1beta/models/m"), null);
+  assert.equal(parseGeminiPath("/v1beta/models/:generateContent"), null);
+  assert.equal(parseGeminiPath("/v1/messages"), null);
+  assert.equal(parseGeminiPath(""), null);
+  assert.equal(parseGeminiPath(undefined), null);
+
+  for (const path of ["/v1beta/models/m:generateContent", "/v1beta/models/m:streamGenerateContent"]) {
+    assert.equal(clientProtocol(path), "gemini");
+  }
+  assert.equal(isGeminiStream("/v1beta/models/m:streamGenerateContent"), true);
+  assert.equal(isGeminiStream("/v1beta/models/m:generateContent"), false);
+  assert.equal(isGeminiStream("/v1beta/models/m:countTokens"), false);
 });
 
 test("provider capabilities distinguish chat and responses", () => {

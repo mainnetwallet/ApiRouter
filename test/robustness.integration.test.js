@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { fileURLToPath } from "node:url";
 import { startMockUpstream } from "../test-helpers/mock-upstream.js";
 import { startRouter, postJson } from "../test-helpers/router-harness.js";
 
@@ -21,10 +20,14 @@ const validBody = { model: "m", max_tokens: 8, messages: [{ role: "user", conten
 
 async function boot(t, env = {}) {
   const upstream = await startMockUpstream(() => ok());
-  const router = await startRouter({ GROQ_API_KEYS: "k1", GROQ_MODELS: "m", GROQ_BASE_URL: upstream.baseUrl, ...env });
+  let router = null;
+  // Registered *before* the router boots, so a failed `startRouter` still closes
+  // the mock upstream. Otherwise the leaked server keeps the test process alive
+  // and `npm test` never terminates.
+  t.after(async () => { await router?.close(); await upstream.close(); });
+  router = await startRouter({ GROQ_API_KEYS: "k1", GROQ_MODELS: "m", GROQ_BASE_URL: upstream.baseUrl, ...env });
   let exited = false;
   router.exited.then(() => { exited = true; });
-  t.after(async () => { await router.close(); await upstream.close(); });
   return { router, upstream, isAlive: () => !exited };
 }
 
@@ -136,7 +139,10 @@ test("malformed percent-encoding in a static path does not crash either", async 
 // ---- the error boundary itself ---------------------------------------------------------------------
 
 test("an unexpected server-side exception becomes a JSON 500, is logged without secrets, and the process survives", async (t) => {
-  const preload = fileURLToPath(new URL("../test-helpers/fault-inject.mjs", import.meta.url));
+  // `--import` needs a real URL: a bare Windows path (`C:\...`) is parsed as a
+  // URL whose scheme is `c:`, which Node rejects with
+  // ERR_UNSUPPORTED_ESM_URL_SCHEME.
+  const preload = new URL("../test-helpers/fault-inject.mjs", import.meta.url).href;
   const { router, isAlive } = await boot(t, { NODE_OPTIONS: `--import ${preload}`, MULTIAI_TEST_FAULT: "session-id" });
 
   // No session header => the router looks up the shared default session => the injected fault throws inside request handling.

@@ -12,8 +12,24 @@
  * `no_vision_route`; it is never sent to the normal text pool.
  */
 
-function isImageMime(value) {
-  return typeof value === "string" && value.toLowerCase().startsWith("image/");
+/**
+ * Is an inline/file media blob an image?
+ *
+ * Gemini's `FileData.mimeType` is optional (files uploaded through the File API
+ * carry only a `fileUri`), and some clients send `application/octet-stream` for
+ * a blob they know to be an image. Both are treated as images so the request is
+ * routed to the vision pool rather than a text-only target — the pools must
+ * never cross. A MIME the sender *did* declare as non-image (audio, video,
+ * pdf, text) stays text, which is the existing behaviour.
+ */
+function mediaIsImage(data) {
+  if (!data || typeof data !== "object") return false;
+  if (Object.keys(data).length === 0) return false;
+  const mime = data.mimeType ?? data.mime_type;
+  if (mime === undefined || mime === null || String(mime).trim() === "") return true;
+  const value = String(mime).toLowerCase().trim();
+  if (value.startsWith("image/")) return true;
+  return value === "application/octet-stream" || value === "binary/octet-stream";
 }
 
 /** Is this one content part (block / item / Gemini part) an image? */
@@ -23,9 +39,10 @@ function partIsImage(part) {
   // Responses API: {type:"input_image"}.
   if (part.type === "image" || part.type === "image_url" || part.type === "input_image") return true;
   // Gemini: {inlineData:{mimeType:"image/png"}} / {fileData:{mimeType:"image/..."}}
+  // A MIME-less blob counts as an image: the vision pool is the safe side of
+  // the isolation rule, and the file API does not always report a type.
   for (const key of ["inlineData", "inline_data", "fileData", "file_data"]) {
-    const data = part[key];
-    if (data && typeof data === "object" && isImageMime(data.mimeType ?? data.mime_type)) return true;
+    if (mediaIsImage(part[key])) return true;
   }
   return false;
 }
