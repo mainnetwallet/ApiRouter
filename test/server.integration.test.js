@@ -494,6 +494,38 @@ test("the router issues a session id when the client omits one", async (t) => {
   assert.ok(id && id.length > 0);
 });
 
+test("the request id names one call; the session id names the client's sticky session", async (t) => {
+  const { router } = await withRig(
+    t,
+    () => ok(),
+    (u) => ({
+      GROQ_API_KEYS: "k",
+      GROQ_MODELS: "m",
+      GROQ_BASE_URL: u.baseUrl
+    })
+  );
+
+  const first = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [] }));
+  assert.equal(first.headers.get("x-multi-ai-session-id"), "default", "header-less clients share one session");
+  const firstId = first.headers.get("x-multi-ai-request-id");
+  assert.match(firstId, /^req-/, "a request id is minted for each call");
+
+  const second = await router.request(
+    "/v1/chat/completions",
+    postJson({ model: "m", messages: [] }, { "x-multi-ai-session-id": "session-abc" })
+  );
+  assert.equal(second.headers.get("x-multi-ai-session-id"), "session-abc");
+  const secondId = second.headers.get("x-multi-ai-request-id");
+  assert.ok(secondId);
+  assert.notEqual(secondId, firstId, "two requests, two request ids");
+
+  const { entries } = await (await router.request("/api/requests")).json();
+  assert.equal(entries[0].requestId, secondId, "the header mirrors the log row's requestId");
+  assert.equal(entries[0].id, "session-abc", "the log's `id` is the sticky session, not the request");
+  assert.equal(entries[1].requestId, firstId);
+  assert.equal(entries[1].id, "default");
+});
+
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
@@ -740,6 +772,56 @@ test("GET /health and GET /v1/models report configured targets", async (t) => {
 
   const doubled = await (await router.request("//v1/models")).json();
   assert.equal(doubled.object, "list");
+});
+
+test("cooling a target never reshuffles /v1/models and is reported by /health", async (t) => {
+  const { router } = await withRig(
+    t,
+    (rec) => {
+      const model = rec.body?.model;
+      // The first-listed model fails; the fallback model answers.
+      return model === "m1"
+        ? fail(500, "upstream is busy")
+        : ok({ id: "chatcmpl-1", choices: [{ message: { role: "assistant", content: "ok" } }] });
+    },
+    (u) => ({
+      GROQ_API_KEYS: "k0",
+      GROQ_MODELS: "m1,m2",
+      GROQ_BASE_URL: u.baseUrl
+    })
+  );
+
+  const before = await (await router.request("/v1/models")).json();
+  assert.deepEqual(before.data.map((m) => m.id), ["m1", "m2"], "the catalogue is the deterministic route order");
+
+  const healthBefore = await (await router.request("/health")).json();
+  assert.deepEqual(healthBefore.rankedTargets.map((r) => r.model), ["m1", "m2"]);
+  assert.deepEqual(healthBefore.coolingTargets, []);
+
+  // Drive m1 into cooldown with a real request that fails over to m2.
+  const res = await router.request(
+    "/v1/chat/completions",
+    postJson({ model: "m1", messages: [{ role: "user", content: "hi" }] })
+  );
+  assert.equal(res.status, 200, "the request survives on the fallback");
+  assert.equal((await res.json()).choices[0].message.content, "ok");
+
+  // The catalogue a client discovered must not reshuffle because a provider
+  // hiccuped: same models, same order.
+  const after = await (await router.request("/v1/models")).json();
+  assert.deepEqual(after, before, "/v1/models changed when a target entered cooldown");
+
+  const healthAfter = await (await router.request("/health")).json();
+  const cooling = healthAfter.coolingTargets.find((r) => r.model === "m1");
+  assert.ok(cooling, "the cooled target is still listed, not silently dropped");
+  assert.equal(cooling.rank, 1, "the cooled target keeps the position it will reoccupy");
+  assert.equal(cooling.provider, "groq");
+  assert.ok(cooling.cooldownUntil > Date.now(), "the panel can show how long the cooldown lasts");
+  assert.ok(
+    !healthAfter.rankedTargets.some((r) => r.model === "m1"),
+    "a cooling target is not offered as routable"
+  );
+  assert.deepEqual(healthAfter.rankedTargets.map((r) => r.model), ["m2"]);
 });
 
 test("unknown routes return 404", async (t) => {

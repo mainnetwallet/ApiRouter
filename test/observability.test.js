@@ -100,7 +100,30 @@ test("RequestLog evicts the oldest entries once bounded", () => {
   assert.equal(log.size, 3);
   const ids = log.list().entries.map((row) => row.id);
   assert.deepEqual(ids, ["req-5", "req-4", "req-3"]);
-  assert.equal(log.findById("req-1"), null);
+  assert.equal(log.findBySession("req-1"), null);
+});
+
+test("request ids and session ids are resolved by separate lookups", () => {
+  const log = new RequestLog();
+  const a = log.record(entry({ id: "session-1" }));
+  const b = log.record(entry({ id: "session-1" }));
+
+  // Each request has its own minted request id...
+  assert.notEqual(a.requestId, b.requestId);
+  assert.equal(log.findByRequestId(a.requestId)?.seq, a.seq);
+  assert.equal(log.findByRequestId(b.requestId)?.seq, b.seq);
+  assert.equal(log.findById(a.requestId)?.seq, a.seq, "the legacy alias resolves request ids");
+
+  // ...while the session id names both requests, so it is never a
+  // single-request lookup.
+  assert.equal(log.findByRequestId("session-1"), null);
+  const bySession = log.findBySession("session-1");
+  assert.equal(bySession?.id, "session-1");
+  assert.ok([a.seq, b.seq].includes(bySession.seq));
+
+  // The explicit session filter returns every request of that session.
+  assert.deepEqual(log.list({ session: "session-1" }).entries.map((row) => row.seq), [b.seq, a.seq]);
+  assert.deepEqual(log.list({ session: "nobody" }).entries, []);
 });
 
 test("RequestLog.list returns newest first and paginates by cursor", () => {
@@ -179,6 +202,31 @@ test("RequestLog never stores request or response bodies", () => {
   // The allow-list means unknown fields are dropped outright.
   assert.equal(stored.body, undefined);
   assert.equal(stored.headers, undefined);
+});
+
+test("RequestLog stores a streamOutcome only for the three known values", () => {
+  const log = new RequestLog();
+
+  for (const value of ["completed", "truncated", "aborted"]) {
+    const stored = log.record(entry({ id: `req-${value}`, streamed: true, streamOutcome: value }));
+    assert.equal(stored.streamOutcome, value);
+  }
+
+  // A non-streamed request, an unknown value, and a non-string value all fall
+  // back to null rather than being stored as-is.
+  assert.equal(log.record(entry({ id: "req-plain" })).streamOutcome, null);
+  assert.equal(
+    log.record(entry({ id: "req-unknown", streamed: true, streamOutcome: "half-written" })).streamOutcome,
+    null
+  );
+  assert.equal(
+    log.record(entry({ id: "req-object", streamed: true, streamOutcome: { outcome: "completed" } })).streamOutcome,
+    null
+  );
+  assert.equal(
+    log.record(entry({ id: "req-empty", streamed: true, streamOutcome: "" })).streamOutcome,
+    null
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -326,6 +374,27 @@ test("describeConfig reports key counts and safe values", () => {
   const sambanova = view.providers.find((p) => p.id === "sambanova");
   assert.equal(sambanova.configured, false);
   assert.ok(sambanova.missing.length > 0);
+});
+
+test("describeConfig never exposes a Cloudflare account id in the base URL", () => {
+  const ACCOUNT = "acct-1234567890abcdef";
+  const config = loadConfig({
+    CLOUDFLARE_API_KEYS: "cf-key",
+    CLOUDFLARE_ACCOUNT_IDS: ACCOUNT,
+    CLOUDFLARE_MODELS: "@cf/meta/llama-3-8b-instruct"
+  });
+  const targets = buildTargets(config.providers);
+  const view = describeConfig(config, targets);
+  const cloudflare = view.providers.find((p) => p.id === "cloudflare");
+
+  // The panel still gets a readable endpoint, but never the internal id.
+  assert.ok(cloudflare.baseUrl.includes("{account_id}"), "the account id slot is shown, not the id");
+  assert.ok(!JSON.stringify(view).includes(ACCOUNT), "the account id leaked from the config view");
+  assert.ok(!JSON.stringify(view.visionProviders).includes(ACCOUNT), "the account id leaked from the vision view");
+
+  // Only the reporting view is redacted: routing still uses the real URL.
+  const target = targets.find((t) => t.provider === "cloudflare");
+  assert.ok(target.baseUrl.includes(ACCOUNT), "the redaction must not change routing");
 });
 
 test("describeConfig reports the agentrouter client header names but not values", () => {

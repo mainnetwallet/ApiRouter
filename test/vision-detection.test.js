@@ -90,3 +90,46 @@ test("HTTP: a text request whose tool call carries {type:'image'} stays in the t
   assert.equal((await vision.json()).error.type, "no_vision_route");
   assert.deepEqual(seen, [], "the real image request never reached the text pool");
 });
+
+// A blob the client declared as an image, or one it declared nothing about,
+// must reach the VISION pool. Gemini's File API payloads carry only a fileUri,
+// and some clients send application/octet-stream for bytes they know are an
+// image; treating either as text routed an image to a text-only target.
+test("MIME-less and octet-stream blobs are images; a declared non-image stays text", () => {
+  assert.equal(requestHasImage({ contents: [{ parts: [{ fileData: { fileUri: "gs://b/o" } }] }] }), true);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ file_data: { file_uri: "gs://b/o" } }] }] }), true);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { data: "AAAA" } }] }] }), true);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "", data: "AAAA" } }] }] }), true);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "application/octet-stream", data: "AAAA" } }] }] }), true);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ fileData: { mimeType: "binary/octet-stream", fileUri: "gs://b/o" } }] }] }), true);
+
+  // The pool follows the detection: never the text pool.
+  const body = { contents: [{ parts: [{ fileData: { fileUri: "gs://b/o" } }] }] };
+  const selection = selectPool(body, { textTargets: [{ t: 1 }], visionTargets: [{ v: 1 }] });
+  assert.equal(selection.pool, "vision");
+  assert.deepEqual(selection.targets, [{ v: 1 }]);
+
+  // A type the client did declare as non-image stays in the text pool.
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "audio/wav", data: "AAAA" } }] }] }), false);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ fileData: { mimeType: "application/pdf", fileUri: "gs://b/o" } }] }] }), false);
+  // An empty object is not a blob at all.
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: {} }] }] }), false);
+});
+
+test("HTTP: a MIME-less Gemini blob is refused as vision, never served by the text pool", async (t) => {
+  const seen = [];
+  const upstream = await startMockUpstream((req) => {
+    seen.push(req.body?.model);
+    return { status: 200, body: { id: "c", object: "chat.completion", created: 0, model: "u", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { total_tokens: 2 } } };
+  });
+  // Text pool only: a missclassification shows up as a 200 from the text target.
+  const router = await startRouter({ GROQ_API_KEYS: "k1", GROQ_MODELS: "m", GROQ_BASE_URL: upstream.baseUrl });
+  t.after(async () => { await router.close(); await upstream.close(); });
+
+  const res = await router.request("/v1beta/models/m:generateContent", postJson({
+    contents: [{ role: "user", parts: [{ text: "what is this?" }, { fileData: { fileUri: "gs://bucket/photo" } }] }]
+  }));
+  assert.equal(res.status, 503);
+  assert.equal((await res.json()).error.type, "no_vision_route");
+  assert.deepEqual(seen, [], "the MIME-less image never reached the text pool");
+});

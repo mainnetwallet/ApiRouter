@@ -193,8 +193,11 @@ export class HealthRegistry {
     }
 
     const state = this.ensureTarget(target);
-    // Keep the operator-visible reason current without touching health.
-    if (!Number.isFinite(now) || now >= state.observedAt) {
+    // Keep the operator-visible reason current without touching health. The
+    // observation timestamp still advances, so a probe that began earlier can
+    // never later overwrite a newer outcome — even one this probe declined to
+    // judge. `acceptObservation` leaves `cooldownUntil`/`status` untouched.
+    if (this.acceptObservation(state, now)) {
       state.lastReason = reason ?? state.lastReason;
     }
     return state;
@@ -234,10 +237,6 @@ export function markFailure(target, status, options = {}, now = Date.now()) {
 
 export function recordHealthCheck(target, result = {}, now = Date.now()) {
   return healthRegistry.recordHealthCheck(target, result, now);
-}
-
-export function rankTargets(targets, now = Date.now()) {
-  return healthRegistry.rank(targets, now);
 }
 
 async function refreshTarget(target, check) {

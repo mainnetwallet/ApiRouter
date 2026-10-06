@@ -21,6 +21,17 @@ async function collect(iter) {
   return out;
 }
 
+/** Collects chunks until the iterable throws, returning both the text and the error. */
+async function collectUntilError(iter) {
+  let out = "";
+  try {
+    for await (const part of iter) out += part;
+    return { out, error: null };
+  } catch (error) {
+    return { out, error };
+  }
+}
+
 /** Splits a chat SSE body into parsed chunks, plus the [DONE] terminator. */
 function parseChatSse(text) {
   return text
@@ -109,21 +120,29 @@ test("consecutive same-role messages merge into one Gemini content", () => {
   assert.deepEqual(out.contents[0].parts, [{ text: "one" }, { text: "two" }]);
 });
 
-test("image parts become inlineData only when they are data URLs", () => {
+test("image parts become inlineData, and a remote URL is refused not dropped", () => {
   const out = toGeminiFromChat({
     messages: [{
       role: "user",
       content: [
         { type: "text", text: "see" },
-        { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
-        { type: "image_url", image_url: { url: "https://example.test/cat.png" } }
+        { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }
       ]
     }]
   });
   assert.deepEqual(out.contents[0].parts[0], { text: "see" });
   assert.deepEqual(out.contents[0].parts[1], { inlineData: { mimeType: "image/png", data: "AAAA" } });
-  // A remote URL has no generateContent equivalent; it is dropped, not guessed.
-  assert.equal(out.contents[0].parts.length, 2);
+
+  // A remote URL has no generateContent equivalent and the gateway will not
+  // fetch it, so translation refuses the request instead of answering 200 with
+  // the image silently removed (the old behaviour, encoded here by the old
+  // assertion `parts.length === 2`).
+  assert.throws(
+    () => toGeminiFromChat({
+      messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.test/cat.png" } }] }]
+    }),
+    (error) => error.status === 400 && error.errorType === "unsupported_image_source" && error.retryable === true
+  );
 });
 
 test("tool_choice variants and json_schema output map to Gemini equivalents", () => {
@@ -165,7 +184,12 @@ test("buildChatRequest builds the Gemini URL and auth, and rejects anything else
   assert.equal(request.options.headers.accept, "text/event-stream");
 
   const trailingSlash = buildChatRequest({ ...target("gm", "m", ["gemini"]), baseUrl: "http://x/v1beta/" }, "gemini", { messages: [] });
-  assert.equal(trailingSlash.url, "http://x/v1beta/v1beta/models/m:generateContent");
+  // The base already carries the version, so the canonical builder must not
+  // append a second `/v1beta`. The old assertion encoded the chat bridge's own
+  // duplicated-version bug (`/v1beta/v1beta/...`), which the four other
+  // builders - the native adapter, the other two bridges and the health probe -
+  // never produced; the shared builder is now the single source of truth.
+  assert.equal(trailingSlash.url, "http://x/v1beta/models/m:generateContent");
 
   assert.throws(() => buildChatRequest(target("a", "m", ["anthropic"]), "anthropic", {}), /Unsupported/);
   assert.throws(() => buildChatRequest(target("c", "m", ["openai-chat"]), "openai-chat", {}), /Unsupported/);
@@ -288,7 +312,7 @@ test("streamToChat emits a usage chunk only when the client asked for one", asyn
   assert.equal(withUsage.at(-1).done, true);
 });
 
-test("streamToChat skips unparsable chunks and reports an upstream failure as an error event", async () => {
+test("streamToChat reports an upstream failure as an error event, then re-throws it", async () => {
   const ok = parseChatSse(await collect(streamToChat("gemini", lines(
     "not json",
     JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] })
@@ -299,11 +323,17 @@ test("streamToChat skips unparsable chunks and reports an upstream failure as an
     yield JSON.stringify({ candidates: [{ content: { parts: [{ text: "partial" }] } }] });
     throw new Error("socket closed");
   }
-  const failed = parseChatSse(await collect(streamToChat("gemini", broken(), "m")));
+  const { out, error } = await collectUntilError(streamToChat("gemini", broken(), "m"));
+  const failed = parseChatSse(out);
   const errorChunk = failed.find((entry) => entry.chunk?.error);
   assert.match(errorChunk.chunk.error.message, /socket closed/);
   assert.equal(errorChunk.chunk.error.type, "upstream_error");
   assert.equal(failed.at(-1).done, true, "a failed stream still terminates with [DONE]");
+  // ...and the failure must not be swallowed: it is re-thrown so `pipeline()`
+  // rejects and the server files the request as a truncated failure.
+  assert.match(error.message, /socket closed/);
+  assert.equal(error.streamCause, "upstream");
+  assert.equal(error.failedAfterHeaders, true);
 });
 
 test("streamToChat refuses a protocol it cannot translate", async () => {

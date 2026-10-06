@@ -740,3 +740,45 @@ test("when every target answers 400 the client gets a 400, not a 502", async () 
     (error) => error.status === 400 && error.failures.length === 2 && /invalid/.test(error.message)
   );
 });
+
+test("F: the legacy groups path never lets a health score lift a target across a tier", async () => {
+  const exact = target("p1", "model-A");
+  const fallback = target("p2", "model-B");
+  const health = new HealthRegistry();
+
+  // The fallback model is the healthiest target in the whole plan...
+  health.markSuccess(fallback, {});
+  health.markSuccess(fallback, {});
+  // ...while the exact match is available but scores far lower (failed once,
+  // its cooldown already expired).
+  health.markFailure(exact, 500, { cooldownMs: -1 });
+
+  assert.ok(health.isAvailable(exact), "the exact target must be available for this to prove anything");
+  assert.ok(
+    health.ensureTarget(fallback).score > health.ensureTarget(exact).score,
+    "the fallback must out-score the exact match for this test to mean anything"
+  );
+
+  const tried = [];
+  const result = await withFallback(
+    [exact, fallback],
+    async (t) => {
+      tried.push(`${t.provider}:${t.model}`);
+      if (t === exact) {
+        const error = new Error("upstream is busy");
+        error.status = 500;
+        throw error;
+      }
+      return "fallback-ok";
+    },
+    new Set([500]),
+    new RouteSession(),
+    health,
+    // Legacy callers (no `plan`) pass `groups`: the tier boundary still wins,
+    // and health ranking only orders targets *within* a tier.
+    { groups: [[exact], [fallback]] }
+  );
+
+  assert.equal(result, "fallback-ok");
+  assert.deepEqual(tried, ["p1:model-A", "p2:model-B"]);
+});

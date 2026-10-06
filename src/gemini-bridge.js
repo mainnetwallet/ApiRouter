@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { unsupportedImageSource } from "./image-source.js";
+import { openAiChatUrl } from "./upstream-url.js";
 import { cleanSchemaForGemini } from "./anthropic-bridge.js";
 
 function id(prefix) {
@@ -21,11 +23,13 @@ function textParts(parts = []) {
 }
 
 function inlineToChat(part) {
-  const data = part?.inlineData;
+  const data = part?.inlineData ?? part?.inline_data;
   if (!data?.data) return null;
   return {
     type: "image_url",
-    image_url: { url: "data:" + (data.mimeType || "application/octet-stream") + ";base64," + data.data }
+    image_url: {
+      url: "data:" + (data.mimeType || data.mime_type || "application/octet-stream") + ";base64," + data.data
+    }
   };
 }
 
@@ -81,12 +85,23 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
         // is an object. A bare string is not a valid OpenAI content part.
         parts.push({ type: "text", text: part.text });
       }
-      if (part?.inlineData) {
+      if (part?.inlineData || part?.inline_data) {
         const image = inlineToChat(part);
-        if (image) parts.push(image);
+        // An inlineData with no bytes cannot be replayed, so it is refused
+        // rather than silently dropped from the translated request.
+        if (!image) throw unsupportedImageSource("a Gemini inlineData part with no data");
+        parts.push(image);
+      }
+      if (part?.fileData || part?.file_data) {
+        // fileData references a URI only Gemini can resolve; the gateway will
+        // not fetch it, so the request is refused explicitly.
+        throw unsupportedImageSource("a Gemini fileData (fileUri) reference");
       }
       if (part?.functionCall) {
-        const callId = part.functionCall.id || id("call");
+        // Gemini's classic functionCall has no id, so pair it with the answer by
+        // the function name (the same fallback functionResponse uses). A random
+        // id here would never match the tool_call_id the response carries.
+        const callId = part.functionCall.id || part.functionCall.name || id("call");
         toolCalls.push({
           id: callId,
           type: "function",
@@ -119,9 +134,13 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
     // message there would separate the tool result from the assistant turn it
     // answers, which OpenAI-compatible providers reject outright.
     if (parts.length > 0) {
+      // Tool results must sit immediately after the assistant message that
+      // requested them, so they are appended before any trailing user text.
+      messages.push(...toolResults);
       messages.push({ role, content: hasImage ? parts : text.join("") });
+    } else {
+      messages.push(...toolResults);
     }
-    messages.push(...toolResults);
   }
 
   const tools = [];
@@ -212,11 +231,6 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
   return out;
 }
 
-function joinUrl(base, suffix) {
-  const root = String(base || "").replace(/\/+$/, "");
-  return root + "/" + String(suffix || "").replace(/^\/+/, "");
-}
-
 /** Builds the upstream fetch request for a translated (chat-compatible) target. */
 export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { stream = false } = {}) {
   const headers = {
@@ -227,9 +241,8 @@ export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { s
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
 
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
-  const path = base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions";
   return {
-    url: joinUrl(base, path),
+    url: openAiChatUrl(base),
     options: {
       method: "POST",
       headers,
@@ -239,9 +252,11 @@ export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { s
 }
 
 function finishReason(reason, hasToolCalls) {
-  if (hasToolCalls) return "STOP";
+  // A truncated response is truncated whether or not it also emitted tool calls.
   if (reason === "length") return "MAX_TOKENS";
-  if (reason === "content_filter") return "SAFETY";
+  if (reason === "content_filter" || reason === "safety") return "SAFETY";
+  if (reason === "recitation") return "RECITATION";
+  if (hasToolCalls) return "STOP";
   return "STOP";
 }
 
@@ -312,7 +327,9 @@ export async function* streamToGemini(events) {
       const call = pending.get(key);
       return {
         functionCall: {
-          id: call.id ?? undefined,
+          // Same id fallback as the non-streaming path, so a client that echoes
+          // the call back keeps a stable pairing.
+          id: call.id || call.name || "tool",
           name: call.name || "tool",
           args: parseArgs(call.arguments)
         }

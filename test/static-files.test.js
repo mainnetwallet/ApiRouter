@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -140,6 +140,47 @@ test("dotfiles are never served", async (t) => {
   const res = await fetch(`${baseUrl}/.env`);
   const body = await res.text();
   assert.ok(!body.includes("SECRET=1"));
+});
+
+/**
+ * `resolveWithinRoot` is a lexical check, so a link planted inside the
+ * published directory could still point at a file outside it. The handler
+ * resolves the real path and refuses anything that leaves the root.
+ *
+ * Windows junctions are used where symlinks need elevation; a directory target
+ * is enough to exercise the escape.
+ */
+async function linkDirectory(target, linkPath) {
+  try {
+    await symlink(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+    return true;
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES" || error?.code === "ENOSYS") return false;
+    throw error;
+  }
+}
+
+test("a link inside the root cannot be followed outside it", async (t) => {
+  const root = await makeRoot(t, { "index.html": "panel", "sub/index.html": "panel" });
+  const outside = await mkdtemp(path.join(tmpdir(), "multiai-outside-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await writeFile(path.join(outside, "secret.txt"), "top secret");
+
+  const escaped = await linkDirectory(outside, path.join(root, "escape"));
+  const inside = await linkDirectory(path.join(root, "sub"), path.join(root, "alias"));
+  if (!escaped || !inside) {
+    t.skip("directory links are not available here");
+    return;
+  }
+
+  const { baseUrl } = await serveRoot(t, root);
+
+  const leak = await fetch(`${baseUrl}/escape/secret.txt`);
+  assert.ok(!(await leak.text()).includes("top secret"), "followed a link out of the root");
+
+  const served = await fetch(`${baseUrl}/alias/index.html`);
+  assert.equal(served.status, 200, "an in-root link is still served");
+  assert.equal(await served.text(), "panel");
 });
 
 test("an unbuilt panel serves an actionable placeholder instead of failing", async (t) => {

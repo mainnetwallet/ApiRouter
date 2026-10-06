@@ -12,6 +12,20 @@ const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 
 const SIZE_LIMIT_COOLDOWN_MS = 60 * 1000;
 
+/**
+ * The client went away before its response was delivered. Distinguishable from
+ * a provider failure so the walk stops without cooling a healthy target, and so
+ * `server.js` can answer 499 instead of 502.
+ */
+export class ClientAbortError extends Error {
+  constructor(message = "Client disconnected") {
+    super(message);
+    this.name = "ClientAbortError";
+    this.status = 499;
+    this.clientAborted = true;
+  }
+}
+
 export function isRetryableStatus(status, retryableStatus = DEFAULT_RETRY_STATUS_CODES) {
   return retryableStatus.has(Number(status));
 }
@@ -117,10 +131,10 @@ export async function withFallback(
   retryableStatus = DEFAULT_RETRY_STATUS_CODES,
   session = new RouteSession(),
   health = new HealthRegistry(),
-  { groups = null, plan: steps = null, onSkip = null } = {}
+  { groups = null, plan: steps = null, onSkip = null, deferCommit = false, shouldStop = null } = {}
 ) {
   if (Array.isArray(steps)) {
-    return walkPlan(steps, invoke, retryableStatus, session, health, onSkip);
+    return walkPlan(steps, invoke, retryableStatus, session, health, onSkip, { deferCommit, shouldStop });
   }
 
   const plan = (Array.isArray(groups) && groups.length > 0 ? groups : [targets])
@@ -168,6 +182,7 @@ export async function withFallback(
         failures.push({
           target,
           status,
+          errorType: error?.errorType ?? null,
           message: error?.message || String(error)
         });
 
@@ -216,6 +231,13 @@ export async function withFallback(
     : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;
   err.failures = failures;
+  // When every target rejected the request the same way, keep the machine
+  // readable reason (e.g. unsupported_image_source) instead of flattening it
+  // into a generic upstream error.
+  if (allBadRequest) {
+    const types = new Set(failures.map((failure) => failure.errorType).filter(Boolean));
+    if (types.size === 1) err.errorType = [...types][0];
+  }
   throw err;
 }
 
@@ -237,7 +259,15 @@ export async function withFallback(
  * walker never reorders anything itself, and the record is per session, never
  * global.
  */
-async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip) {
+async function walkPlan(
+  steps,
+  invoke,
+  retryableStatus,
+  session,
+  health,
+  onSkip,
+  { deferCommit = false, shouldStop = null } = {}
+) {
   if (steps.length === 0) {
     const err = new Error("No fully configured routing targets available");
     err.status = 503;
@@ -256,9 +286,26 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
     if (typeof onSkip === "function") onSkip(step.target, { phase: step.phase, reason });
   };
 
+  const stopRequested = () => typeof shouldStop === "function" && shouldStop() === true;
+
+  /** 401/402/403 describe the key, not the model: cool its sibling models too. */
+  const coolKeySiblings = (target, status) => {
+    const reason = `${status} on ${target.model} applies to the whole key`;
+    for (const sibling of allTargets) {
+      if (sibling.provider !== target.provider || sibling.keyIndex !== target.keyIndex) continue;
+      if ((sibling.pool ?? "text") !== (target.pool ?? "text")) continue;
+      if (health.key(sibling) === health.key(target)) continue;
+      health.markFailure(sibling, status, { reason });
+    }
+  };
+
   for (const step of steps) {
     const target = step.target;
     const id = health.key(target);
+
+    // The client is gone: stop before invoking another target. Checked before
+    // every step, so a disconnect during a fallback cannot spend more quota.
+    if (stopRequested()) throw new ClientAbortError();
 
     if (attempted.has(id)) {
       skip(step, "already_attempted");
@@ -278,29 +325,41 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
     attempted.add(id);
     const startedAt = Date.now();
 
+    let committed = false;
+    /**
+     * Finalise this step's health/sticky decision exactly once. With
+     * `deferCommit` the caller owns the moment the outcome is actually known —
+     * a 200 that only carried headers is NOT a success — and calls this once
+     * the body has been delivered or has failed. A client abort is never
+     * charged to the provider.
+     */
+    const commit = (ok, { status = 200, reason = null, clientAborted = false } = {}) => {
+      if (committed) return;
+      committed = true;
+      if (ok) {
+        health.markSuccess(target, { latencyMs: Date.now() - startedAt, status });
+        session.saveSuccess(target, health);
+        return;
+      }
+      if (clientAborted) return;
+      const code = Number(status) || 0;
+      health.markFailure(target, code, code === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : { reason });
+      if (KEY_LEVEL_STATUS_CODES.has(code)) coolKeySiblings(target, code);
+    };
+
     try {
       const result = await invoke(target, { phase: step.phase });
-      health.markSuccess(target, { latencyMs: Date.now() - startedAt });
-      session.saveSuccess(target, health);
+      if (deferCommit) return { value: result, target, phase: step.phase, commit };
+      commit(true, { status: result?.upstream?.status ?? 200 });
       return result;
     } catch (error) {
       const status = Number(error?.status || 0);
-      failures.push({ target, status, message: error?.message || String(error) });
+      failures.push({ target, status, errorType: error?.errorType ?? null, message: error?.message || String(error) });
 
       if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) throw error;
       if (error?.skipCooldown) continue;
 
-      health.markFailure(target, status, status === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : {});
-
-      if (KEY_LEVEL_STATUS_CODES.has(status)) {
-        const reason = `${status} on ${target.model} applies to the whole key`;
-        for (const sibling of allTargets) {
-          if (sibling.provider !== target.provider || sibling.keyIndex !== target.keyIndex) continue;
-          if ((sibling.pool ?? "text") !== (target.pool ?? "text")) continue;
-          if (health.key(sibling) === id) continue;
-          health.markFailure(sibling, status, { reason });
-        }
-      }
+      commit(false, { status });
     }
   }
 
@@ -315,5 +374,9 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
   const err = new Error(allBadRequest ? failures[failures.length - 1].message : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;
   err.failures = failures;
+  if (allBadRequest) {
+    const types = new Set(failures.map((failure) => failure.errorType).filter(Boolean));
+    if (types.size === 1) err.errorType = [...types][0];
+  }
   throw err;
 }

@@ -71,7 +71,8 @@ choice unset rather than assert something the request cannot support.
 
 ## Fallback
 
-Requests are health-ranked within each group of targets. An exact match for the
+Requests follow the configured order within each group of targets; health only
+decides eligibility, so a cooling target is skipped but never reorders the list. An exact match for the
 requested model is tried first, and only once those targets have failed or are
 cooling down does the request widen to the remaining compatible targets. A
 retryable failure moves the request to the next reachable target.

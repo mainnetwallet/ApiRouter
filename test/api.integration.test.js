@@ -280,16 +280,34 @@ test("a fully failed request is logged with per-attempt detail", async (t) => {
   assert.equal(entry.attempts[0].errorMessage.includes(PROVIDER_KEY), false);
 });
 
-test("a single request can be fetched by its request id", async (t) => {
+test("the request id resolves one request; a session id is looked up explicitly", async (t) => {
   const { router } = await withRig(t);
 
   const proxied = await router.request("/v1/chat/completions", postJson({ model: "model-a", messages: [] }));
-  const requestId = proxied.headers.get("x-multi-ai-session-id");
-  assert.ok(requestId);
+  assert.equal(proxied.status, 200);
+  const requestId = proxied.headers.get("x-multi-ai-request-id");
+  const sessionId = proxied.headers.get("x-multi-ai-session-id");
+  assert.ok(requestId, "every response names the request it answered");
+  assert.ok(sessionId, "every response names the sticky session");
+  assert.notEqual(requestId, sessionId);
 
   const { res, body } = await getJson(router, `/api/requests/${requestId}`);
   assert.equal(res.status, 200);
-  assert.equal(body.request.id, requestId);
+  assert.equal(body.request.requestId, requestId);
+  assert.equal(body.request.id, sessionId);
+
+  // A session id names many requests, so the single-request endpoint must not
+  // resolve it — that was the ambiguity this contract removes.
+  const bySession = await getJson(router, `/api/requests/${sessionId}`);
+  assert.equal(bySession.res.status, 404, "a session id must not be ambiguous with a request id");
+
+  // It is looked up through the explicit session filter instead.
+  const listed = await getJson(router, `/api/requests?session=${encodeURIComponent(sessionId)}`);
+  assert.equal(listed.res.status, 200);
+  assert.ok(listed.body.entries.length >= 1);
+  assert.ok(listed.body.entries.every((row) => row.id === sessionId));
+  assert.ok(listed.body.entries.every((row) => row.requestId !== sessionId));
+  assert.ok(listed.body.entries.some((row) => row.requestId === requestId));
 
   const missing = await getJson(router, "/api/requests/does-not-exist");
   assert.equal(missing.res.status, 404);

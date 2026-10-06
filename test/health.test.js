@@ -232,6 +232,29 @@ test("a passive probe cannot overwrite a newer failure either", () => {
   assert.equal(registry.ensureTarget(t).lastReason, null);
 });
 
+test("a passive probe still advances observedAt so an older active result cannot land", () => {
+  const registry = new HealthRegistry({ cooldownMs: 60000 });
+  const t = target();
+
+  // A probe that could not judge health is still a real observation: it must
+  // claim the timestamp even though it leaves status/cooldown untouched.
+  registry.recordHealthCheck(t, { ok: null, status: 404, reason: "not supported" }, 5000);
+  assert.equal(registry.ensureTarget(t).observedAt, 5000);
+
+  // A slower active probe that started *earlier* (t=4000) must not be able to
+  // overwrite it afterwards and fabricate a success.
+  registry.markSuccess(t, {}, 4000);
+  const state = registry.ensureTarget(t);
+  assert.equal(state.observedAt, 5000);
+  assert.equal(state.status, HEALTH_STATES.UNKNOWN);
+  assert.equal(state.successes, 0);
+
+  // The same holds for an older failure: it cannot cool the target down.
+  registry.markFailure(t, 429, {}, 4000);
+  assert.equal(registry.ensureTarget(t).cooldownUntil, 0);
+  assert.equal(registry.isAvailable(t), true);
+});
+
 // ---------------------------------------------------------------------------
 // Per-target isolation
 // ---------------------------------------------------------------------------

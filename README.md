@@ -82,7 +82,40 @@ A provider needs:
 - Models
 - Base URL
 
-Configure them in `.env`.
+Configure them in `.env`; `.env.example` lists every provider variable.
+
+### LLM7
+
+```env
+LLM7_API_KEYS=
+LLM7_MODELS=DeepSeek-V4-Flash-0731,GLM-5.3-Flash,minimax-m2.7,DeepSeek-V4.1-Flash
+LLM7_BASE_URL=https://api.llm7.io/v1
+
+LLM7_VISION_API_KEYS=
+LLM7_VISION_MODELS=kimi-k3,llama-4-maverick,minimax-m3
+LLM7_VISION_BASE_URL=https://api.llm7.io/v1
+```
+
+- Provider ID: `llm7` (shown as **LLM7**). OpenAI-compatible; the base URL already contains `/v1`
+  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
+- LLM7 provides a **free-token quota**, not permanently free model pricing: the models themselves have
+  model-level pricing. Quotas, limits and model availability can change, so check your account's current
+  quota; nothing here promises unlimited usage.
+- Text requests use `LLM7_MODELS` and `LLM7_API_KEYS`; image requests use only `LLM7_VISION_MODELS` and
+  `LLM7_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
+- A model receives images only if it is listed in the vision pool; the router keeps no per-model capability data.
+- Keys and models are comma-separated; every key x model pair is a target, in the configured order, and
+  LLM7 joins the normal fallback chain like any other provider.
+
+Retryable statuses:
+
+```text
+401,402,403,404,408,409,425,429,500,501,502,503,504,520,521,522,523,524,529
+```
+
+HTTP 400 from a provider also falls back to the next target. A generic 400
+(unsupported parameter, schema quirk) does not cool the target down, and if
+every target answers 400 the client receives the 400 instead of a 502.
 
 
 
@@ -107,6 +140,12 @@ vision-to-text fallback. Pinned requests ignore priority and sticky. A pinned su
 A session's last successful target stays sticky for 20 minutes (refreshed by each success) and is tried before priority. If it fails, the **other keys of the same provider/model** are tried next (in key order); only when that model is exhausted does routing continue with the priority models listed **after** it (priority `A,B,C,D` with sticky on `B` continues `B keys → C keys → D keys`, then the normal fallback; `A` is not revisited in the priority phase). The normal fallback itself is unchanged: it is the full Provider → Key → Models list of every target not yet tried. A fallback success is remembered the same way (exact provider + model + key).
 
 Stickiness is **per session** (`X-Multi-AI-Session-ID`; reuse the `x-multi-ai-session-id` response header) and remembers the exact `provider + key + model`, not just the model name. Requests that send **no** session header (Claude Code, Codex, OpenAI SDKs…) share one default session per protocol and pool, so they get the sticky behaviour automatically. A different explicit session id never inherits it, text and vision keep separate sticky targets, and a success never reorders the priority list: a new session always starts at the first configured priority entry. A sticky success ends the request (no priority/fallback call), and a target is never called twice in one request. Example with `TEXT_PRIORITY_MODELS=groq/A1,openrouter/B1`: request #1 runs `priority groq/A1/key1 → 200`, so request #2 of the same session runs `sticky groq/A1/key1 → 200` and stops; if the sticky call fails, request #2 continues `priority groq/A1 (its other keys) → priority openrouter/B1 → fallback`, never repeating the sticky target.
+
+The same session boundary scopes Gemini thought signatures: a `thoughtSignature`
+received for one session is only echoed back inside that session, and a tool call
+whose arguments are not valid JSON is refused for a Gemini target (`400
+invalid_tool_arguments`) instead of silently becoming `{}`, so another target
+can still carry it. See `Architecture.md` -> *Tool calls and thought signatures*.
 
 After priority, the normal fallback is key-scoped: **Provider -> Key -> Models ->
 next Key -> Models -> next Provider**. Each key restarts at its provider's first
@@ -140,8 +179,10 @@ no configured target returns `404 no_route`.
 
 ### Control panel (read-only)
 
-Served under `/api`. Requires `MULTIAI_ROUTER_API_KEYS` when that is set; open
-otherwise. None of these can change routing, health or provider behaviour.
+Served under `/api`. Requires the client token when `MULTIAI_ROUTER_API_KEYS` is
+set. With no keys configured it answers loopback callers only, so an
+unauthenticated gateway cannot be driven from another host. None of these can
+change routing, health or provider behaviour.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
@@ -149,9 +190,9 @@ otherwise. None of these can change routing, health or provider behaviour.
 | POST | /api/health/refresh | Run one health cycle now |
 | GET | /api/providers | Provider rollup joined with safe config |
 | GET | /api/models | Model catalogue with health and usage |
-| GET | /api/requests | Request log (`limit`, `cursor`, `outcome`, `provider`, `protocol`, `status`), plus `pending`: calls still running |
+| GET | /api/requests | Request log (`limit`, `cursor`, `outcome`, `provider`, `protocol`, `status`, `session`), plus `pending`: calls still running. `session=<id>` is the explicit sticky-session lookup |
 | GET | /api/requests/stream | Server-sent events for Live Logs: a `snapshot`, then a `pending` / `entry` event per change |
-| GET | /api/requests/:id | One request's full lifecycle |
+| GET | /api/requests/:id | One request's full lifecycle, by its `x-multi-ai-request-id` (or internal sequence) — never a session id, which names many requests |
 | GET | /api/router/preview | The routing decision for a protocol/model |
 | GET | /api/analytics | Series and breakdowns (`range=5m\|15m\|1h\|6h\|24h\|7d`) |
 | GET | /api/config | Effective configuration, secrets as counts only |
@@ -226,6 +267,13 @@ npm run test:all   # both
 ## Security
 
 Keep real API keys in `.env`. Never commit credentials.
+
+Client authentication is optional. With `MULTIAI_ROUTER_API_KEYS` unset, only
+loopback callers (`127.0.0.1`, `::1`) may use the proxy or the read-only `/api`
+surface; requests from any other host are refused with `401`. Set
+`MULTIAI_ROUTER_API_KEYS` to serve remote clients, and set `HOST=127.0.0.1` to
+keep the listener itself on loopback. `/health` and `/v1/models` stay public
+readiness metadata and never carry credentials.
 
 The control panel never receives provider credentials. `/api/config` reports a
 key *count* per provider and the *names* of the environment variables to edit;

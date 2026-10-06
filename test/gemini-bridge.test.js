@@ -326,3 +326,94 @@ test("mode NONE is still representable with no tools declared", () => {
   );
   assert.equal(out.tool_choice, "none");
 });
+
+// ---------------------------------------------------------------------------
+// Tool-call identity, ordering and finish reasons
+// ---------------------------------------------------------------------------
+
+test("a Gemini functionCall and its functionResponse are paired by name when there is no id", () => {
+  // Gemini's classic functionCall/functionResponse carry no id. The upstream
+  // chat provider matches a tool result to its call by `tool_call_id`, so
+  // inventing a random id here would strand the result on a call that never
+  // existed.
+  const out = toChatFromGemini({
+    contents: [
+      { role: "model", parts: [{ functionCall: { name: "lookup", args: { q: "x" } } }] },
+      { role: "user", parts: [{ functionResponse: { name: "lookup", response: { ok: true } } }] }
+    ]
+  }, "m");
+  assert.equal(out.messages.length, 2);
+  assert.equal(out.messages[0].tool_calls[0].id, "lookup");
+  assert.equal(out.messages[1].role, "tool");
+  assert.equal(out.messages[1].tool_call_id, "lookup");
+  assert.match(out.messages[1].content, /"ok":true/);
+});
+
+test("an explicit Gemini tool-call id wins over the name, on both sides", () => {
+  const out = toChatFromGemini({
+    contents: [
+      { role: "model", parts: [{ functionCall: { id: "call-9", name: "lookup", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { id: "call-9", name: "lookup", response: {} } }] }
+    ]
+  }, "m");
+  assert.equal(out.messages[0].tool_calls[0].id, "call-9");
+  assert.equal(out.messages[1].tool_call_id, "call-9");
+});
+
+test("tool results sit immediately after the assistant turn, before any trailing user text", () => {
+  const out = toChatFromGemini({
+    contents: [
+      { role: "model", parts: [{ functionCall: { name: "lookup", args: {} } }] },
+      { role: "user", parts: [
+        { functionResponse: { name: "lookup", response: { ok: true } } },
+        { text: "now summarise" }
+      ] }
+    ]
+  }, "m");
+  assert.deepEqual(out.messages.map((m) => m.role), ["assistant", "tool", "user"]);
+  assert.equal(out.messages[2].content, "now summarise");
+
+  // A response-only turn stays a bare tool message: an empty user message would
+  // separate the result from the call it answers.
+  const pure = toChatFromGemini({
+    contents: [
+      { role: "model", parts: [{ functionCall: { name: "lookup", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { name: "lookup", response: { ok: true } } }] }
+    ]
+  }, "m");
+  assert.deepEqual(pure.messages.map((m) => m.role), ["assistant", "tool"]);
+});
+
+test("finishReason keeps truncation and safety ahead of a tool call", () => {
+  const finish = (finish_reason, withTool = false) => chatJsonToGemini({
+    choices: [{
+      message: withTool
+        ? { content: null, tool_calls: [{ id: "c", type: "function", function: { name: "f", arguments: "{}" } }] }
+        : { content: "hi" },
+      finish_reason
+    }]
+  }).candidates[0].finishReason;
+
+  // A truncated answer is truncated whether or not it also asked for a tool.
+  assert.equal(finish("length", true), "MAX_TOKENS");
+  assert.equal(finish("length"), "MAX_TOKENS");
+  assert.equal(finish("content_filter"), "SAFETY");
+  assert.equal(finish("safety"), "SAFETY");
+  assert.equal(finish("recitation"), "RECITATION");
+  assert.equal(finish("tool_calls", true), "STOP");
+  assert.equal(finish("stop"), "STOP");
+});
+
+test("a streamed tool call without an id keeps a name-based identity", async () => {
+  async function* events() {
+    // The upstream chat provider sent the name and arguments but no id.
+    yield JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "lookup", arguments: "{\"q\":\"x\"}" } }] }, finish_reason: "tool_calls" }] });
+  }
+  const chunks = [];
+  for await (const event of streamToGemini(events())) chunks.push(event);
+  const call = chunks
+    .flatMap((c) => JSON.parse(c.slice(5)).candidates[0].content.parts)
+    .find((p) => p.functionCall).functionCall;
+  assert.equal(call.name, "lookup");
+  assert.equal(call.id, "lookup", "a stable, echoable id rather than a random one");
+});

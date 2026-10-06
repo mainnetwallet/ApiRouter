@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -94,6 +94,28 @@ export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
     }
   }
 
+  /**
+   * Resolve a request path to a real regular file inside `root`, following
+   * symlinks. `resolveWithinRoot` only checks the requested path lexically, so a
+   * symlink planted inside the root could still point at a file outside it;
+   * this is the check that refuses that. Returns null when the path escapes,
+   * does not exist, or is not a regular file.
+   */
+  async function resolveFile(pathname) {
+    const filePath = resolveWithinRoot(root, pathname);
+    if (!filePath) return null;
+    let real;
+    try {
+      real = await realpath(filePath);
+    } catch {
+      return null;
+    }
+    const realRoot = await realpath(root).catch(() => path.resolve(root));
+    if (real !== realRoot && !real.startsWith(realRoot + path.sep)) return null;
+    const stats = await statFile(real);
+    return stats ? { filePath: real, stats } : null;
+  }
+
   async function sendFile(req, res, filePath, stats, { immutable = false } = {}) {
     const etag = etagFor(stats);
     const lastModified = new Date(stats.mtimeMs).toUTCString();
@@ -130,15 +152,12 @@ export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
 
   /** Serve a concrete asset path. Returns true when the request was handled. */
   async function serve(req, res, pathname) {
-    const filePath = resolveWithinRoot(root, pathname);
-    if (!filePath) return false;
-
-    const stats = await statFile(filePath);
-    if (!stats) return false;
+    const resolved = await resolveFile(pathname);
+    if (!resolved) return false;
 
     // Vite emits hashed filenames under /assets, which are safe to cache hard.
     const immutable = pathname.startsWith("/assets/");
-    await sendFile(req, res, filePath, stats, { immutable });
+    await sendFile(req, res, resolved.filePath, resolved.stats, { immutable });
     return true;
   }
 
@@ -148,9 +167,9 @@ export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
    * backend-only deployment still starts and explains itself.
    */
   async function serveIndex(req, res) {
-    const stats = await statFile(indexPath);
+    const resolved = await resolveFile(`/${indexFile}`);
 
-    if (!stats) {
+    if (!resolved) {
       return send(res, 200, {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-cache",
@@ -158,7 +177,7 @@ export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
       }, placeholderPage(indexFile));
     }
 
-    return sendFile(req, res, indexPath, stats);
+    return sendFile(req, res, resolved.filePath, resolved.stats);
   }
 
   const isBuilt = async () => Boolean(await statFile(indexPath));

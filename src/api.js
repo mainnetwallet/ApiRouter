@@ -489,7 +489,10 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
           provider: searchParams.get("provider"),
           protocol: searchParams.get("protocol"),
           pool: searchParams.get("pool"),
-          outcome: searchParams.get("outcome")
+          outcome: searchParams.get("outcome"),
+          // Explicit sticky-session lookup. The single-request endpoint below
+          // resolves request ids only, so the two identifiers never mix.
+          session: searchParams.get("session")
         }),
         // Requests still running, so the Live Logs view can show them before
         // they finish. Never part of `entries`, so metrics are unaffected.
@@ -523,8 +526,11 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       let id;
       try { id = decodeURIComponent(pathname.slice("/api/requests/".length)); }
       catch { return fail(req, res, 400, "Malformed percent-encoding in request path", "invalid_request"); }
-      // Accept either the client-visible request id or the internal sequence.
-      const entry = requestLog.findById(id) ?? requestLog.get(id);
+      // Accept the log-minted request id (echoed as `x-multi-ai-request-id`) or
+      // the internal sequence number. A sticky session id is deliberately not
+      // accepted here: it names many requests, so it is looked up through
+      // `GET /api/requests?session=<id>` instead.
+      const entry = requestLog.findByRequestId(id) ?? requestLog.get(id);
       if (!entry) return fail(req, res, 404, "Request not found", "not_found");
       return sendJson(req, res, 200, { request: entry });
     }
