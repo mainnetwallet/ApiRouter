@@ -331,6 +331,10 @@ starts `src/server.js` when the UI build succeeds. The gateway then serves the b
 `ui/dist` panel and the backend from the same origin. No separate production UI-build
 command is required.
 
+Because `npm start` builds the panel, `vite` and `@vitejs/plugin-react` are production
+`dependencies` (not `devDependencies`); a production-only install
+(`npm ci --omit=dev`) can therefore start the gateway. `vitest` stays a dev dependency.
+
 ## Source Architecture
 
 ```text

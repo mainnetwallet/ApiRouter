@@ -235,6 +235,7 @@ npm run dev         # gateway + Vite, open http://localhost:999
 npm run dev:server  # gateway only, with restart on change (no hot-reloading UI)
 npm run ui:dev      # optional: Vite on its own, frontend-only work (see below)
 npm start           # production: build UI into ui/dist, then start the gateway
+npm run ui:build    # standalone production UI build into ui/dist (npm start already runs it)
 npm run test:ui     # frontend unit tests
 npm run test:all    # backend + frontend
 ```
@@ -261,7 +262,8 @@ stream is not connected. The page keeps the last 50 calls; when a newer one
 arrives past that, the oldest is dropped.
 
 To see the Live Logs page populated without real provider keys, run
-`npm run demo:live-logs`; the launcher builds the UI before starting the demo router. It starts the router against
+`npm run ui:build` then `npm run demo:live-logs` (the demo does not build the panel itself and
+exits if `ui/dist` is missing). It starts the router against
 scripted mock providers and prints a `/live-logs` URL; the traffic includes
 `429` key 0 -> key 1 fallbacks and a request that exhausts its targets.
 
