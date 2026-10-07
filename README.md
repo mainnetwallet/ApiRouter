@@ -1,3 +1,13 @@
+## CLI Guides
+
+- [All client protocols](docs/clients/CLIENTS.md)
+- [Claude Code](docs/clients/CLAUDE_CODE.md)
+- [Codex](docs/clients/CODEX.md)
+- [OpenCode](docs/clients/OPENCODE.md)
+- [Qwen Code](docs/clients/QWEN_CODE.md)
+- [OpenAI-compatible clients](docs/clients/GENERIC_OPENAI.md)
+- [Other clients](docs/clients/OTHER_CLIENTS.md)
+
 # MultiAI Router
 
 Multi-provider AI gateway for routing requests across configured AI providers, models, and API keys with health tracking, priority routing, sticky sessions, automatic fallback, and a React control panel.
@@ -238,16 +248,6 @@ The control-panel API is authenticated with `MULTIAI_ROUTER_API_KEYS` when gatew
 | Qwen Code | `/v1/chat/completions` |
 | OpenAI SDK / compatible clients | `/v1/chat/completions` |
 | Gemini clients | `/v1beta/models/{model}:generateContent` |
-
-### CLI Guides
-
-- [All client protocols](docs/clients/CLIENTS.md)
-- [Claude Code](docs/clients/CLAUDE_CODE.md)
-- [Codex](docs/clients/CODEX.md)
-- [OpenCode](docs/clients/OPENCODE.md)
-- [Qwen Code](docs/clients/QWEN_CODE.md)
-- [OpenAI-compatible clients](docs/clients/GENERIC_OPENAI.md)
-- [Other clients](docs/clients/OTHER_CLIENTS.md)
 
 ## Control Panel
 
