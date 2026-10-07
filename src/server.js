@@ -28,6 +28,7 @@ import { createStaticHandler } from "./static-files.js";
 import { createDevUiProxy, isReservedWhenDecoded } from "./dev-proxy.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, routeOrderByPool } from "./routing-plan.js";
+import { ManualSelection } from "./manual-selection.js";
 import { selectPool } from "./vision.js";
 import {
   bridgeProtocol,
@@ -83,6 +84,10 @@ const textTargets = buildTargets(config.providers);
 const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
 // Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
 const targets = [...textTargets, ...visionTargets];
+
+// Operator-chosen model order (panel page "Manual Order"). Empty by default, in which
+// case routing is exactly what it was before.
+const manualSelection = new ManualSelection();
 // Which pools each configured model id belongs to. Static for the process
 // lifetime (it comes from the environment), so it is built once.
 const modelCapabilities = modelPoolIndex(config);
@@ -548,13 +553,15 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "chat"
       ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true, sessionId: sessionInfo.id }
       : { sessionId: sessionInfo.id };
-  // Sticky (valid TTL) -> Priority -> Provider -> Key -> Models -> next Key ->
+  // Manual order -> Sticky (valid TTL) -> Priority -> Provider -> Key -> Models -> next Key ->
   // next Provider, built from this request's own pool only. A pinned request is strict and never
   // gets a priority phase.
   const routePlan = buildRoutePlan({
     targets: selection.selected,
     requestedModel,
     priority: pinned.pinned ? [] : (config.priority?.[pool] ?? []),
+    // The operator's manual order leads everything; a pin is strict and ignores it.
+    manual: pinned.pinned ? [] : manualSelection.get(pool),
     // Sticky is a first phase, only while its TTL is valid; a pin is strict.
     stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
   });
@@ -1164,6 +1171,7 @@ const handleApi = createApi({
   health: healthRegistry,
   requestLog,
   monitor,
+  manualSelection,
   refreshHealth: () => refreshAllHealth(targets, trackedCheckTargetHealth)
 });
 
@@ -1220,7 +1228,7 @@ async function handleRequest(req, res) {
     // position they will occupy once eligible, so the panel can still show them
     // instead of having them silently disappear.
     const row = (target, rank) => ({ rank, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols });
-    const fullOrder = routeOrderByPool(targets, config.priority, () => true);
+    const fullOrder = routeOrderByPool(targets, config.priority, () => true, manualSelection.all());
     const ranked = [];
     const coolingTargets = [];
     fullOrder.forEach((target, index) => {
@@ -1257,7 +1265,7 @@ async function handleRequest(req, res) {
     // created_at, has_more...) so Claude Desktop / Claude Code discovery accepts it.
     const seen = new Set();
     const data = [];
-    for (const target of routeOrderByPool(targets, config.priority, () => true)) {
+    for (const target of routeOrderByPool(targets, config.priority, () => true, manualSelection.all())) {
       if (seen.has(target.model)) continue;
       seen.add(target.model);
       data.push({ type: "model", id: target.model, display_name: target.model, created_at: "2026-01-01T00:00:00Z", object: "model", provider: target.provider });

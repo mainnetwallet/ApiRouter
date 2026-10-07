@@ -43,7 +43,7 @@ function describeCandidate(target, health, { rank = null, available, status, pha
   };
 }
 
-export function describeRouting({ targets = [], config, health, protocol, model = "", stickyTargetId = null, now = Date.now(), pool = "text" } = {}) {
+export function describeRouting({ targets = [], config, health, protocol, model = "", stickyTargetId = null, now = Date.now(), pool = "text", manual = [] } = {}) {
   const selection = selectTargetsForProtocol(targets, protocol, model);
   const { compatible, exact, selected, modelMatched } = selection;
   const bridged = BRIDGED_PROTOCOLS.has(protocol);
@@ -53,7 +53,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
   // Provider -> Key -> Models. Health only decides eligibility here, exactly as
   // it does when the plan is walked; it never reorders the plan.
   const priority = config?.priority?.[pool] ?? [];
-  const plan = buildRoutePlan({ targets: selected, requestedModel: model, priority, stickyTargetId });
+  const plan = buildRoutePlan({ targets: selected, requestedModel: model, priority, manual, stickyTargetId });
   const eligible = selected.filter((target) => health.isAvailable(target, now));
   const rankedIds = new Set(eligible.map((target) => health.key(target)));
   const ranked = eligible;

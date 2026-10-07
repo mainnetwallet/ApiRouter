@@ -17,6 +17,7 @@ const Models = lazy(() => import("./pages/Models.jsx"));
 const HealthMonitor = lazy(() => import("./pages/HealthMonitor.jsx"));
 const RouterControl = lazy(() => import("./pages/RouterControl.jsx"));
 const Fallback = lazy(() => import("./pages/Fallback.jsx"));
+const ManualOrder = lazy(() => import("./pages/ManualOrder.jsx"));
 const Playground = lazy(() => import("./pages/Playground.jsx"));
 const Requests = lazy(() => import("./pages/Requests.jsx"));
 const LiveLogs = lazy(() => import("./pages/LiveLogs.jsx"));
@@ -42,6 +43,8 @@ export const ROUTES = [
     description: "How the gateway resolves a request to a target" },
   { path: "/fallback", label: "Fallback", icon: "layers", group: "Operate", element: Fallback,
     description: "The ordered chain the router walks when a target fails" },
+  { path: "/manual-order", label: "Manual Order", icon: "sliders", group: "Operate", element: ManualOrder,
+    description: "Pick the models requests try first, in your own order (text and vision separately)" },
   { path: "/playground", label: "Playground", icon: "terminal", group: "Operate", element: Playground,
     description: "Send a real request through the gateway router" },
 

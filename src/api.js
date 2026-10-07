@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
 import { routeOrderByPool } from "./routing-plan.js";
+import { readJsonBody } from "./adapters.js";
 import { describeConfig, describeEnvironment } from "./observability/config-view.js";
 import { describeRouting } from "./observability/router-preview.js";
 import { servableProtocols } from "./observability/route-select.js";
@@ -91,7 +92,7 @@ function fail(req, res, status, message, type, details = null) {
 const MAX_LIVE_STREAMS = 50;
 const STREAM_HEARTBEAT_MS = 15_000;
 
-export function createApi({ config, targets, health, requestLog, monitor, refreshHealth }) {
+export function createApi({ config, targets, health, requestLog, monitor, refreshHealth, manualSelection = null }) {
   const liveStreams = new Set();
 
   /**
@@ -155,7 +156,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     const entries = describeAll(now);
     // The real route order per pool (priority first, then Provider -> Key ->
     // Models); health only removes cooling targets. Not a health-score sort.
-    const ranked = routeOrderByPool(targets, config.priority, (target) => health.isAvailable(target, now));
+    const ranked = routeOrderByPool(targets, config.priority, (target) => health.isAvailable(target, now), manualSelection?.all() ?? {});
 
     // Text and vision are reported separately as well as together. The combined
     // rollup answers "how is this provider doing overall"; the per-pool figures
@@ -341,6 +342,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
         pool,
         model: (searchParams.get("model") || "").trim(),
         stickyTargetId: (searchParams.get("session") || "").trim() || null, // observability text only
+        manual: manualSelection?.get(pool) ?? [],
         now
       })
     };
@@ -422,6 +424,44 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     };
   }
 
+  // --- /api/manual-selection ---------------------------------------------
+  /**
+   * The operator's manual order plus everything they can pick from. `available`
+   * lists each provider/model once per pool (keys are counted, not listed: a
+   * manual entry always covers every key of that provider/model, in key order),
+   * in the router's own deterministic order so the picker matches real routing.
+   */
+  function manualSelectionPayload() {
+    const snapshot = manualSelection?.snapshot() ?? { text: [], vision: [], updatedAt: null, persisted: true };
+    const available = { text: [], vision: [] };
+    for (const pool of ["text", "vision"]) {
+      const byId = new Map();
+      const inPool = targets.filter((target) => (target.pool ?? "text") === pool);
+      for (const target of routeOrderByPool(inPool, config.priority, () => true)) {
+        const id = `${target.provider}/${target.model}`;
+        const row = byId.get(id) ?? { id, provider: target.provider, model: target.model, keys: 0, available: 0 };
+        row.keys += 1;
+        if (health.isAvailable(target)) row.available += 1;
+        byId.set(id, row);
+      }
+      available[pool] = [...byId.values()];
+    }
+    const known = {
+      text: new Set(available.text.map((row) => row.id)),
+      vision: new Set(available.vision.map((row) => row.id))
+    };
+    return {
+      ...snapshot,
+      // Saved entries that no longer match a configured target (a removed key or
+      // model). They are kept, so a temporarily missing key does not erase the order.
+      unmatched: {
+        text: snapshot.text.filter((id) => !known.text.has(id)),
+        vision: snapshot.vision.filter((id) => !known.vision.has(id))
+      },
+      available
+    };
+  }
+
   // --- dispatcher --------------------------------------------------------
   async function handleApi(req, res, pathname, searchParams) {
     const now = Date.now();
@@ -439,6 +479,20 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
         return sendJson(req, res, 409, { error: { message: result.reason, type: "conflict" }, ...result });
       }
       return sendJson(req, res, 200, { ok: true, cycle: result, health: healthPayload(Date.now()) });
+    }
+
+    if (pathname === "/api/manual-selection" && req.method === "GET") {
+      return sendJson(req, res, 200, manualSelectionPayload());
+    }
+
+    if (pathname === "/api/manual-selection" && req.method === "PUT") {
+      if (!manualSelection) return fail(req, res, 503, "Manual selection is not available", "unavailable");
+      let body;
+      try { body = await readJsonBody(req, { maxBytes: 64 * 1024 }); }
+      catch (error) { return fail(req, res, error.status || 400, error.message, "invalid_request"); }
+      try { manualSelection.set(body); }
+      catch (error) { return fail(req, res, error.status || 400, error.message, "invalid_request"); }
+      return sendJson(req, res, 200, manualSelectionPayload());
     }
 
     if (pathname === "/api/providers" && req.method === "GET") {
