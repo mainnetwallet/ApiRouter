@@ -1,5 +1,6 @@
 import { providerProtocols } from "./adapters.js";
 import { readPriority } from "./routing-plan.js";
+import { buildTargetId } from "./health.js";
 
 const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529];
 
@@ -100,7 +101,7 @@ export function buildTargets(providers, pool = "text") {
         const baseUrl = Array.isArray(provider.baseUrls) ? provider.baseUrls[keyIndex] : provider.baseUrl;
         if (!baseUrl) continue;
         targets.push({
-          ...(pool === VISION_POOL ? { id: `vision:${providerId}:${model}:key-${keyIndex}`, pool: VISION_POOL } : {}),
+          ...(pool === VISION_POOL ? { id: buildTargetId({ provider: providerId, model, keyIndex, pool: VISION_POOL }), pool: VISION_POOL } : {}),
           provider: providerId,
           model,
           baseUrl,

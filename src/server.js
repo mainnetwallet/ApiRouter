@@ -182,6 +182,20 @@ export async function* guardUpstreamStream(webStream, { idleMs = 0, clientSignal
 }
 
 /**
+ * Buffer a whole upstream body under the same post-header inactivity bound a
+ * streamed body gets. The attempt timer only covers time-to-headers, so a bare
+ * `arrayBuffer()` / `json()` on a provider that answers `200` and then goes
+ * quiet was cut off only by the HTTP client's own 5 minute default, ignoring
+ * the configured timeout. Failures carry the same `streamCause` tag.
+ */
+export async function readUpstreamBody(webStream, { idleMs = 0, clientSignal = null } = {}) {
+  if (!webStream) return Buffer.alloc(0);
+  const chunks = [];
+  for await (const chunk of guardUpstreamStream(webStream, { idleMs, clientSignal })) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+/**
  * Health probes are provider-aware (see src/health-checks.js) and capped well
  * below the request timeout so a single slow provider cannot stall a cycle.
  */
@@ -822,7 +836,10 @@ async function proxy(req, res, protocol, pathname) {
       if (!wantsStream) {
         let converted;
         try {
-          const upstreamJson = await result.upstream.json();
+          const upstreamJson = JSON.parse(new TextDecoder().decode(await readUpstreamBody(result.upstream.body, {
+            idleMs: config.streamIdleTimeoutMs,
+            clientSignal: clientGone.signal
+          })));
           converted = bridgeKind === "codex"
             ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
             : bridgeKind === "chat"
@@ -838,7 +855,11 @@ async function proxy(req, res, protocol, pathname) {
           // cooldown for a healthy target.
           if (error?.errorType === INVALID_TOOL_ARGUMENTS) {
             commit(false, { status: error.status || 400, skipCooldown: true, reason: sanitizeMessage(error.message) });
+            // The log carries what the client was actually answered, not the
+            // upstream's 200: a failed row filed as 200 is invisible to the
+            // status filter and lands in the "http 200" failure bucket.
             record("failed", {
+              httpStatus: clientAborted() ? 499 : (error.status || 400),
               errorType: error.errorType,
               errorMessage: sanitizeMessage(error.message) || "Tool call arguments could not be translated"
             });
@@ -850,6 +871,7 @@ async function proxy(req, res, protocol, pathname) {
           // the target instead of recording it healthy.
           commit(false, clientAborted() ? { clientAborted: true } : { status: 502 });
           record("failed", {
+            httpStatus: clientAborted() ? 499 : 502,
             errorType: clientAborted() ? "client_aborted" : "upstream_error",
             errorMessage: sanitizeMessage(error?.message) || "Upstream response could not be read"
           });
@@ -940,7 +962,10 @@ async function proxy(req, res, protocol, pathname) {
       declaredLength <= MAX_INSPECT_BYTES
     ) {
       try {
-        const raw = Buffer.from(await result.upstream.arrayBuffer());
+        const raw = await readUpstreamBody(result.upstream.body, {
+          idleMs: config.streamIdleTimeoutMs,
+          clientSignal: clientGone.signal
+        });
         // The body is consumed now, so it must be forwarded from this buffer even
         // when it is not valid JSON; only the usage lookup may fail.
         buffered = raw;
@@ -984,6 +1009,7 @@ async function proxy(req, res, protocol, pathname) {
       const aborted = clientAborted();
       commit(false, aborted ? { clientAborted: true } : { status: 502 });
       record("failed", {
+        httpStatus: aborted ? 499 : 502,
         errorType: aborted ? "client_aborted" : "upstream_error",
         errorMessage: sanitizeMessage(bodyReadError?.message) || "Upstream response could not be read"
       });

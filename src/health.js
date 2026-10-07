@@ -22,6 +22,18 @@ export const targetId = (target) =>
   target.id || `${target.provider}:${target.model}:key-${target.keyIndex}`;
 
 /**
+ * The explicit health id of a target in `pool`. Text targets get theirs from
+ * `targetId` (no `id` field); a vision target carries this one so the two pools
+ * never share a record. Anything that derives a target from another with a
+ * different model (a custom-model pin) must rebuild the id with this, or the
+ * copy would share the original's health record.
+ */
+export function buildTargetId({ provider, model, keyIndex, pool = "text" }) {
+  const base = `${provider}:${model}:key-${keyIndex}`;
+  return pool === "text" ? base : `${pool}:${base}`;
+}
+
+/**
  * Time-aware state: a failed target that is still cooling down reads as
  * `cooldown`. Routing never consults this — it uses `isAvailable` — so this
  * only affects reporting.
