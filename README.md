@@ -61,6 +61,8 @@ HTTP `400` also falls back, but a generic 400 (unsupported parameter, schema qui
 
 ## Routing
 
+Order of attempts for each request: **sticky → priority → fallback**. A target is never called twice in one request.
+
 ### Priority
 
 ```env
@@ -68,24 +70,22 @@ TEXT_PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3
 VISION_PRIORITY_MODELS=gemini/V1,groq/V2
 ```
 
-- Entries are tried in exactly this order; the first success ends the request.
-- Priority is **model-centric**: all eligible keys of an entry are tried in key order before moving to the next entry.
-- When every entry and key has failed or cooled down, normal fallback starts.
-- Empty/unset means no priority phase. An empty `VISION_PRIORITY_MODELS` inherits `TEXT_PRIORITY_MODELS`.
-- Entries only match their own pool: no text-to-vision or vision-to-text fallback.
-- Pinned requests ignore priority and sticky, and a pinned success is not remembered. If the client names a model, only priority entries of that model apply.
+- Models are tried in the listed order; the first success ends the request.
+- For each model, all its keys are tried (in key order) before moving to the next model.
+- If all fail, normal fallback starts. Empty or unset = no priority.
+- Empty `VISION_PRIORITY_MODELS` uses `TEXT_PRIORITY_MODELS`. Text and vision never fall back to each other.
+- Pinned requests ignore priority. If the client names a model, only priority entries of that model apply.
 
 ### Sticky session
 
-- A session's last successful target (exact provider + key + model) is tried first, for 20 minutes, refreshed on each success.
-- If it fails, the other keys of the same provider/model are tried, then the priority entries **after** it (priority `A,B,C,D` with sticky on `B` → `B keys → C → D`, then fallback; `A` is not revisited).
-- Sessions are identified by `X-Multi-AI-Session-ID` (reuse the `x-multi-ai-session-id` response header). Clients that send none (Claude Code, Codex, OpenAI SDKs) share one default session per protocol and pool.
-- Text and vision keep separate sticky targets; a new session always starts at the first priority entry; a target is never called twice in one request.
-- Gemini thought signatures are scoped to the same session. A tool call with invalid JSON arguments is refused for a Gemini target (`400 invalid_tool_arguments`) so another target can carry it. See `Architecture.md` → *Tool calls and thought signatures*.
+- The last successful target (provider + key + model) is tried first for 20 minutes.
+- If it fails, the other keys of that model are tried, then the priority models listed after it.
+- Session = `X-Multi-AI-Session-ID` header. Clients without it (Claude Code, Codex, OpenAI SDKs) share one default session per protocol.
+- Gemini thought signatures stay inside their session. Invalid tool-call JSON is refused for Gemini (`400 invalid_tool_arguments`). See `Architecture.md`.
 
 ### Normal fallback
 
-Key-scoped: **Provider → Key → Models → next Key → next Provider**. Each key restarts at its provider's first model; targets already tried are skipped. See `Architecture.md`.
+**Provider → Key → Models → next Key → next Provider.** Each key restarts at its provider's first model; targets already tried are skipped. See `Architecture.md`.
 
 ## Endpoints
 
