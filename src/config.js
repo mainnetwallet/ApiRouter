@@ -164,6 +164,12 @@ export function loadConfig(env = process.env) {
     remoteImageAllowPrivateNetwork: String(env.REMOTE_IMAGE_ALLOW_PRIVATE_NETWORK || "").trim().toLowerCase() === "true",
     remoteImageMaxBytes: readNumber(env, "REMOTE_IMAGE_MAX_BYTES", 20 * 1024 * 1024, { min: 1, expected: "a positive integer" }),
     remoteImageTimeoutMs: readNumber(env, "REMOTE_IMAGE_TIMEOUT_MS", 15000, { min: 1, expected: "a positive integer" }),
+    remoteImages: {
+      allowHttp: String(env.REMOTE_IMAGE_ALLOW_HTTP || "").trim().toLowerCase() === "true",
+      allowPrivateNetwork: String(env.REMOTE_IMAGE_ALLOW_PRIVATE_NETWORK || "").trim().toLowerCase() === "true",
+      maxBytes: readNumber(env, "REMOTE_IMAGE_MAX_BYTES", 20 * 1024 * 1024, { min: 1, expected: "a positive integer" }),
+      timeoutMs: readNumber(env, "REMOTE_IMAGE_TIMEOUT_MS", 15000, { min: 1, expected: "a positive integer" })
+    },
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,
