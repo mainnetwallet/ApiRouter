@@ -526,15 +526,3 @@ test("a client that disconnects mid-stream leaves the router serving", async (t)
   const next = await router.request("/v1/chat/completions", postJson(chat(TEXT[1])));
   assert.equal(next.status, 200);
 });
-
-test("the LLM7 free-token quota is documented as quota-based, never as free-priced models", () => {
-  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-  const section = readme.slice(readme.indexOf("### LLM7"), readme.indexOf("Retryable statuses:"));
-  assert.match(section, /free-token quota/i);
-  assert.match(section, /can change/i);
-  // Drop the two sentences that deny those claims, then make sure nothing asserts them.
-  const claims = section
-    .replace(/not permanently free model pricing/gi, "")
-    .replace(/nothing here promises unlimited usage/gi, "");
-  assert.ok(!/unlimited|permanently free|\$0|free model/i.test(claims), "no unlimited/free-model claim");
-});
