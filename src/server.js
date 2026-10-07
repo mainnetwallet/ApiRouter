@@ -19,6 +19,7 @@ import {
 } from "./health.js";
 import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
 import { fetchUpstream, isRedirectStatus } from "./upstream-fetch.js";
+import { guardUpstreamStream, readBoundedBody, bufferUpTo, isUpstreamFault, MAX_ERROR_BODY_BYTES } from "./upstream-body.js";
 import { ClientAbortError, RouteSession, SessionStore, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream, parseGeminiPath } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
@@ -137,62 +138,19 @@ function toTimeoutError(message) {
 }
 
 /**
- * Read an upstream response body with a post-header inactivity bound.
- *
- * `fetch` resolves on headers, so only time-to-first-byte is bounded by the
- * connect timeout: without this a provider that answers 200 and then stalls
- * holds the client connection open forever. Each chunk resets the timer. Every
- * read failure is tagged with its cause ("client" when the client's own signal
- * aborted it, "upstream" otherwise) so the caller can cool a dead provider
- * without charging a provider for a client that walked away.
+ * Post-header body bounds (idle gap, absolute deadline, buffered size) live in
+ * src/upstream-body.js. `fetch` resolves on headers, so the attempt timer only
+ * bounds time-to-first-response; everything after is bounded there.
  */
-export async function* guardUpstreamStream(webStream, { idleMs = 0, clientSignal = null } = {}) {
-  const reader = webStream.getReader();
-  try {
-    while (true) {
-      let timer = null;
-      let chunk;
-      try {
-        chunk = idleMs > 0
-          ? await Promise.race([
-            reader.read(),
-            new Promise((_, reject) => {
-              timer = setTimeout(() => {
-                const error = new Error("Upstream stream idle timeout");
-                error.code = "STREAM_IDLE_TIMEOUT";
-                reject(error);
-              }, idleMs);
-            })
-          ])
-          : await reader.read();
-      } catch (error) {
-        error.streamCause = error?.code !== "STREAM_IDLE_TIMEOUT" && clientSignal?.aborted ? "client" : "upstream";
-        throw error;
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-      if (chunk.done) return;
-      yield chunk.value;
-    }
-  } finally {
-    // Cancel the upstream reader so a timeout or client abort tears the
-    // provider connection down rather than leaving it draining in the vacuum.
-    try { await reader.cancel(); } catch { /* already closed */ }
-  }
-}
+export { guardUpstreamStream };
 
 /**
- * Buffer a whole upstream body under the same post-header inactivity bound a
- * streamed body gets. The attempt timer only covers time-to-headers, so a bare
- * `arrayBuffer()` / `json()` on a provider that answers `200` and then goes
- * quiet was cut off only by the HTTP client's own 5 minute default, ignoring
- * the configured timeout. Failures carry the same `streamCause` tag.
+ * Buffer a whole upstream body under the idle bound, the attempt's absolute
+ * deadline and a byte ceiling. Failures carry the `streamCause` tag.
  */
-export async function readUpstreamBody(webStream, { idleMs = 0, clientSignal = null } = {}) {
-  if (!webStream) return Buffer.alloc(0);
-  const chunks = [];
-  for await (const chunk of guardUpstreamStream(webStream, { idleMs, clientSignal })) chunks.push(chunk);
-  return Buffer.concat(chunks);
+export async function readUpstreamBody(webStream, { idleMs = 0, deadlineAt = null, clientSignal = null, maxBytes = config.maxUpstreamBodyBytes } = {}) {
+  const { body } = await readBoundedBody(webStream, { idleMs, deadlineAt, clientSignal, maxBytes });
+  return body;
 }
 
 /**
@@ -656,6 +614,13 @@ async function proxy(req, res, protocol, pathname) {
         // instead of only noticing between steps that nobody is listening.
         const signal = AbortSignal.any([controller.signal, clientGone.signal]);
         const attemptStartedAt = Date.now();
+        let bodyBuf = null;
+        // Absolute deadlines, anchored at the attempt's start. A non-streamed
+        // attempt owns REQUEST_TIMEOUT_MS end to end (headers and body). A
+        // stream may legitimately outlive that, so it has its own much larger
+        // ceiling (STREAM_TOTAL_TIMEOUT_MS, 0 = none) on top of the idle gap.
+        const attemptDeadlineAt = attemptStartedAt + config.timeoutMs;
+        const streamDeadlineAt = config.streamTotalTimeoutMs > 0 ? attemptStartedAt + config.streamTotalTimeoutMs : null;
         // Every invoke is a new attempt with its own id, even when the very same
         // provider/model/key was called a moment ago (or by an earlier request).
         const attemptId = startAttemptEvent(liveSeq, {
@@ -704,8 +669,28 @@ async function proxy(req, res, protocol, pathname) {
           // fetchUpstream never follows a redirect: the target's credential
           // must not be replayed to a host the operator did not configure.
           const upstream = await fetchUpstream(request.url, { ...request.options, signal });
+          // Headers are in: the connect/TTFB timer has done its job. What bounds
+          // the body from here is the idle gap and the absolute deadline, not
+          // this timer, so the three limits stay independent.
+          clearTimeout(timer);
           if (!upstream.ok) {
-            const text = await upstream.text();
+            // Only the head of an error body is ever surfaced, so it is read
+            // under a hard byte cap and the rest is cancelled. A failure to
+            // read it must not hide the status the provider already sent; only
+            // a client that left ends the attempt.
+            let text = "";
+            try {
+              ({ body: bodyBuf } = await readBoundedBody(upstream.body, {
+                maxBytes: MAX_ERROR_BODY_BYTES,
+                overflow: "truncate",
+                idleMs: config.streamIdleTimeoutMs,
+                deadlineAt: attemptStartedAt + config.timeoutMs,
+                clientSignal: clientGone.signal
+              }));
+              text = bodyBuf.toString("utf8");
+            } catch (readError) {
+              if (clientAborted()) throw readError;
+            }
             const error = new Error(text.slice(0, 2000) || ("Upstream HTTP " + upstream.status));
             error.status = upstream.status;
             // A redirect the gateway refused to follow means this configured
@@ -735,12 +720,12 @@ async function proxy(req, res, protocol, pathname) {
             // let the stream terminal settle the attempt: a translated stream
             // that dies mid-body must be a FAILED attempt, not an accepted one.
             settleStreamAttempt = attempt;
-            return { upstream, target, upstreamProtocol, translated };
+            return { upstream, target, upstreamProtocol, translated, deadlineAt: streamDeadlineAt };
           }
           // The successful attempt is recorded too — otherwise the log would
           // show a chain of failures with no terminal success.
           attempt(true, upstream.status, null);
-          return { upstream, target, upstreamProtocol, translated };
+          return { upstream, target, upstreamProtocol, translated, deadlineAt: attemptDeadlineAt };
         } catch (error) {
           if (isAbortError(error)) {
             // A client disconnect is not a provider fault: stop the walk without
@@ -838,6 +823,7 @@ async function proxy(req, res, protocol, pathname) {
         try {
           const upstreamJson = JSON.parse(new TextDecoder().decode(await readUpstreamBody(result.upstream.body, {
             idleMs: config.streamIdleTimeoutMs,
+            deadlineAt: result.deadlineAt,
             clientSignal: clientGone.signal
           })));
           converted = bridgeKind === "codex"
@@ -895,6 +881,7 @@ async function proxy(req, res, protocol, pathname) {
       try {
         const upstreamEvents = sseData(guardUpstreamStream(result.upstream.body, {
           idleMs: config.streamIdleTimeoutMs,
+          deadlineAt: result.deadlineAt,
           clientSignal: clientGone.signal
         }));
         const events = bridgeKind === "codex"
@@ -910,7 +897,7 @@ async function proxy(req, res, protocol, pathname) {
         streamError = error;
         // An upstream fault is this provider's failure, so the target is
         // cooled. A client that left is not the provider's fault.
-        streamOutcome = (error?.streamCause === "upstream" || error?.code === "STREAM_IDLE_TIMEOUT" || !clientAborted())
+        streamOutcome = (error?.streamCause === "upstream" || isUpstreamFault(error) || !clientAborted())
           ? "truncated"
           : "aborted";
       }
@@ -948,28 +935,40 @@ async function proxy(req, res, protocol, pathname) {
     }
 
     const contentType = result.upstream.headers.get("content-type") || "application/json";
-    const declaredLength = Number(result.upstream.headers.get("content-length"));
+    // Content-Length is only a hint that lets an obviously large body skip
+    // inspection; it is never the limit. A missing, wrong or chunked length is
+    // held to the same byte ceiling, enforced on the bytes actually read.
+    const lengthHeader = result.upstream.headers.get("content-length");
+    const declaredLength = lengthHeader === null ? Number.NaN : Number(lengthHeader);
     let usage = { tokens: null, finishReason: null };
     let buffered = null;
+    // When inspection read past the ceiling, the bytes already consumed plus
+    // the rest of the body, still streamed (with backpressure) to the client.
+    let replay = null;
     let bodyReadError = null;
 
-    // Only small, explicitly-sized JSON bodies are inspected for usage. The
-    // bytes forwarded to the client are unchanged either way.
+    // Only small JSON bodies are inspected for usage. The bytes forwarded to
+    // the client are unchanged either way.
     if (
       result.upstream.body &&
       contentType.includes("application/json") &&
-      Number.isFinite(declaredLength) &&
-      declaredLength <= MAX_INSPECT_BYTES
+      !(Number.isFinite(declaredLength) && declaredLength > MAX_INSPECT_BYTES)
     ) {
       try {
-        const raw = await readUpstreamBody(result.upstream.body, {
+        const inspected = await bufferUpTo(result.upstream.body, {
+          maxBytes: MAX_INSPECT_BYTES,
           idleMs: config.streamIdleTimeoutMs,
+          deadlineAt: result.deadlineAt,
           clientSignal: clientGone.signal
         });
-        // The body is consumed now, so it must be forwarded from this buffer even
-        // when it is not valid JSON; only the usage lookup may fail.
-        buffered = raw;
-        try { usage = extractUsage(JSON.parse(raw.toString("utf8"))); } catch { /* usage stays unreported */ }
+        if (inspected.buffered) {
+          // The body is consumed now, so it must be forwarded from this buffer even
+          // when it is not valid JSON; only the usage lookup may fail.
+          buffered = inspected.buffered;
+          try { usage = extractUsage(JSON.parse(buffered.toString("utf8"))); } catch { /* usage stays unreported */ }
+        } else {
+          replay = inspected.replay;
+        }
       } catch (error) {
         // The body died after the headers said 200. Nothing has reached the
         // client yet, so this is still answerable and the target must be cooled.
@@ -1040,8 +1039,9 @@ async function proxy(req, res, protocol, pathname) {
         // when the client disconnects; the idle guard bounds the gap between
         // chunks after the headers have arrived.
         await pipeline(
-          Readable.from(guardUpstreamStream(result.upstream.body, {
+          Readable.from(replay ?? guardUpstreamStream(result.upstream.body, {
             idleMs: config.streamIdleTimeoutMs,
+            deadlineAt: result.deadlineAt,
             clientSignal: clientGone.signal
           })),
           res
@@ -1053,7 +1053,7 @@ async function proxy(req, res, protocol, pathname) {
       // Headers are already on the wire, so the failure cannot be reported as a
       // JSON error response. Cool the target (unless the client left) and drop
       // the connection instead.
-      const aborted = error?.streamCause !== "upstream" && error?.code !== "STREAM_IDLE_TIMEOUT" && clientAborted();
+      const aborted = error?.streamCause !== "upstream" && !isUpstreamFault(error) && clientAborted();
       settleStreamAttempt?.(
         false,
         result.upstream.status,

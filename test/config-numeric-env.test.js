@@ -170,3 +170,16 @@ test("MAX_REQUEST_BODY_BYTES caps the gateway's own buffer with a 413", async (t
   assert.equal((await big.json()).error.type, "request_too_large");
   assert.equal(upstream.apiRequests.length, 1, "the oversized body never reached the provider");
 });
+
+test("MAX_UPSTREAM_BODY_BYTES and STREAM_TOTAL_TIMEOUT_MS are validated; 0 disables each", () => {
+  assert.equal(loadConfig({}).maxUpstreamBodyBytes, 32 * 1024 * 1024);
+  assert.equal(loadConfig({ MAX_UPSTREAM_BODY_BYTES: "0" }).maxUpstreamBodyBytes, 0);
+  assert.equal(loadConfig({ MAX_UPSTREAM_BODY_BYTES: "1024" }).maxUpstreamBodyBytes, 1024);
+  assert.equal(loadConfig({}).streamTotalTimeoutMs, 30 * 60 * 1000);
+  assert.equal(loadConfig({ STREAM_TOTAL_TIMEOUT_MS: "0" }).streamTotalTimeoutMs, 0);
+  assert.equal(loadConfig({ STREAM_TOTAL_TIMEOUT_MS: "900" }).streamTotalTimeoutMs, 900);
+  for (const bad of ["abc", "-1", "1.5", "12mb"]) {
+    assert.throws(() => loadConfig({ MAX_UPSTREAM_BODY_BYTES: bad }), /Invalid MAX_UPSTREAM_BODY_BYTES/, bad);
+    assert.throws(() => loadConfig({ STREAM_TOTAL_TIMEOUT_MS: bad }), /Invalid STREAM_TOTAL_TIMEOUT_MS/, bad);
+  }
+});
