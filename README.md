@@ -1,3 +1,7 @@
+# MultiAI Router
+
+Multi-provider AI gateway with priority routing, sticky sessions, automatic fallback, health tracking and a React control panel.
+
 ## CLI Guides
 
 - [All client protocols](docs/clients/CLIENTS.md)
@@ -7,10 +11,6 @@
 - [Qwen Code](docs/clients/QWEN_CODE.md)
 - [OpenAI-compatible clients](docs/clients/GENERIC_OPENAI.md)
 - [Other clients](docs/clients/OTHER_CLIENTS.md)
-
-# MultiAI Router
-
-Multi-provider AI gateway for routing requests across configured AI providers, models, and API keys with health tracking, priority routing, sticky sessions, automatic fallback, and a React control panel.
 
 ## Features
 
