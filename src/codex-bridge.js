@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
-import { invalidToolArguments, markStreamFailure } from "./bridge-errors.js";
-import { splitInlineDataUrl, unsupportedImageSource } from "./image-source.js";
-import { geminiModelsUrl, openAiChatUrl } from "./upstream-url.js";
+import { geminiModelUrl } from "./gemini-url.js";
+import { UnsupportedMediaError, parseToolArguments } from "./bridge-errors.js";
+import { inlineImagePart, parseDataUrl } from "./media.js";
+import { cleanSchemaForGemini } from "./anthropic-bridge.js";
+import { rememberSignature, signatureFor, ensureCallSignatures } from "./thought-signatures.js";
 
 /**
  * Codex (OpenAI Responses) bridge.
@@ -59,23 +60,6 @@ function safeParse(text) {
   try { return JSON.parse(text); } catch { return {}; }
 }
 
-/** Gemini `functionCall.args` must be a JSON object, so the raw string is parsed
- *  exactly (or the target is refused). Empty means "no arguments". */
-function geminiToolArgs(raw) {
-  const text = typeof raw === "string" ? raw : argsString(raw);
-  if (text.trim() === "") return {};
-  try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw invalidToolArguments("a tool call's arguments are not a JSON object");
-    }
-    return parsed;
-  } catch (error) {
-    if (error?.errorType) throw error;
-    throw invalidToolArguments("a tool call's arguments are not valid JSON");
-  }
-}
-
 function inputItems(body) {
   if (typeof body?.input === "string") {
     return [{ type: "message", role: "user", content: body.input }];
@@ -87,32 +71,40 @@ function itemKind(item) {
   return item?.type || (item?.role ? "message" : "");
 }
 
-/** Plain text of a Responses content value (string or content-part array). */
+const MEDIA_PART_TYPES = new Set(["input_image", "input_file", "input_audio"]);
+const isMediaPart = (part) => Boolean(part) && typeof part === "object" && MEDIA_PART_TYPES.has(part.type);
+
+/** Plain text of a Responses content value (string or content-part array). Media parts are not text. */
 function textOf(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
     .map((part) => {
       if (typeof part === "string") return part;
-      if (part?.type === "input_image") return "[image]";
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");
 }
 
+function assertTextOnly(content, where) {
+  if (Array.isArray(content) && content.some(isMediaPart)) {
+    throw new UnsupportedMediaError(`Images or files in ${where} cannot be forwarded to the selected provider`, "unsupported_media_position");
+  }
+}
+
+/** Media parts of a content value or function output, in order. */
+function mediaPartsOf(value) {
+  if (Array.isArray(value)) return value.filter(isMediaPart);
+  return isMediaPart(value) ? [value] : [];
+}
+
 function outputText(output) {
   if (typeof output === "string") return output;
-  if (Array.isArray(output)) {
-    // An image or file inside a tool output cannot be carried as text by either
-    // bridge target; refuse it rather than flattening it away.
-    if (output.some((p) => p?.type === "input_image" || p?.type === "input_file")) {
-      throw unsupportedImageSource("an image or file inside a tool output");
-    }
-    return textOf(output);
-  }
+  if (Array.isArray(output)) return textOf(output);
   if (output && typeof output === "object") {
     if (typeof output.content === "string") return output.content;
     if (Array.isArray(output.content)) return textOf(output.content);
+    if (isMediaPart(output)) return "";
     return JSON.stringify(output);
   }
   return output == null ? "" : String(output);
@@ -126,6 +118,34 @@ function argsString(args) {
 function imageUrlOf(part) {
   const url = part?.image_url;
   return typeof url === "string" ? url : url?.url || "";
+}
+
+/** Chat Completions content part for a Responses media part. */
+function chatPartForMedia(part) {
+  if (part.type === "input_image") {
+    const url = imageUrlOf(part);
+    if (url) return { type: "image_url", image_url: { url } };
+    throw new UnsupportedMediaError("Image file references (file_id) cannot be forwarded to the selected provider", "unsupported_file_reference");
+  }
+  throw new UnsupportedMediaError(`Content part type "${part.type}" cannot be forwarded to the selected provider`, "unsupported_media");
+}
+
+/** Gemini inline part for a Responses media part. */
+function geminiPartForMedia(part, media) {
+  if (part.type === "input_image") {
+    const url = imageUrlOf(part);
+    if (url) return inlineImagePart(url, media, "image");
+    throw new UnsupportedMediaError("Image file references (file_id) cannot be forwarded to the selected provider", "unsupported_file_reference");
+  }
+  if (part.type === "input_file") {
+    const parsed = parseDataUrl(part.file_data);
+    if (parsed) return { inlineData: { mimeType: parsed.mimeType, data: parsed.data } };
+    throw new UnsupportedMediaError("File references (file_id / file_url) cannot be forwarded to the selected provider", "unsupported_file_reference");
+  }
+  if (part.type === "input_audio" && part.input_audio?.data) {
+    return { inlineData: { mimeType: `audio/${String(part.input_audio.format || "wav").toLowerCase()}`, data: part.input_audio.data } };
+  }
+  throw new UnsupportedMediaError(`Content part type "${part.type}" cannot be forwarded to the selected provider`, "unsupported_media");
 }
 
 const CUSTOM_PARAMETERS = {
@@ -200,40 +220,33 @@ export function toOpenAIChatFromResponses(body, model) {
 
     if (kind === "message") {
       if (item.role === "system" || item.role === "developer") {
+        assertTextOnly(item.content, "the system prompt");
         const text = textOf(item.content);
         if (text) system.push(text);
         continue;
       }
       if (item.role === "assistant") {
+        assertTextOnly(item.content, "an assistant turn");
         const text = textOf(item.content);
         if (text) messages.push({ role: "assistant", content: text });
         continue;
       }
       const parts = Array.isArray(item.content) ? item.content : [{ type: "input_text", text: textOf(item.content) }];
-      for (const p of parts) {
-        if (p?.type === "input_file") throw unsupportedImageSource("a Responses input_file / file_id");
-        // An input_image with no url would previously degrade to an empty text
-        // part; refuse it instead of silently dropping it.
-        if (p?.type === "input_image" && !imageUrlOf(p)) throw unsupportedImageSource("an input_image with no url");
-      }
-      const hasImage = parts.some((p) => p?.type === "input_image");
-      if (!hasImage) {
+      const mediaParts = parts.filter(isMediaPart);
+      if (mediaParts.length === 0) {
         const text = textOf(parts);
         if (text) messages.push({ role: "user", content: text });
       } else {
         messages.push({
           role: "user",
-          content: parts
-            .map((p) => p?.type === "input_image"
-              ? (imageUrlOf(p) ? { type: "image_url", image_url: { url: imageUrlOf(p) } } : null)
-              : { type: "text", text: textOf([p]) })
-            .filter(Boolean)
+          content: parts.map((p) => (isMediaPart(p) ? chatPartForMedia(p) : { type: "text", text: textOf([p]) }))
         });
       }
     } else if (kind === "function_call" || kind === "custom_tool_call") {
       const args = kind === "custom_tool_call"
         ? JSON.stringify({ input: typeof item.input === "string" ? item.input : "" })
         : argsString(item.arguments);
+      if (kind === "function_call") parseToolArguments(args, item.name);
       const call = {
         id: item.call_id || item.id,
         type: "function",
@@ -244,6 +257,11 @@ export function toOpenAIChatFromResponses(body, model) {
       else messages.push({ role: "assistant", content: "", tool_calls: [call] });
     } else if (kind === "function_call_output" || kind === "custom_tool_call_output") {
       messages.push({ role: "tool", tool_call_id: item.call_id, content: outputText(item.output) });
+      // A chat `tool` message carries text only; an image the tool returned follows as a user message.
+      const returned = mediaPartsOf(item.output);
+      if (returned.length) {
+        messages.push({ role: "user", content: [{ type: "text", text: "Image output of the tool call above:" }, ...returned.map(chatPartForMedia)] });
+      }
     }
     // reasoning items and hosted-tool calls have no chat equivalent: dropped.
   }
@@ -283,7 +301,7 @@ export function toOpenAIChatFromResponses(body, model) {
 
 // ---------------------------------------------------------- request -> Gemini
 
-export function toGeminiFromResponses(body, { sessionId = "" } = {}) {
+export function toGeminiFromResponses(body, { model = "", media = null } = {}) {
   const items = inputItems(body);
   const names = callNames(items);
   const system = [];
@@ -296,30 +314,30 @@ export function toGeminiFromResponses(body, { sessionId = "" } = {}) {
     if (last && last.role === role) last.parts.push(...parts);
     else contents.push({ role, parts });
   };
+  // Media a tool returned follows the whole run of function outputs (FC1 FC2 FR1 FR2 media).
+  let toolMedia = [];
+  const flushToolMedia = () => {
+    if (toolMedia.length) push("user", toolMedia);
+    toolMedia = [];
+  };
 
   for (const item of items) {
     const kind = itemKind(item);
+    if (kind !== "function_call_output" && kind !== "custom_tool_call_output") flushToolMedia();
 
     if (kind === "message") {
       if (item.role === "system" || item.role === "developer") {
+        assertTextOnly(item.content, "the system prompt");
         const text = textOf(item.content);
         if (text) system.push(text);
         continue;
       }
+      if (item.role === "assistant") assertTextOnly(item.content, "an assistant turn");
       const parts = [];
       const content = Array.isArray(item.content) ? item.content : [{ type: "input_text", text: textOf(item.content) }];
       for (const p of content) {
-        if (p?.type === "input_image") {
-          const inline = splitInlineDataUrl(imageUrlOf(p));
-          if (!inline) {
-            // Gemini takes the image bytes; the gateway will not fetch a remote
-            // URL, so the request is refused rather than answered 200 without
-            // the image.
-            throw unsupportedImageSource("an input_image that is not a base64 data URL");
-          }
-          parts.push({ inlineData: inline });
-        } else if (p?.type === "input_file") {
-          throw unsupportedImageSource("a Responses input_file / file_id");
+        if (isMediaPart(p)) {
+          parts.push(geminiPartForMedia(p, media));
         } else {
           const text = textOf([p]);
           if (text) parts.push({ text });
@@ -330,20 +348,24 @@ export function toGeminiFromResponses(body, { sessionId = "" } = {}) {
       const callId = item.call_id || item.id;
       const args = kind === "custom_tool_call"
         ? { input: typeof item.input === "string" ? item.input : "" }
-        : geminiToolArgs(item.arguments);
+        : parseToolArguments(argsString(item.arguments), item.name);
       const part = { functionCall: { name: item.name, args } };
-      const sig = signatureFor(callId, sessionId);
+      const sig = signatureFor(callId);
       if (sig) part.thoughtSignature = sig;
       push("model", [part]);
     } else if (kind === "function_call_output" || kind === "custom_tool_call_output") {
+      const returned = mediaPartsOf(item.output);
+      for (const part of returned) toolMedia.push(geminiPartForMedia(part, media));
       push("user", [{
         functionResponse: {
           name: names.get(item.call_id) || "tool",
-          response: { output: outputText(item.output) }
+          response: { output: outputText(item.output) || (returned.length ? "[the tool returned an attachment, included below]" : "") }
         }
       }]);
     }
   }
+  flushToolMedia();
+  ensureCallSignatures(contents, model);
 
   const payload = { contents };
   const generationConfig = {};
@@ -381,8 +403,13 @@ export function toGeminiFromResponses(body, { sessionId = "" } = {}) {
   return payload;
 }
 
+function joinUrl(baseUrl, suffix) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  return base + "/" + String(suffix || "").replace(/^\/+/, "");
+}
+
 /** Builds the upstream fetch request for a translated (non-Responses) target. */
-export function buildCodexRequest(target, upstreamProtocol, body, incomingHeaders = {}, { sessionId = "" } = {}) {
+export function buildCodexRequest(target, upstreamProtocol, body, incomingHeaders = {}, { media = null } = {}) {
   const headers = { "content-type": "application/json" };
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
@@ -391,14 +418,14 @@ export function buildCodexRequest(target, upstreamProtocol, body, incomingHeader
   if (upstreamProtocol === "openai-chat") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers.authorization = "Bearer " + target.apiKey;
-    const url = openAiChatUrl(base);
+    const url = joinUrl(base, base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions");
     return { url, options: { method: "POST", headers, body: JSON.stringify(toOpenAIChatFromResponses(body, target.model)) } };
   }
   if (upstreamProtocol === "gemini") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
-    const url = geminiModelsUrl(base, target.model, { stream });
-    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromResponses(body, { sessionId })) } };
+    const url = geminiModelUrl(base, target.model, { stream });
+    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromResponses(body, { model: target.model, media })) } };
   }
   throw new Error("Unsupported Codex bridge protocol: " + upstreamProtocol);
 }
@@ -491,7 +518,7 @@ export function geminiJsonToResponses(json, model, ctx = {}) {
     } else if (part.functionCall) {
       flush();
       const callId = newId("call");
-      rememberSignature(callId, part.thoughtSignature, ctx.sessionId);
+      rememberSignature(callId, part.thoughtSignature);
       const name = part.functionCall.name;
       output.push(toolCallItem(callId, name, part.functionCall.args ?? {}, custom.has(name)));
     }
@@ -521,10 +548,8 @@ const sse = (type, data) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 
 /**
  * Converts an upstream stream (OpenAI-chat or Gemini SSE) into Responses SSE.
- * `events` is an async iterable of raw `data:` strings. An upstream failure
- * after the headers were sent still emits a `response.failed` event, then
- * re-throws so the caller can file the request as a failed (truncated) stream
- * instead of a success.
+ * `events` is an async iterable of raw `data:` strings. Never throws: an
+ * upstream failure after headers were sent becomes a `response.failed` event.
  */
 export async function* streamToResponses(upstreamProtocol, events, model, ctx = {}) {
   const customTools = ctx.customTools || new Set();
@@ -625,7 +650,7 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
             yield* writeText(part.text);
           } else if (part.functionCall) {
             const callId = newId("call");
-            rememberSignature(callId, part.thoughtSignature, ctx.sessionId);
+            rememberSignature(callId, part.thoughtSignature);
             const tool = yield* startTool(`g${nextIndex}`, callId, part.functionCall.name);
             yield* toolArgs(tool, JSON.stringify(part.functionCall.args ?? {}));
             yield* finishTool(tool);
@@ -654,16 +679,13 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
       if (choice.finish_reason) finish = choice.finish_reason === "length" ? "length" : "stop";
     }
   } catch (error) {
-    // Deliver the terminal `response.failed` event, then surface the failure so
-    // `pipeline()` rejects: the request is recorded as truncated, the target is
-    // not marked healthy, and no sticky is saved.
     yield ev("response.failed", {
       response: snapshot("failed", {
         output: output.filter(Boolean),
         error: { code: "upstream_error", message: String(error?.message || "Upstream stream failed").slice(0, 500) }
       })
     });
-    throw markStreamFailure(error);
+    return;
   }
 
   yield* closeText();

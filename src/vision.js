@@ -12,37 +12,37 @@
  * `no_vision_route`; it is never sent to the normal text pool.
  */
 
-/**
- * Is an inline/file media blob an image?
- *
- * Gemini's `FileData.mimeType` is optional (files uploaded through the File API
- * carry only a `fileUri`), and some clients send `application/octet-stream` for
- * a blob they know to be an image. Both are treated as images so the request is
- * routed to the vision pool rather than a text-only target — the pools must
- * never cross. A MIME the sender *did* declare as non-image (audio, video,
- * pdf, text) stays text, which is the existing behaviour.
- */
-function mediaIsImage(data) {
-  if (!data || typeof data !== "object") return false;
-  if (Object.keys(data).length === 0) return false;
-  const mime = data.mimeType ?? data.mime_type;
-  if (mime === undefined || mime === null || String(mime).trim() === "") return true;
-  const value = String(mime).toLowerCase().trim();
-  if (value.startsWith("image/")) return true;
-  return value === "application/octet-stream" || value === "binary/octet-stream";
-}
+/** Content-part types that carry binary or remote media in the supported protocols. */
+const MEDIA_PART_TYPES = new Set([
+  // Anthropic Messages
+  "image", "document",
+  // Chat Completions
+  "image_url", "input_audio", "file", "video_url", "audio_url",
+  // Responses
+  "input_image", "input_file", "input_audio"
+]);
 
-/** Is this one content part (block / item / Gemini part) an image? */
+/** Gemini data parts: inline bytes or a file reference. */
+const GEMINI_DATA_KEYS = ["inlineData", "inline_data", "fileData", "file_data"];
+
+const isTextMime = (value) => typeof value === "string" && value.toLowerCase().startsWith("text/");
+
+/**
+ * Is this one content part (block / item / Gemini part) multimodal media?
+ *
+ * "Media" is deliberately wider than "image": a PDF, an audio clip, a video, a
+ * file reference or a Gemini `fileData` whose MIME type is missing are not text
+ * either, and a text-only model cannot read any of them. Routing such a request
+ * to the text pool would either fail upstream or, worse, answer as if the
+ * attachment were not there, so every one of them selects the vision
+ * (multimodal) pool.
+ */
 function partIsImage(part) {
   if (!part || typeof part !== "object" || Array.isArray(part)) return false;
-  // Anthropic Messages: {type:"image"}; chat completions: {type:"image_url"};
-  // Responses API: {type:"input_image"}.
-  if (part.type === "image" || part.type === "image_url" || part.type === "input_image") return true;
-  // Gemini: {inlineData:{mimeType:"image/png"}} / {fileData:{mimeType:"image/..."}}
-  // A MIME-less blob counts as an image: the vision pool is the safe side of
-  // the isolation rule, and the file API does not always report a type.
-  for (const key of ["inlineData", "inline_data", "fileData", "file_data"]) {
-    if (mediaIsImage(part[key])) return true;
+  if (MEDIA_PART_TYPES.has(part.type)) return true;
+  for (const key of GEMINI_DATA_KEYS) {
+    const data = part[key];
+    if (data && typeof data === "object" && !isTextMime(data.mimeType ?? data.mime_type)) return true;
   }
   return false;
 }
@@ -83,7 +83,7 @@ function entryHasImage(entry) {
     || contentHasImage(entry.parts);              // Gemini Content.parts
 }
 
-/** True when the request body carries at least one image, in any client protocol. */
+/** True when the request body carries at least one image/media attachment, in any client protocol. */
 export function requestHasImage(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
 
@@ -101,6 +101,9 @@ export function requestHasImage(body) {
   }
   return false;
 }
+
+/** Clearer name for what `requestHasImage` actually answers: any multimodal attachment. */
+export const requestHasMedia = requestHasImage;
 
 /**
  * Picks the candidate pool for a request.

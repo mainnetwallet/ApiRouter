@@ -19,13 +19,6 @@ export const ATTEMPT_STATES = Object.freeze({
   FAILED: "failed"
 });
 
-/**
- * Terminal state of a streamed response body. Kept separate from `outcome`:
- * a request can fail (upstream died mid-stream) or end by client abort, and
- * either way the operator needs to see that the body never completed.
- */
-export const STREAM_OUTCOMES = Object.freeze(["completed", "truncated", "aborted"]);
-
 /** The routing pool a request was served from. Anything unrecognised is text. */
 export const POOLS = Object.freeze({
   TEXT: "text",
@@ -40,7 +33,9 @@ const normalizePool = (value) => (value === POOLS.VISION ? POOLS.VISION : POOLS.
  * that has not finished. A request that never reports back is dropped after
  * this long, and the set is capped, so a leak cannot grow without bound.
  */
-const PENDING_TTL_MS = 10 * 60 * 1000;
+// A request is "pending" until its response has finished, and a streamed answer
+// can legitimately run for a long time, so this is only a leak guard.
+const PENDING_TTL_MS = 60 * 60 * 1000;
 const MAX_PENDING = 200;
 
 const PHASES = ["sticky", "priority", "fallback"];
@@ -273,15 +268,6 @@ export class RequestLog {
   }
 
   /**
-   * The request id minted for a pending request. Lets the HTTP layer echo the
-   * id back to the client so a log row can be correlated with the call that
-   * produced it — distinct from the sticky session id the client sent.
-   */
-  requestIdOf(startSeq) {
-    return this.pendingEntries.get(startSeq)?.requestId ?? null;
-  }
-
-  /**
    * Update a pending request: the attempts finished so far, and/or the attempt
    * currently on the wire (`inflight`, or `null` once it has answered).
    */
@@ -490,9 +476,7 @@ export class RequestLog {
       finishReason: sanitizeMessage(entry.finishReason, { maxLength: 60 }),
       errorType: entry.errorType ?? null,
       errorMessage: sanitizeMessage(entry.errorMessage),
-      outcome: entry.outcome === OUTCOMES.FAILED ? OUTCOMES.FAILED : OUTCOMES.SUCCESS,
-      // "completed" | "truncated" | "aborted", or null when not streamed.
-      streamOutcome: STREAM_OUTCOMES.includes(entry.streamOutcome) ? entry.streamOutcome : null
+      outcome: entry.outcome === OUTCOMES.FAILED ? OUTCOMES.FAILED : OUTCOMES.SUCCESS
     };
 
     this.entries.set(this.#keyOf(stored), stored);
@@ -514,12 +498,14 @@ export class RequestLog {
     return this.entries.get(key) ?? null;
   }
 
+  /** Look an entry up by its client-visible request id. */
   /**
-   * Look an entry up by the request id the log minted for it — the value
-   * echoed to the client as `x-multi-ai-request-id`. This names exactly one
-   * call, so it is what `/api/requests/<id>` resolves.
+   * One request, by its own id (`req-…`, the `x-multi-ai-request-id` response
+   * header). Not by the session id: many requests share a session id (every
+   * client that sends no session header uses "default"), so it identifies no
+   * single request.
    */
-  findByRequestId(id) {
+  findById(id) {
     const wanted = String(id ?? "");
     if (!wanted) return null;
     for (const entry of this.entries.values()) {
@@ -528,23 +514,9 @@ export class RequestLog {
     return null;
   }
 
-  /**
-   * Look an entry up by the client's sticky session id. A session names many
-   * requests, so it is looked up explicitly (`GET /api/requests?session=<id>`)
-   * and never through the single-request endpoint.
-   */
-  findBySession(id) {
-    const wanted = String(id ?? "");
-    if (!wanted) return null;
-    for (const entry of this.entries.values()) {
-      if (entry.id === wanted) return entry;
-    }
-    return null;
-  }
-
-  /** Older alias. Resolves a request id, never a session id. */
-  findById(id) {
-    return this.findByRequestId(id);
+  /** The id of a request that is still in flight, so it can be sent to the client as a header. */
+  requestIdOf(startSeq) {
+    return this.pendingEntries.get(startSeq)?.requestId ?? null;
   }
 
   /**
@@ -554,7 +526,7 @@ export class RequestLog {
    * `nextCursor` never sees a shifting window: new requests arriving
    * mid-pagination have higher sequence numbers and cannot reorder the page.
    */
-  list({ limit = 50, cursor = null, status = null, provider = null, protocol = null, outcome = null, pool = null, session = null } = {}) {
+  list({ limit = 50, cursor = null, status = null, provider = null, protocol = null, outcome = null, pool = null } = {}) {
     const size = Math.max(1, Math.min(Number(limit) || 50, this.maxEntries));
 
     // `Number(null)` is 0, which would match every sequence number and return
@@ -568,9 +540,6 @@ export class RequestLog {
       if (outcome && entry.outcome !== outcome) return false;
       if (protocol && entry.protocol !== protocol) return false;
       if (provider && entry.finalProvider !== provider) return false;
-      // The sticky session id is a different identifier from the request id,
-      // so looking a session up is an explicit filter, not a fallback lookup.
-      if (session && entry.id !== String(session)) return false;
       // "text"/"vision" are the only pools; any other value is ignored rather
       // than treated as an empty filter, so a typo cannot silently hide rows.
       if ((pool === POOLS.TEXT || pool === POOLS.VISION) && entry.pool !== pool) return false;
