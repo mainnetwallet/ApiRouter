@@ -15,6 +15,10 @@ import net from "node:net";
  *                                    - send the headers and `partialBody`, then
  *                                      go silent without ending the response
  *                                      (a NON-streamed 200 whose body stalls)
+ *   { status, headers, partialBody, truncateBody: true }
+ *                                    - send the headers and `partialBody`, then
+ *                                      destroy the socket (a NON-streamed 200
+ *                                      whose body ends before content-length)
  *   { hang: true }                   - never responds (timeout tests)
  *
  * `options.health` scripts the health-probe (GET) response, which defaults to
@@ -94,6 +98,13 @@ export async function startMockUpstream(script, options = {}) {
           setTimeout(writeNext, descriptor.delayMs || 0);
         };
         return writeNext();
+      }
+
+      if (descriptor.truncateBody) {
+        res.writeHead(status, headers);
+        res.write(descriptor.partialBody ?? "");
+        setTimeout(() => res.destroy(), 20); // let the prefix and headers flush first
+        return;
       }
 
       if (descriptor.stallBody) {

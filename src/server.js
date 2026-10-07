@@ -363,10 +363,11 @@ async function proxy(req, res, protocol, pathname) {
   const receivedAt = Date.now();
   const attempts = [];
   let liveSeq = null;
-  // Set by the invoke callback for a streamed response: a 200 only carried the
-  // headers, so the attempt is not settled as a success until the body has been
-  // delivered (or has failed). See the stream terminal below.
-  let settleStreamAttempt = null;
+  // Set by the invoke callback for every 200: a 200 only carried the headers,
+  // so the attempt is not settled as a success until the body has been consumed
+  // and delivered (or has failed). Streamed and non-streamed attempts settle
+  // through the same once-only finisher; see the terminals below.
+  let settleAttempt = null;
 
   // One abort signal per request, driven by the client connection. It stops the
   // fallback walk before another target is invoked and cancels the in-flight
@@ -637,6 +638,8 @@ async function proxy(req, res, protocol, pathname) {
         // reconstructed from the final error.
         let recorded = false;
         const attempt = (ok, status, errorMessage) => {
+          // An attempt settles exactly once: the first verdict is the real one.
+          if (recorded) return;
           recorded = true;
           const completedAt = Date.now();
           attempts.push({
@@ -715,17 +718,16 @@ async function proxy(req, res, protocol, pathname) {
             attempt(false, upstream.status, error.message);
             throw error;
           }
-          if (wantsStream) {
-            // A 200 so far only carried the headers. Hand the finisher back and
-            // let the stream terminal settle the attempt: a translated stream
-            // that dies mid-body must be a FAILED attempt, not an accepted one.
-            settleStreamAttempt = attempt;
-            return { upstream, target, upstreamProtocol, translated, deadlineAt: streamDeadlineAt };
-          }
-          // The successful attempt is recorded too — otherwise the log would
-          // show a chain of failures with no terminal success.
-          attempt(true, upstream.status, null);
-          return { upstream, target, upstreamProtocol, translated, deadlineAt: attemptDeadlineAt };
+          // A 200 so far only carried the headers. Hand the finisher back and
+          // let the terminal settle the attempt once the body is consumed: a
+          // body that truncates, stalls or cannot be parsed must be a FAILED
+          // attempt, not an accepted one. The terminal records the success, so
+          // the log still ends a chain of failures with a real terminal success.
+          settleAttempt = attempt;
+          return {
+            upstream, target, upstreamProtocol, translated,
+            deadlineAt: wantsStream ? streamDeadlineAt : attemptDeadlineAt
+          };
         } catch (error) {
           if (isAbortError(error)) {
             // A client disconnect is not a provider fault: stop the walk without
@@ -840,6 +842,7 @@ async function proxy(req, res, protocol, pathname) {
           // and leave health untouched — never a silent `{}` and never a
           // cooldown for a healthy target.
           if (error?.errorType === INVALID_TOOL_ARGUMENTS) {
+            settleAttempt?.(false, clientAborted() ? null : (error.status || 400), clientAborted() ? "Client disconnected" : sanitizeMessage(error.message));
             commit(false, { status: error.status || 400, skipCooldown: true, reason: sanitizeMessage(error.message) });
             // The log carries what the client was actually answered, not the
             // upstream's 200: a failed row filed as 200 is invisible to the
@@ -854,7 +857,15 @@ async function proxy(req, res, protocol, pathname) {
             return json(res, error.status || 400, { error: { message, type: error.errorType } }, meta);
           }
           // A 200 that could not be read or translated is not a success: cool
-          // the target instead of recording it healthy.
+          // the target instead of recording it healthy. A client that left is
+          // not the provider's fault, but a provider fault (timeout, size) that
+          // happened first still is.
+          const bodyAborted = clientAborted() && error?.streamCause !== "upstream" && !isUpstreamFault(error);
+          settleAttempt?.(
+            false,
+            bodyAborted ? null : 502,
+            bodyAborted ? "Client disconnected" : (sanitizeMessage(error?.message) || "Upstream response could not be read")
+          );
           commit(false, clientAborted() ? { clientAborted: true } : { status: 502 });
           record("failed", {
             httpStatus: clientAborted() ? 499 : 502,
@@ -865,6 +876,7 @@ async function proxy(req, res, protocol, pathname) {
           const message = clientMessage(error?.message) || "Upstream response could not be read";
           return json(res, 502, { error: { message, type: "upstream_error" } }, meta);
         }
+        settleAttempt?.(true, result.upstream.status, null);
         commit(true, { status: result.upstream.status });
         record("success", {
           tokens: convertedTokens(converted),
@@ -903,15 +915,15 @@ async function proxy(req, res, protocol, pathname) {
       }
 
       if (streamOutcome === "completed") {
-        settleStreamAttempt?.(true, result.upstream.status, null);
+        settleAttempt?.(true, result.upstream.status, null);
         commit(true, { status: result.upstream.status });
         record("success", { streamOutcome });
       } else if (streamOutcome === "aborted") {
-        settleStreamAttempt?.(false, null, "Client disconnected");
+        settleAttempt?.(false, null, "Client disconnected");
         commit(false, { clientAborted: true });
         record("failed", { streamOutcome, errorType: "client_aborted", errorMessage: "Client disconnected" });
       } else {
-        settleStreamAttempt?.(
+        settleAttempt?.(
           false,
           result.upstream.status,
           sanitizeMessage(streamError?.message) || "Upstream stream ended before completion"
@@ -1006,6 +1018,11 @@ async function proxy(req, res, protocol, pathname) {
 
     if (bodyReadError) {
       const aborted = clientAborted();
+      settleAttempt?.(
+        false,
+        aborted ? null : 502,
+        aborted ? "Client disconnected" : (sanitizeMessage(bodyReadError?.message) || "Upstream response could not be read")
+      );
       commit(false, aborted ? { clientAborted: true } : { status: 502 });
       record("failed", {
         httpStatus: aborted ? 499 : 502,
@@ -1054,7 +1071,7 @@ async function proxy(req, res, protocol, pathname) {
       // JSON error response. Cool the target (unless the client left) and drop
       // the connection instead.
       const aborted = error?.streamCause !== "upstream" && !isUpstreamFault(error) && clientAborted();
-      settleStreamAttempt?.(
+      settleAttempt?.(
         false,
         result.upstream.status,
         sanitizeMessage(error?.message) || "Upstream stream ended before completion"
@@ -1071,13 +1088,23 @@ async function proxy(req, res, protocol, pathname) {
 
     // Only now is the response actually delivered: commit health/sticky and
     // file the request as a success.
-    settleStreamAttempt?.(true, result.upstream.status, null);
+    settleAttempt?.(true, result.upstream.status, null);
     commit(true, { status: result.upstream.status });
     record("success", streamed ? { streamOutcome: "completed" } : {});
   } catch (error) {
     // The client walked away. Nothing can be sent, and the provider was not at
     // fault (no target was cooled), so this is recorded as a client abort
     // rather than an upstream failure.
+    // Safety net: a 200 attempt whose terminal never ran (an unexpected throw
+    // after the headers) must not be left looking like it is still in flight.
+    // A no-op once the attempt has settled.
+    settleAttempt?.(
+      false,
+      null,
+      (error?.clientAborted === true || error instanceof ClientAbortError)
+        ? "Client disconnected"
+        : (sanitizeMessage(error?.message) || "Upstream response could not be read")
+    );
     if (error?.clientAborted === true || error instanceof ClientAbortError) {
       recordRequest({
         pendingSeq: liveSeq,
