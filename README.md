@@ -94,29 +94,6 @@ A provider needs:
 
 Configure them in `.env`; `.env.example` lists every provider variable.
 
-### LLM7
-
-```env
-LLM7_API_KEYS=
-LLM7_MODELS=DeepSeek-V4-Flash-0731,GLM-5.3-Flash,minimax-m2.7,DeepSeek-V4.1-Flash
-LLM7_BASE_URL=https://api.llm7.io/v1
-
-LLM7_VISION_API_KEYS=
-LLM7_VISION_MODELS=kimi-k3,llama-4-maverick,minimax-m3
-LLM7_VISION_BASE_URL=https://api.llm7.io/v1
-```
-
-- Provider ID: `llm7` (shown as **LLM7**). OpenAI-compatible; the base URL already contains `/v1`
-  (chat goes to `.../v1/chat/completions`, health probes to `.../v1/models`).
-- LLM7 provides a **free-token quota**, not permanently free model pricing: the models themselves have
-  model-level pricing. Quotas, limits and model availability can change, so check your account's current
-  quota; nothing here promises unlimited usage.
-- Text requests use `LLM7_MODELS` and `LLM7_API_KEYS`; image requests use only `LLM7_VISION_MODELS` and
-  `LLM7_VISION_API_KEYS`. With no vision pool, images get `503 no_vision_route`.
-- A model receives images only if it is listed in the vision pool; the router keeps no per-model capability data.
-- Keys and models are comma-separated; every key x model pair is a target, in the configured order, and
-  LLM7 joins the normal fallback chain like any other provider.
-
 Retryable statuses:
 
 ```text
