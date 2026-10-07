@@ -49,9 +49,10 @@ git clone https://github.com/mainnetwallet/MultiAI-Router.git
 cd MultiAI-Router
 npm install
 cp .env.example .env
+nano .env
 ```
 
-Edit `.env` and add the providers, models, and credentials you want to use.
+Add the providers, models, and API keys you want to use, then save (`Ctrl + O`, `Enter`, `Ctrl + X`).
 
 ### Windows
 
@@ -60,9 +61,10 @@ git clone https://github.com/mainnetwallet/MultiAI-Router.git
 cd MultiAI-Router
 npm install
 Copy-Item .env.example .env
+notepad .env
 ```
 
-Then edit `.env`.
+Add the providers, models, and API keys you want to use, then save and close.
 
 > Do not commit `.env` or real API keys.
 
