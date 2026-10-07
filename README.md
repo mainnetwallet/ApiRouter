@@ -70,11 +70,8 @@ TEXT_PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3
 VISION_PRIORITY_MODELS=gemini/V1,groq/V2
 ```
 
-- Models are tried in the listed order; the first success ends the request.
-- For each model, all its keys are tried (in key order) before moving to the next model.
-- If all fail, normal fallback starts. Empty or unset = no priority.
-- Empty `VISION_PRIORITY_MODELS` uses `TEXT_PRIORITY_MODELS`. Text and vision never fall back to each other.
-- Pinned requests ignore priority. If the client names a model, only priority entries of that model apply.
+- Models are tried in the listed order, and each model's keys in key order; the first success ends the request, and if all fail, normal fallback starts.
+- Empty or unset means no priority; empty `VISION_PRIORITY_MODELS` reuses the text list (text and vision never mix). Pinned requests skip priority, and a client-named model uses only its own entries.
 
 ### Sticky session
 
