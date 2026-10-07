@@ -20,8 +20,7 @@ cd MultiAI-Router
 npm install
 Copy-Item .env.example .env
 notepad .env
-npm run ui:build     # build the control panel (optional — Router can build it automatically)
-npm start
+npm start     # builds the control panel, then starts the Router
 ```
 
 Default server:
@@ -43,14 +42,7 @@ git pull origin main
 npm start
 ```
 
-After pulling updates (`git pull`), rebuild only what changed:
-
-```powershell
-cd MultiAI-Router
-git pull origin main
-npm run ui:build    
-npm start
-```
+`npm start` always builds the control panel first and then starts the gateway, so there is no separate production UI-build command.
 
 Do not run `Copy-Item .env.example .env` again — it would overwrite your keys.
 Stop the router with `Ctrl + C`.
@@ -70,10 +62,8 @@ Router
 ```
 
 The launcher changes to the repository directory, installs dependencies if needed,
-builds the control panel if `ui/dist/index.html` is missing, opens the control panel
-in the browser, and starts the gateway on `localhost:999`. If the panel has not been
-built, that address serves a short page explaining how to build it — the
-gateway itself needs no build step and is unaffected.
+builds the control panel, opens the control panel in the browser, and starts the gateway
+on `localhost:999`.
 
 ## Configuration
 
@@ -236,15 +226,16 @@ chosen automatically and is an implementation detail; you never open it.
   filesystem endpoints (`/@fs`, `/__open-in-editor`) apart from the panel's own
   prebundled dependencies. `npm start` is unaffected and keeps its own `HOST` rules.
 
-Production does not use any of this: `npm run ui:build` writes `ui/dist` and
-`npm start` serves it with no Vite involved.
+Production does not use the Vite development server. `npm start` first runs the production
+UI build into `ui/dist`, then starts the gateway, which serves that built panel from the
+same origin.
 
 ```powershell
 npm run dev         # gateway + Vite, open http://localhost:999
 npm run dev:server  # gateway only, with restart on change (no hot-reloading UI)
 npm run ui:dev      # optional: Vite on its own, frontend-only work (see below)
-npm run ui:build    # production build into ui/dist
-npm start           # production: gateway serving ui/dist
+npm start           # production: build UI into ui/dist, then start the gateway
+npm run ui:build    # standalone production UI build into ui/dist (npm start already runs it)
 npm run test:ui     # frontend unit tests
 npm run test:all    # backend + frontend
 ```
@@ -271,7 +262,8 @@ stream is not connected. The page keeps the last 50 calls; when a newer one
 arrives past that, the oldest is dropped.
 
 To see the Live Logs page populated without real provider keys, run
-`npm run ui:build` then `npm run demo:live-logs`. It starts the router against
+`npm run ui:build` then `npm run demo:live-logs` (the demo does not build the panel itself and
+exits if `ui/dist` is missing). It starts the router against
 scripted mock providers and prints a `/live-logs` URL; the traffic includes
 `429` key 0 -> key 1 fallbacks and a request that exhausts its targets.
 
