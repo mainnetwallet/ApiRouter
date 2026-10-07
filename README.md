@@ -42,6 +42,8 @@ Check: `node -v` (v20 or higher), `npm -v`, `git --version`.
 
 ## Installation
 
+> **First time only.** Run these steps once. Do not repeat them later: copying `.env.example` again overwrites your keys. See [Run](#run) for next time.
+
 ### Linux / macOS / VPS
 
 ```bash
