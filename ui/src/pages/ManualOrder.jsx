@@ -47,6 +47,18 @@ export default function ManualOrder() {
   const saved = payload ? { text: payload.text, vision: payload.vision } : EMPTY;
   const dirty = !sameList(draft.text, saved.text) || !sameList(draft.vision, saved.vision);
 
+  // "Add" only edits the draft; nothing reaches the router until "Save order".
+  // Warn before a refresh or tab close would silently throw the draft away.
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const warn = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
   const setPool = (pool, list) => setDraft((current) => ({ ...current, [pool]: list }));
 
   async function save() {
@@ -96,6 +108,14 @@ export default function ManualOrder() {
           A request that names one specific model still uses that model.
         </span>
       </div>
+
+      {dirty ? (
+        <div className="notice notice--warn section">
+          <span>
+            You have unsaved changes. Press <strong>Save order</strong> to apply them; if you refresh now they are lost.
+          </span>
+        </div>
+      ) : null}
 
       {payload?.persisted === false ? (
         <div className="notice notice--warn section">
