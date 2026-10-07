@@ -10,6 +10,22 @@ const DEFAULT_MAX_SESSIONS = 10000;
 // model rejects a key, every other model on that provider + key will too.
 const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 
+// Some providers report an exhausted balance / missing resource package as a
+// 429 (Z.ai answers business code 1113 that way), which is indistinguishable
+// from a per-model rate limit by status alone. Only bodies that clearly say the
+// account is out of balance count: a plain 429 stays a per-model failure.
+const ACCOUNT_LEVEL_MESSAGE = /"code"\s*:\s*"?1113"?|insufficient\s+balance|no\s+resource\s+package|insufficient[_\s]quota|exceeded\s+your\s+current\s+quota/i;
+
+/**
+ * True when a failure describes the API key / account rather than one model:
+ * every other model on the same provider + key will fail the same way.
+ */
+export function isKeyLevelFailure(status, message = "") {
+  const code = Number(status);
+  if (KEY_LEVEL_STATUS_CODES.has(code)) return true;
+  return code === 429 && ACCOUNT_LEVEL_MESSAGE.test(String(message ?? ""));
+}
+
 const SIZE_LIMIT_COOLDOWN_MS = 60 * 1000;
 
 /**
@@ -203,7 +219,7 @@ export async function withFallback(
         // Quota/auth failures hit the whole key. Cool the sibling models on the
         // same provider + key down too, so this request (and the next ones)
         // skip them instead of burning time on a guaranteed failure or a hang.
-        if (KEY_LEVEL_STATUS_CODES.has(status)) {
+        if (isKeyLevelFailure(status, error?.message)) {
           const reason = `${status} on ${target.model} applies to the whole key`;
           for (const sibling of plan.flat()) {
             if (sibling === target) continue;
@@ -288,7 +304,7 @@ async function walkPlan(
 
   const stopRequested = () => typeof shouldStop === "function" && shouldStop() === true;
 
-  /** 401/402/403 describe the key, not the model: cool its sibling models too. */
+  /** 401/402/403 (and balance-exhausted 429s) describe the key, not the model: cool its sibling models too. */
   const coolKeySiblings = (target, status) => {
     const reason = `${status} on ${target.model} applies to the whole key`;
     for (const sibling of allTargets) {
@@ -338,7 +354,7 @@ async function walkPlan(
      * the client's protocol cannot represent) is not provider ill health, so
      * the target is left untouched instead of being cooled.
      */
-    const commit = (ok, { status = 200, reason = null, clientAborted = false, skipCooldown = false } = {}) => {
+    const commit = (ok, { status = 200, reason = null, clientAborted = false, skipCooldown = false, message = "" } = {}) => {
       if (committed) return;
       committed = true;
       if (ok) {
@@ -350,7 +366,7 @@ async function walkPlan(
       if (skipCooldown) return;
       const code = Number(status) || 0;
       health.markFailure(target, code, code === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : { reason });
-      if (KEY_LEVEL_STATUS_CODES.has(code)) coolKeySiblings(target, code);
+      if (isKeyLevelFailure(code, message)) coolKeySiblings(target, code);
     };
 
     try {
@@ -365,7 +381,7 @@ async function walkPlan(
       if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) throw error;
       if (error?.skipCooldown) continue;
 
-      commit(false, { status });
+      commit(false, { status, message: error?.message });
     }
   }
 
