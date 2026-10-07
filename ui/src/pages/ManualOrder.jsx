@@ -34,6 +34,7 @@ export default function ManualOrder() {
   const [payload, setPayload] = useState(null);
   const [draft, setDraft] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
+  const [activePool, setActivePool] = useState("text");
 
   // The first load fills the editor; after that the editor owns the draft and
   // only a successful save replaces the saved copy.
@@ -89,7 +90,7 @@ export default function ManualOrder() {
         title="Model Manual Order"
         description="Choose the models a request tries first, in your own order"
         actions={
-          <div className="row" style={{ gap: "var(--sp-2)" }}>
+          <div className="row mo-header-actions" style={{ gap: "var(--sp-2)" }}>
             <button type="button" className="btn" onClick={discard} disabled={!dirty || saving}>
               Discard
             </button>
@@ -100,17 +101,8 @@ export default function ManualOrder() {
         }
       />
 
-      <div className="notice notice--info section">
-        <span>
-          Requests try your list in order: 1 first, and if it fails, 2, then 3 and so on. Every key of an entry
-          is tried before the next entry. If all of them fail, the router continues with its normal priority and
-          fallback list. Leave a pool empty to keep the default behaviour. Text and vision are separate.
-          A request that names one specific model still uses that model.
-        </span>
-      </div>
-
       {dirty ? (
-        <div className="notice notice--warn section">
+        <div className="notice notice--warn section mo-dirty-notice">
           <span>
             You have unsaved changes. Press <strong>Save order</strong> to apply them; if you refresh now they are lost.
           </span>
@@ -128,21 +120,58 @@ export default function ManualOrder() {
       ) : !payload ? (
         <p className="dim">Loading…</p>
       ) : (
-        POOLS.map((pool) => (
-          <PoolEditor
-            key={pool.key}
-            pool={pool}
-            list={draft[pool.key]}
-            available={payload.available?.[pool.key] ?? []}
-            onChange={(list) => setPool(pool.key, list)}
-          />
-        ))
+        <>
+          <div className="mo-tabs" role="tablist" aria-label="Pool">
+            {POOLS.map((pool) => {
+              const changed = !sameList(draft[pool.key], saved[pool.key]);
+              return (
+                <button
+                  key={pool.key}
+                  type="button"
+                  role="tab"
+                  id={`mo-tab-${pool.key}`}
+                  aria-selected={activePool === pool.key}
+                  aria-controls={`mo-pool-${pool.key}`}
+                  className="mo-tab"
+                  onClick={() => setActivePool(pool.key)}
+                >
+                  {pool.label}
+                  <span className="mo-tab__count">{draft[pool.key].length}</span>
+                  {changed ? <span className="mo-tab__dot" title="Unsaved changes" /> : null}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mo-pools">
+            {POOLS.map((pool) => (
+              <PoolEditor
+                key={pool.key}
+                pool={pool}
+                active={activePool === pool.key}
+                list={draft[pool.key]}
+                available={payload.available?.[pool.key] ?? []}
+                onChange={(list) => setPool(pool.key, list)}
+              />
+            ))}
+          </div>
+
+          {dirty ? (
+            <div className="mo-savebar" role="region" aria-label="Unsaved changes">
+              <span className="mo-savebar__text">Unsaved changes</span>
+              <button type="button" className="btn" onClick={discard} disabled={saving}>Discard</button>
+              <button type="button" className="btn btn--primary" onClick={save} disabled={saving}>
+                {saving ? "Saving…" : "Save order"}
+              </button>
+            </div>
+          ) : null}
+        </>
       )}
     </div>
   );
 }
 
-function PoolEditor({ pool, list, available, onChange }) {
+function PoolEditor({ pool, active, list, available, onChange }) {
   const [search, setSearch] = useState("");
   const byId = useMemo(() => new Map(available.map((row) => [row.id, row])), [available]);
 
@@ -161,7 +190,11 @@ function PoolEditor({ pool, list, available, onChange }) {
   };
 
   return (
-    <section className="panel section" aria-label={`${pool.label} manual order`}>
+    <section
+      id={`mo-pool-${pool.key}`}
+      className={`panel mo-pool${active ? " mo-pool--active" : ""}`}
+      aria-label={`${pool.label} manual order`}
+    >
       <div className="panel__header">
         <h2 className="panel__title">
           <PoolBadge pool={pool.key} /> <span className="dim tiny">{pool.hint}</span>
@@ -174,38 +207,46 @@ function PoolEditor({ pool, list, available, onChange }) {
       </div>
 
       <div className="panel__body">
-        <h3 className="tiny dim" style={{ margin: "0 0 var(--sp-2)" }}>Your order ({list.length})</h3>
+        <h3 className="mo-subtitle">Your order ({list.length})</h3>
         {list.length === 0 ? (
-          <p className="dim tiny">
+          <p className="mo-empty">
             Nothing selected. {pool.label} requests use the normal priority and fallback list.
           </p>
         ) : (
-          <ol className="stack" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+          <ol className="mo-list">
             {list.map((id, index) => {
               const row = byId.get(id);
               const [provider, ...rest] = id.split("/");
               return (
-                <li key={id} className="row" style={{ gap: "var(--sp-2)", flexWrap: "nowrap" }}>
-                  <span className="chain__rank" style={{ minWidth: 28 }} aria-label={`Position ${index + 1}`}>
-                    {index + 1}
-                  </span>
-                  <span className="grow" style={{ minWidth: 0 }}>
-                    <span className="mono" style={{ wordBreak: "break-all" }}>{rest.join("/")}</span>
-                    <span className="dim tiny"> · {providerLabel(provider)}</span>
-                    {row ? (
-                      <span className="dim tiny"> · {row.keys} key{row.keys === 1 ? "" : "s"}
-                        {row.available < row.keys ? `, ${row.keys - row.available} cooling down` : ""}
-                      </span>
-                    ) : (
-                      <span className="badge badge--warn" style={{ marginLeft: 6 }}>not configured</span>
-                    )}
-                  </span>
-                  <button type="button" className="btn btn--sm btn--icon" onClick={() => move(index, -1)}
-                    disabled={index === 0} aria-label={`Move ${id} up`}>↑</button>
-                  <button type="button" className="btn btn--sm btn--icon" onClick={() => move(index, 1)}
-                    disabled={index === list.length - 1} aria-label={`Move ${id} down`}>↓</button>
-                  <button type="button" className="btn btn--sm btn--icon" onClick={() => onChange(list.filter((item) => item !== id))}
-                    aria-label={`Remove ${id}`}><Icon name="close" size={12} /></button>
+                <li key={id} className={`mo-item${row ? "" : " mo-item--missing"}`}>
+                  <span className="mo-item__rank" aria-label={`Position ${index + 1}`}>{index + 1}</span>
+                  <div className="mo-item__info">
+                    <div className="mo-item__model">{rest.join("/")}</div>
+                    <div className="mo-item__meta">
+                      {providerLabel(provider)}
+                      {row ? (
+                        <> · {row.keys} key{row.keys === 1 ? "" : "s"}
+                          {row.available < row.keys ? `, ${row.keys - row.available} cooling down` : ""}
+                        </>
+                      ) : (
+                        <span className="badge badge--warn" style={{ marginLeft: 6 }}>not configured</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mo-item__actions">
+                    <button type="button" className="mo-btn" onClick={() => move(index, -1)}
+                      disabled={index === 0} aria-label={`Move ${id} up`}>
+                      <Icon name="arrowUp" size={14} /><span className="mo-btn__label">Up</span>
+                    </button>
+                    <button type="button" className="mo-btn" onClick={() => move(index, 1)}
+                      disabled={index === list.length - 1} aria-label={`Move ${id} down`}>
+                      <Icon name="arrowDown" size={14} /><span className="mo-btn__label">Down</span>
+                    </button>
+                    <button type="button" className="mo-btn mo-btn--danger" onClick={() => onChange(list.filter((item) => item !== id))}
+                      aria-label={`Remove ${id}`}>
+                      <Icon name="close" size={14} /><span className="mo-btn__label">Remove</span>
+                    </button>
+                  </div>
                 </li>
               );
             })}
@@ -214,20 +255,24 @@ function PoolEditor({ pool, list, available, onChange }) {
       </div>
 
       <div className="panel__body" style={{ borderTop: "1px solid var(--border)" }}>
-        <h3 className="tiny dim" style={{ margin: "0 0 var(--sp-2)" }}>Add a model ({choices.length})</h3>
+        <h3 className="mo-subtitle">Add a model ({choices.length})</h3>
         <SearchInput value={search} onChange={setSearch} placeholder={`Search ${pool.label.toLowerCase()} models…`}
           label={`Search ${pool.label} models`} />
-        <ul className="stack" style={{ listStyle: "none", margin: "var(--sp-2) 0 0", padding: 0, maxHeight: 320, overflowY: "auto" }}>
+        <ul className="mo-choices">
           {choices.length === 0 ? (
-            <li className="dim tiny">{available.length === 0 ? `No ${pool.label.toLowerCase()} models are configured.` : "No more models match."}</li>
+            <li className="mo-empty">{available.length === 0 ? `No ${pool.label.toLowerCase()} models are configured.` : "No more models match."}</li>
           ) : choices.map((row) => (
-            <li key={row.id} className="row" style={{ gap: "var(--sp-2)", flexWrap: "nowrap" }}>
-              <span className="grow" style={{ minWidth: 0 }}>
-                <span className="mono" style={{ wordBreak: "break-all" }}>{row.model}</span>
-                <span className="dim tiny"> · {providerLabel(row.provider)} · {row.keys} key{row.keys === 1 ? "" : "s"}</span>
-              </span>
-              <button type="button" className="btn btn--sm" onClick={() => onChange([...list, row.id])}
-                aria-label={`Add ${row.id}`}>Add</button>
+            <li key={row.id}>
+              <button type="button" className="mo-choice" onClick={() => onChange([...list, row.id])}
+                aria-label={`Add ${row.id}`}>
+                <span className="mo-choice__text">
+                  <span className="mo-choice__model">{row.model}</span>
+                  <span className="mo-choice__meta" style={{ display: "block" }}>
+                    {providerLabel(row.provider)} · {row.keys} key{row.keys === 1 ? "" : "s"}
+                  </span>
+                </span>
+                <span className="mo-choice__add" aria-hidden="true"><Icon name="plus" size={16} /></span>
+              </button>
             </li>
           ))}
         </ul>
