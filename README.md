@@ -229,6 +229,12 @@ chosen automatically and is an implementation detail; you never open it.
 - **Frontend changes** (`ui/src`) hot-reload in the browser through Vite HMR.
 - **Backend changes** (`src/`) restart the gateway automatically.
 - **Ctrl+C** stops both processes. If either one exits, the other is stopped too.
+- **Loopback by default.** When `HOST` is unset, `npm run dev` listens on
+  `127.0.0.1` only, because the dev server exposes your project's source files.
+  Set `HOST` explicitly (for example `HOST=0.0.0.0` to try the panel from a
+  phone) to listen elsewhere; remote clients are then still refused Vite's
+  filesystem endpoints (`/@fs`, `/__open-in-editor`) apart from the panel's own
+  prebundled dependencies. `npm start` is unaffected and keeps its own `HOST` rules.
 
 Production does not use any of this: `npm run ui:build` writes `ui/dist` and
 `npm start` serves it with no Vite involved.

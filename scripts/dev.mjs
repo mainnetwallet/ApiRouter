@@ -17,6 +17,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../src/config.js";
+import { gatewayEnv, viteEnv } from "./dev-config.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const isWindows = process.platform === "win32";
@@ -171,9 +172,7 @@ try {
 }
 
 const vitePort = await getFreePort();
-const gateway = start("gateway", ["--watch", "src/server.js"], {
-  MULTIAI_DEV_UI_ORIGIN: `http://127.0.0.1:${vitePort}`
-});
+const gateway = start("gateway", ["--watch", "src/server.js"], gatewayEnv(process.env, vitePort));
 const vite = start("ui", [
   resolveViteBin(),
   "--config", "ui/vite.config.js",
@@ -182,7 +181,7 @@ const vite = start("ui", [
   "--strictPort",
   "--logLevel", "warn",
   "--clearScreen", "false"
-]);
+], viteEnv);
 
 const ready = await waitForPort(vitePort, () => !vite.exited && !gateway.exited);
 if (!ready && !shuttingDown) {

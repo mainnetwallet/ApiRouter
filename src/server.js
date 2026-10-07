@@ -23,7 +23,7 @@ import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream, par
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
-import { createDevUiProxy } from "./dev-proxy.js";
+import { createDevUiProxy, isReservedWhenDecoded } from "./dev-proxy.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, routeOrderByPool } from "./routing-plan.js";
 import { selectPool } from "./vision.js";
@@ -1226,7 +1226,11 @@ async function handleRequest(req, res) {
   // Static panel assets, then the SPA shell for client-side routes.
   if (req.method === "GET" || req.method === "HEAD") {
     if (!isReserved(pathname)) {
-      if (devUi) return devUi.handle(req, res);
+      if (devUi) {
+        // An encoded gateway prefix (/api%2fconfig) is not a panel route; keep it away from Vite.
+        if (isReservedWhenDecoded(pathname, isReserved)) return json(res, 404, { error: { message: "Not found", type: "not_found" } });
+        return devUi.handle(req, res);
+      }
       if (await staticFiles.serve(req, res, pathname)) return undefined;
 
       // Extensionless paths are client-side routes, so they get the shell.
@@ -1257,7 +1261,7 @@ if (devUi) {
       socket.destroy();
       return;
     }
-    if (isReserved(pathname)) {
+    if (isReserved(pathname) || isReservedWhenDecoded(pathname, isReserved)) {
       socket.destroy();
       return;
     }

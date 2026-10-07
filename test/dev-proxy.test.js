@@ -4,7 +4,10 @@ import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createDevUiProxy, parseDevUiOrigin } from "../src/dev-proxy.js";
+import os from "node:os";
+import { PassThrough, Readable } from "node:stream";
+import { createDevUiProxy, isReservedWhenDecoded, LOOP_HEADER, parseDevUiOrigin } from "../src/dev-proxy.js";
+import { gatewayEnv, resolveGatewayHost, viteEnv } from "../scripts/dev-config.mjs";
 import { getFreePort } from "../test-helpers/mock-upstream.js";
 import { startRouter } from "../test-helpers/router-harness.js";
 
@@ -252,3 +255,297 @@ async function waitFor(predicate, timeoutMs = 3000) {
     await new Promise((r) => setTimeout(r, 20));
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// Regression: encoded reserved prefixes must never loop gateway -> Vite -> gateway
+// ---------------------------------------------------------------------------
+
+const RESERVED = ["/api", "/v1", "/v1beta", "/health"];
+const isReserved = (pathname) => RESERVED.some((prefix) => pathname === prefix || pathname.startsWith(prefix + "/"));
+
+/**
+ * A Vite that behaves like the real one did before the fix: anything whose raw
+ * URL starts with an API prefix is proxied straight back to the gateway, with
+ * the caller's headers. Against the old implementation that is an endless
+ * gateway <-> Vite bounce; the client request never completes.
+ */
+async function startLoopingVite() {
+  const seen = [];
+  const state = { routerBase: null };
+  const server = http.createServer((req, res) => {
+    seen.push(req.url);
+    if (state.routerBase && RESERVED.some((prefix) => req.url.startsWith(prefix))) {
+      const back = http.request(state.routerBase + req.url, { method: req.method, headers: { ...req.headers, host: new URL(state.routerBase).host } }, (backRes) => {
+        res.writeHead(backRes.statusCode, backRes.headers);
+        backRes.pipe(res);
+      });
+      back.on("error", () => res.destroy());
+      req.pipe(back);
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(`vite:${req.url}`);
+  });
+  const port = await getFreePort();
+  await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    seen,
+    setRouter(base) { state.routerBase = base; },
+    close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); })
+  };
+}
+
+const get = (base, pathname) => fetch(base + pathname, { signal: AbortSignal.timeout(3000) });
+
+test("isReservedWhenDecoded: decodes once and recognises gateway prefixes", () => {
+  for (const hit of ["/api%2fconfig", "/v1%2fmodels", "/v1beta%2fmodels", "/health%2f", "/%61pi/config", "/x%2f..%2fapi%2fconfig", "/api%5cconfig", "/api%3fx", "/api%zz"]) {
+    assert.equal(isReservedWhenDecoded(hit, isReserved), true, hit);
+  }
+  for (const miss of ["/", "/dashboard", "/some/spa/route", "/src/main.jsx", "/@vite/client", "/a%20b", "/apiary", "/api%252fconfig"]) {
+    assert.equal(isReservedWhenDecoded(miss, isReserved), false, miss);
+  }
+});
+
+test("encoded reserved prefixes get a 404 from the gateway and never reach Vite", async () => {
+  const vite = await startLoopingVite();
+  const router = await startRouter({ MULTIAI_DEV_UI_ORIGIN: vite.origin });
+  vite.setRouter(router.baseUrl);
+  try {
+    for (const encoded of ["/api%2fconfig", "/v1%2fmodels", "/v1beta%2fmodels", "/health%2f", "/%61pi/config", "/v1%2Fmodels"]) {
+      const res = await get(router.baseUrl, encoded);
+      assert.equal(res.status, 404, encoded);
+      assert.match(res.headers.get("content-type"), /application\/json/, encoded);
+    }
+    assert.deepEqual(vite.seen, [], "none of them reached Vite, so none could be proxied back");
+
+    // A burst (the original reproduction used 12 abandoned requests) leaves the gateway healthy.
+    await Promise.all(Array.from({ length: 12 }, (_, i) => get(router.baseUrl, `/api%2fconfig${i}`).then((r) => r.status)));
+    assert.deepEqual(vite.seen, []);
+    assert.equal((await get(router.baseUrl, "/health")).status, 200);
+  } finally {
+    await router.close();
+    await vite.close();
+  }
+});
+
+test("a lookalike prefix that does reach Vite is stopped by the loop guard after exactly one hop", async () => {
+  const vite = await startLoopingVite();
+  const router = await startRouter({ MULTIAI_DEV_UI_ORIGIN: vite.origin });
+  vite.setRouter(router.baseUrl);
+  try {
+    for (const lookalike of ["/apiary", "/health.js", "/v1beta2"]) {
+      const before = vite.seen.length;
+      const res = await get(router.baseUrl, lookalike);
+      assert.equal(res.status, 508, `${lookalike} must end in Loop Detected, not hang`);
+      assert.equal(vite.seen.length - before, 1, `${lookalike}: exactly one gateway->Vite hop`);
+    }
+  } finally {
+    await router.close();
+    await vite.close();
+  }
+});
+
+test("normal panel routes still reach Vite untouched", async () => {
+  const vite = await startLoopingVite();
+  const router = await startRouter({ MULTIAI_DEV_UI_ORIGIN: vite.origin });
+  vite.setRouter(router.baseUrl);
+  try {
+    for (const route of ["/", "/dashboard", "/some/spa/route", "/src/main.jsx", "/@vite/client", "/a%20b"]) {
+      const res = await get(router.baseUrl, route);
+      assert.equal(res.status, 200, route);
+      assert.equal(await res.text(), `vite:${route}`, route);
+    }
+    // Real API routes are still answered by the gateway itself.
+    for (const api of ["/health", "/v1/models", "/api/config"]) {
+      const before = vite.seen.length;
+      assert.equal((await get(router.baseUrl, api)).status, 200, api);
+      assert.equal(vite.seen.length, before, `${api} must not reach Vite`);
+    }
+  } finally {
+    await router.close();
+    await vite.close();
+  }
+});
+
+test("the proxy refuses a request that already carries its loop marker", async () => {
+  const vite = await startFakeVite();
+  const proxy = createDevUiProxy(vite.origin);
+  const front = http.createServer((req, res) => proxy.handle(req, res));
+  const frontPort = await getFreePort();
+  await new Promise((resolve) => front.listen(frontPort, "127.0.0.1", resolve));
+  try {
+    const res = await fetch(`http://127.0.0.1:${frontPort}/x`, { headers: { [LOOP_HEADER]: "1" } });
+    assert.equal(res.status, 508);
+    assert.equal(vite.seen.length, 0);
+    const ok = await fetch(`http://127.0.0.1:${frontPort}/x`);
+    assert.equal(ok.status, 200);
+    assert.equal(vite.seen[0].url, "/x");
+  } finally {
+    proxy.close();
+    front.closeAllConnections();
+    await new Promise((resolve) => front.close(resolve));
+    await vite.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Regression: Vite filesystem endpoints are not offered to remote clients
+// ---------------------------------------------------------------------------
+
+/** Drives proxy.handle with a stubbed connection so the peer address can be non-loopback. */
+function viaPeer(proxy, remoteAddress, url) {
+  return new Promise((resolve) => {
+    const req = Object.assign(Readable.from([]), { url, method: "GET", headers: {}, socket: { remoteAddress } });
+    const res = new PassThrough();
+    let body = "";
+    res.writeHead = (status) => { res.status = status; };
+    res.on("data", (chunk) => { body += chunk; });
+    res.on("end", () => resolve({ status: res.status, body }));
+    res.on("close", () => resolve({ status: res.status, body }));
+    proxy.handle(req, res);
+  });
+}
+
+test("remote peers cannot reach Vite's filesystem endpoints; loopback and prebundled deps still work", async () => {
+  const vite = await startFakeVite();
+  const proxy = createDevUiProxy(vite.origin);
+  try {
+    const remote = "192.0.2.9";
+    for (const blocked of [
+      "/@fs/home/dev/repo/src/config.js",
+      "/@fs/home/dev/repo/package.json",
+      "/@fs/home/dev/repo/node_modules/.vite/deps/../../../src/config.js",
+      "/@fs/home/dev/repo/node_modules/.vite/deps/%2e%2e/%2e%2e/%2e%2e/src/config.js",
+      "/%40fs/home/dev/repo/src/config.js",
+      "/@FS/home/dev/repo/src/config.js",
+      "/__open-in-editor?file=src/config.js",
+      "/@fs/%zz"
+    ]) {
+      const res = await viaPeer(proxy, remote, blocked);
+      assert.equal(res.status, 403, blocked);
+    }
+    assert.equal(vite.seen.length, 0, "blocked requests were not forwarded");
+
+    // What the panel itself needs from a remote browser keeps working.
+    for (const allowed of [
+      "/@fs/home/dev/repo/node_modules/.vite/deps/react.js?v=49926102",
+      "/@fs/home/dev/repo/node_modules/.vite/deps/react-dom_client.js?v=1",
+      "/src/main.jsx",
+      "/@vite/client",
+      "/"
+    ]) {
+      const res = await viaPeer(proxy, remote, allowed);
+      assert.equal(res.status, 200, allowed);
+    }
+
+    // The developer on this machine is unrestricted.
+    for (const local of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
+      assert.equal((await viaPeer(proxy, local, "/@fs/home/dev/repo/src/config.js")).status, 200, local);
+    }
+  } finally {
+    proxy.close();
+    await vite.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Regression: `npm run dev` binds to loopback unless HOST is set on purpose
+// ---------------------------------------------------------------------------
+
+test("dev launch config: HOST defaults to loopback and an explicit HOST is never overridden", () => {
+  for (const unset of [{}, { HOST: "" }, { HOST: "   " }, { HOST: undefined }]) {
+    assert.equal(resolveGatewayHost(unset), "127.0.0.1", JSON.stringify(unset));
+  }
+  for (const explicit of ["0.0.0.0", "::", "192.168.1.5", "localhost", "::1"]) {
+    assert.equal(resolveGatewayHost({ HOST: explicit }), explicit);
+  }
+  assert.equal(resolveGatewayHost({ HOST: " 0.0.0.0 " }), "0.0.0.0");
+
+  const env = gatewayEnv({}, 4321);
+  assert.deepEqual(env, { HOST: "127.0.0.1", MULTIAI_DEV_UI_ORIGIN: "http://127.0.0.1:4321" });
+  assert.doesNotThrow(() => parseDevUiOrigin(env.MULTIAI_DEV_UI_ORIGIN), "the origin handed to the gateway passes its own validation");
+  assert.equal(gatewayEnv({ HOST: "0.0.0.0" }, 1).HOST, "0.0.0.0");
+  assert.equal(viteEnv.MULTIAI_UI_BEHIND_GATEWAY, "1");
+});
+
+test("vite.config only proxies the API in standalone mode, never behind the gateway", async () => {
+  const configUrl = new URL("../ui/vite.config.js", import.meta.url).href;
+  const load = async (flag) => {
+    const previous = process.env.MULTIAI_UI_BEHIND_GATEWAY;
+    if (flag === undefined) delete process.env.MULTIAI_UI_BEHIND_GATEWAY; else process.env.MULTIAI_UI_BEHIND_GATEWAY = flag;
+    try {
+      return (await import(`${configUrl}?flag=${String(flag)}`)).default.server.proxy;
+    } finally {
+      if (previous === undefined) delete process.env.MULTIAI_UI_BEHIND_GATEWAY; else process.env.MULTIAI_UI_BEHIND_GATEWAY = previous;
+    }
+  };
+  assert.deepEqual(Object.keys(await load(undefined)).sort(), ["/api", "/health", "/v1", "/v1beta"], "standalone ui:dev keeps its proxy");
+  assert.equal(await load("1"), undefined, "behind the gateway Vite proxies nothing");
+});
+
+const externalIPv4 = Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal)?.address;
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+
+async function launchDev(envOverrides) {
+  const port = await getFreePort();
+  const env = { ...process.env, PORT: String(port), DOTENV_CONFIG_PATH: "/nonexistent/.env", MULTIAI_DEV_UI_ORIGIN: "", ...envOverrides };
+  if (envOverrides.HOST === undefined) delete env.HOST;
+  const child = spawn(process.execPath, ["scripts/dev.mjs"], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout.on("data", (c) => { out += c; });
+  child.stderr.on("data", (c) => { out += c; });
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  const deadline = Date.now() + 60000;
+  while (!out.includes("[dev] Ready")) {
+    if (Date.now() > deadline || child.exitCode !== null) throw new Error(`npm run dev did not become ready:\n${out}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return {
+    port,
+    async stop() {
+      child.kill("SIGINT");
+      await Promise.race([exited, new Promise((r) => setTimeout(r, 10000))]);
+      if (child.exitCode === null) child.kill("SIGKILL");
+    }
+  };
+}
+
+function canConnect(host, port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port, timeout: 2000 });
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("error", () => resolve(false));
+    socket.once("timeout", () => { socket.destroy(); resolve(false); });
+  });
+}
+
+test("npm run dev with HOST unset listens on loopback only", { skip: externalIPv4 ? false : "no non-loopback IPv4 interface to probe", timeout: 90000 }, async () => {
+  const dev = await launchDev({});
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${dev.port}/health`)).status, 200, "loopback works");
+    assert.equal(await canConnect(externalIPv4, dev.port), false, "the LAN address must refuse connections");
+  } finally {
+    await dev.stop();
+  }
+});
+
+test("npm run dev with an explicit HOST=0.0.0.0 is reachable, but still withholds the source tree from remote peers", { skip: externalIPv4 ? false : "no non-loopback IPv4 interface to probe", timeout: 90000 }, async () => {
+  const dev = await launchDev({ HOST: "0.0.0.0" });
+  try {
+    const remote = `http://${externalIPv4}:${dev.port}`;
+    assert.equal((await fetch(`${remote}/health`)).status, 200, "explicit HOST is honoured");
+    const main = await (await fetch(`${remote}/src/main.jsx`)).text();
+    const dep = main.match(/"(\/@fs\/[^"]*\/node_modules\/\.vite\/deps\/[^"]+)"/)?.[1];
+    assert.ok(dep, "the panel's dependencies are still addressed through /@fs");
+    assert.equal((await fetch(remote + dep)).status, 200, "so the panel keeps working for a remote browser");
+
+    const secret = `/@fs${repoRoot.replace(/\/$/, "")}/src/config.js`;
+    assert.equal((await fetch(remote + secret)).status, 403, "backend source is not served to a remote peer");
+    assert.equal((await fetch(`${remote}/@fs${repoRoot.replace(/\/$/, "")}/package.json`)).status, 403);
+    assert.equal((await fetch(`http://127.0.0.1:${dev.port}${secret}`)).status, 200, "the local developer is unrestricted");
+  } finally {
+    await dev.stop();
+  }
+});

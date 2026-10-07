@@ -23,6 +23,13 @@ import react from "@vitejs/plugin-react";
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 const ROUTER_ORIGIN = process.env.MULTIAI_ROUTER_ORIGIN || "http://localhost:999";
 
+// Under `npm run dev` the gateway forwards panel requests here and serves the
+// API routes itself, so Vite must not proxy them back: a request the gateway
+// does not treat as an API route would otherwise bounce gateway -> Vite ->
+// gateway indefinitely. `scripts/dev-config.mjs` sets this; standalone
+// `npm run ui:dev` does not, and keeps the proxy.
+const BEHIND_GATEWAY = process.env.MULTIAI_UI_BEHIND_GATEWAY === "1";
+
 export default defineConfig({
   root: projectRoot,
   plugins: [react()],
@@ -35,12 +42,14 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: false,
-    proxy: Object.fromEntries(
-      ["/api", "/health", "/v1", "/v1beta"].map((path) => [
-        path,
-        { target: ROUTER_ORIGIN, changeOrigin: true }
-      ])
-    )
+    proxy: BEHIND_GATEWAY
+      ? undefined
+      : Object.fromEntries(
+        ["/api", "/health", "/v1", "/v1beta"].map((path) => [
+          path,
+          { target: ROUTER_ORIGIN, changeOrigin: true }
+        ])
+      )
   },
   test: {
     // Pure-function tests only; no DOM environment is pulled in.
