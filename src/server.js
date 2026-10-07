@@ -1,5 +1,6 @@
 import "dotenv/config";
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -222,7 +223,20 @@ function authorized(req) {
   if (config.routerApiKeys.length === 0) return isLoopback(req);
   const value = String(req.headers.authorization || "");
   const token = value.startsWith("Bearer ") ? value.slice(7).trim() : "";
-  return Boolean(token && config.routerApiKeys.includes(token));
+  if (!token) return false;
+
+  // Compare every configured key without early exit. Buffer length is checked
+  // before timingSafeEqual so malformed/mismatched lengths cannot throw.
+  // This avoids ordinary string equality as the final credential check.
+  const tokenBytes = Buffer.from(token, "utf8");
+  let matched = false;
+  for (const configured of config.routerApiKeys) {
+    const keyBytes = Buffer.from(configured, "utf8");
+    if (keyBytes.length === tokenBytes.length && timingSafeEqual(keyBytes, tokenBytes)) {
+      matched = true;
+    }
+  }
+  return matched;
 }
 
 // Clients such as Claude Code, Codex and the OpenAI SDKs never send
