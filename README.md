@@ -14,9 +14,31 @@ Multi-provider AI gateway with priority routing, sticky sessions, automatic fall
 
 ## Requirements
 
-- Node.js 20+
-- npm
-- Provider API credentials and model configuration in `.env`
+- Git
+- Node.js 20+ (npm is included)
+- Provider API keys and models in `.env`
+
+Install Git and Node.js:
+
+```powershell
+# Windows
+winget install Git.Git
+winget install OpenJS.NodeJS.LTS
+```
+
+```bash
+# macOS
+brew install git node
+```
+
+```bash
+# Ubuntu / Debian / VPS
+sudo apt update && sudo apt install -y git
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+Check: `node -v` (v20 or higher), `npm -v`, `git --version`.
 
 ## Installation
 
