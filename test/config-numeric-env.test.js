@@ -60,6 +60,14 @@ test("STREAM_IDLE_TIMEOUT_MS is validated; 0 disables the post-header bound", ()
 
 // A typo used to be filtered out silently: RETRY_STATUS_CODES=abc configured
 // nothing and looked fine. Every entry is now a real HTTP status code.
+test("STICKY_TTL_MS is validated and never silently falls back", () => {
+  assert.equal(loadConfig({}).stickyTtlMs, 20 * 60 * 1000);
+  assert.equal(loadConfig({ STICKY_TTL_MS: "60000" }).stickyTtlMs, 60000);
+  for (const bad of ["abc", "0", "-1", "1.5", "NaN", "Infinity"]) {
+    assert.throws(() => loadConfig({ STICKY_TTL_MS: bad }), /Invalid STICKY_TTL_MS: expected a positive integer/, bad);
+  }
+});
+
 test("RETRY_STATUS_CODES accepts a valid list and rejects anything that is not a status code", () => {
   const parsed = loadConfig({ RETRY_STATUS_CODES: " 429, 500 ,503" }).retryableStatus;
   assert.deepEqual([...parsed].sort((a, b) => a - b), [429, 500, 503]);
