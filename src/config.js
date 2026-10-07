@@ -159,7 +159,11 @@ export function loadConfig(env = process.env) {
     maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", DEFAULT_MAX_BODY_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
     // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
     // exists so tests can use a short real-clock TTL).
-    stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 20 * 60 * 1000,
+    stickyTtlMs: readNumber(env, "STICKY_TTL_MS", 20 * 60 * 1000, { min: 1, expected: "a positive integer" }),
+    remoteImageAllowHttp: String(env.REMOTE_IMAGE_ALLOW_HTTP || "").trim().toLowerCase() === "true",
+    remoteImageAllowPrivateNetwork: String(env.REMOTE_IMAGE_ALLOW_PRIVATE_NETWORK || "").trim().toLowerCase() === "true",
+    remoteImageMaxBytes: readNumber(env, "REMOTE_IMAGE_MAX_BYTES", 20 * 1024 * 1024, { min: 1, expected: "a positive integer" }),
+    remoteImageTimeoutMs: readNumber(env, "REMOTE_IMAGE_TIMEOUT_MS", 15000, { min: 1, expected: "a positive integer" }),
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,
