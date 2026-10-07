@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "../components/layout/PageHeader.jsx";
 import { Icon } from "../components/ui/Icon.jsx";
 import { PoolBadge } from "../components/ui/PoolBadge.jsx";
@@ -19,6 +19,9 @@ import { providerLabel } from "../lib/format.js";
  * Provider -> Key -> Models fallback). An empty list changes nothing.
  *
  * Text and vision are separate lists: a request never leaves its own pool.
+ *
+ * Every change (add, remove, move, clear) is saved to the gateway straight away;
+ * there is no separate Save step to forget.
  */
 const POOLS = [
   { key: "text", label: "Text", hint: "Chat, coding and reasoning requests" },
@@ -26,7 +29,6 @@ const POOLS = [
 ];
 
 const EMPTY = { text: [], vision: [] };
-const sameList = (a, b) => a.length === b.length && a.every((item, index) => item === b[index]);
 
 export default function ManualOrder() {
   const toast = useToast();
@@ -34,80 +36,82 @@ export default function ManualOrder() {
   const [payload, setPayload] = useState(null);
   const [draft, setDraft] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
   const [activePool, setActivePool] = useState("text");
 
-  // The first load fills the editor; after that the editor owns the draft and
-  // only a successful save replaces the saved copy.
+  // draftRef is what the next save sends; pending holds the newest unsent state
+  // while a save is in flight, so rapid clicks are sent in order and the last
+  // one always wins. confirmed is the last state the gateway accepted.
+  const draftRef = useRef(EMPTY);
+  const pending = useRef(null);
+  const confirmed = useRef(EMPTY);
+  const busy = useRef(false);
+
   useEffect(() => {
     if (api.data && payload === null) {
+      const first = { text: [...api.data.text], vision: [...api.data.vision] };
       setPayload(api.data);
-      setDraft({ text: [...api.data.text], vision: [...api.data.vision] });
+      setDraft(first);
+      draftRef.current = first;
+      confirmed.current = first;
     }
   }, [api.data, payload]);
 
-  const saved = payload ? { text: payload.text, vision: payload.vision } : EMPTY;
-  const dirty = !sameList(draft.text, saved.text) || !sameList(draft.vision, saved.vision);
-
-  // "Add" only edits the draft; nothing reaches the router until "Save order".
-  // Warn before a refresh or tab close would silently throw the draft away.
+  // Only while a save is still on its way: closing the tab now could lose it.
   useEffect(() => {
-    if (!dirty) return undefined;
+    if (!saving) return undefined;
     const warn = (event) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  }, [saving]);
 
-  const setPool = (pool, list) => setDraft((current) => ({ ...current, [pool]: list }));
-
-  async function save() {
+  async function flush() {
+    if (busy.current) return;
+    busy.current = true;
     setSaving(true);
     try {
-      const next = await saveManualSelection({ text: draft.text, vision: draft.vision });
-      setPayload(next);
-      setDraft({ text: [...next.text], vision: [...next.vision] });
-      toast.success(
-        next.text.length + next.vision.length === 0
-          ? "Manual order cleared"
-          : "Manual order saved. New requests use it now"
-      );
-    } catch (error) {
-      toastApiError(toast, error, "Could not save the manual order");
+      while (pending.current) {
+        const body = pending.current;
+        pending.current = null;
+        try {
+          const next = await saveManualSelection({ text: body.text, vision: body.vision });
+          confirmed.current = { text: [...next.text], vision: [...next.vision] };
+          setPayload(next);
+          setSavedAt(Date.now());
+        } catch (error) {
+          // The gateway did not take it: show what it actually has.
+          pending.current = null;
+          draftRef.current = confirmed.current;
+          setDraft(confirmed.current);
+          toastApiError(toast, error, "Could not save the manual order");
+        }
+      }
     } finally {
+      busy.current = false;
       setSaving(false);
     }
   }
 
-  function discard() {
-    setDraft({ text: [...saved.text], vision: [...saved.vision] });
+  function setPool(pool, list) {
+    const next = { ...draftRef.current, [pool]: list };
+    draftRef.current = next;
+    pending.current = next;
+    setDraft(next);
+    flush();
   }
+
+  const status = saving ? "Saving…" : savedAt ? "All changes saved" : "Changes save automatically";
 
   return (
     <div className="page">
       <PageHeader
         title="Model Manual Order"
         description="Choose the models a request tries first, in your own order"
-        actions={
-          <div className="row mo-header-actions" style={{ gap: "var(--sp-2)" }}>
-            <button type="button" className="btn" onClick={discard} disabled={!dirty || saving}>
-              Discard
-            </button>
-            <button type="button" className="btn btn--primary" onClick={save} disabled={!dirty || saving}>
-              {saving ? "Saving…" : "Save order"}
-            </button>
-          </div>
-        }
+        actions={<span className="mo-status" role="status" aria-live="polite">{status}</span>}
       />
-
-      {dirty ? (
-        <div className="notice notice--warn section mo-dirty-notice">
-          <span>
-            You have unsaved changes. Press <strong>Save order</strong> to apply them; if you refresh now they are lost.
-          </span>
-        </div>
-      ) : null}
 
       {payload?.persisted === false ? (
         <div className="notice notice--warn section">
@@ -122,25 +126,21 @@ export default function ManualOrder() {
       ) : (
         <>
           <div className="mo-tabs" role="tablist" aria-label="Pool">
-            {POOLS.map((pool) => {
-              const changed = !sameList(draft[pool.key], saved[pool.key]);
-              return (
-                <button
-                  key={pool.key}
-                  type="button"
-                  role="tab"
-                  id={`mo-tab-${pool.key}`}
-                  aria-selected={activePool === pool.key}
-                  aria-controls={`mo-pool-${pool.key}`}
-                  className="mo-tab"
-                  onClick={() => setActivePool(pool.key)}
-                >
-                  {pool.label}
-                  <span className="mo-tab__count">{draft[pool.key].length}</span>
-                  {changed ? <span className="mo-tab__dot" title="Unsaved changes" /> : null}
-                </button>
-              );
-            })}
+            {POOLS.map((pool) => (
+              <button
+                key={pool.key}
+                type="button"
+                role="tab"
+                id={`mo-tab-${pool.key}`}
+                aria-selected={activePool === pool.key}
+                aria-controls={`mo-pool-${pool.key}`}
+                className="mo-tab"
+                onClick={() => setActivePool(pool.key)}
+              >
+                {pool.label}
+                <span className="mo-tab__count">{draft[pool.key].length}</span>
+              </button>
+            ))}
           </div>
 
           <div className="mo-pools">
@@ -155,16 +155,6 @@ export default function ManualOrder() {
               />
             ))}
           </div>
-
-          {dirty ? (
-            <div className="mo-savebar" role="region" aria-label="Unsaved changes">
-              <span className="mo-savebar__text">Unsaved changes</span>
-              <button type="button" className="btn" onClick={discard} disabled={saving}>Discard</button>
-              <button type="button" className="btn btn--primary" onClick={save} disabled={saving}>
-                {saving ? "Saving…" : "Save order"}
-              </button>
-            </div>
-          ) : null}
         </>
       )}
     </div>

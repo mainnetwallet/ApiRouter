@@ -9,7 +9,6 @@
  */
 
 .mo-tabs { display: none; }
-.mo-savebar { display: none; }
 
 .mo-pools { display: grid; gap: var(--sp-4); grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
 .mo-pools .panel { margin: 0; }
@@ -125,9 +124,6 @@
 /* --- Mobile --------------------------------------------------------------- */
 
 @media (max-width: 720px) {
-  .mo-header-actions,
-  .mo-dirty-notice { display: none; }
-
   /* Segmented Text | Vision switch. */
   .mo-tabs {
     display: grid;
@@ -166,7 +162,6 @@
     font-family: var(--font-mono);
     text-align: center;
   }
-  .mo-tab__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
 
   .mo-pools { display: block; }
   .mo-pool { display: none; }
@@ -192,21 +187,6 @@
   .mo-pool .input { font-size: 16px; min-height: 44px; }
 
   .panel__actions .btn { min-height: 36px; }
-
-  /* Save / Discard pinned to the bottom of the scrolling area. */
-  .mo-savebar {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    position: sticky;
-    bottom: calc(-1 * var(--sp-10));
-    z-index: 5;
-    margin: var(--sp-4) calc(-1 * var(--sp-3)) calc(-1 * var(--sp-10));
-    padding: var(--sp-3) var(--sp-3) calc(var(--sp-3) + env(safe-area-inset-bottom, 0px));
-    background: var(--bg-surface);
-    border-top: 1px solid var(--warn-border);
-    box-shadow: 0 -6px 16px rgba(0, 0, 0, 0.35);
-  }
-  .mo-savebar__text { flex: 1 1 auto; min-width: 0; font-size: var(--fs-sm); color: var(--text); }
-  .mo-savebar .btn { min-height: 44px; padding: 0 var(--sp-4); }
 }
+
+.mo-status { font-size: var(--fs-sm); color: var(--text-dim); align-self: center; }

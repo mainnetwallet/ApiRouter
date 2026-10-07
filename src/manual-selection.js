@@ -81,16 +81,35 @@ export class ManualSelection {
     this.lists = { text: [], vision: [] };
     this.updatedAt = null;
     this.persistError = null;
+    this.mtimeMs = null;
+    this.lastCheck = 0;
     this.load();
+  }
+
+  /**
+   * The file is the source of truth. If another process (a second gateway on the
+   * same checkout, an old instance that was never stopped) rewrote it, pick the
+   * change up instead of serving a stale in-memory copy that would bring removed
+   * entries back. Checked at most once a second, so it costs nothing per request.
+   */
+  refresh() {
+    const now = Date.now();
+    if (now - this.lastCheck < 1000) return;
+    this.lastCheck = now;
+    let mtime = null;
+    try { mtime = fs.statSync(this.file).mtimeMs; } catch { mtime = null; }
+    if (mtime !== this.mtimeMs) this.load();
   }
 
   /** Entries of one pool, in the saved order. Never null. */
   get(pool = "text") {
+    this.refresh();
     return this.lists[pool === "vision" ? "vision" : "text"];
   }
 
   /** `{ text, vision }`, the shape `routeOrderByPool` / `buildRoutePlan` consume. */
   all() {
+    this.refresh();
     return { text: this.lists.text, vision: this.lists.vision };
   }
 
@@ -106,6 +125,7 @@ export class ManualSelection {
   }
 
   snapshot() {
+    this.refresh();
     return {
       text: this.lists.text.map(manualEntryId),
       vision: this.lists.vision.map(manualEntryId),
@@ -117,8 +137,10 @@ export class ManualSelection {
   load() {
     let raw;
     try {
+      this.mtimeMs = fs.statSync(this.file).mtimeMs;
       raw = fs.readFileSync(this.file, "utf8");
     } catch {
+      this.mtimeMs = null;
       return; // no file yet: no manual selection
     }
     try {
@@ -140,6 +162,7 @@ export class ManualSelection {
       const temp = `${this.file}.${process.pid}.tmp`;
       fs.writeFileSync(temp, `${JSON.stringify({ ...this.snapshot(), persisted: undefined }, null, 2)}\n`);
       fs.renameSync(temp, this.file);
+      this.mtimeMs = fs.statSync(this.file).mtimeMs;
       this.persistError = null;
     } catch (error) {
       // Still applied in memory; the panel is told it will not survive a restart.
