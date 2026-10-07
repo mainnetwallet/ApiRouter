@@ -30,25 +30,25 @@ function configuredHeaderNames(provider) {
 }
 
 /**
- * A provider's base URL, safe for the panel. Cloudflare's resolved URL embeds
- * the operator's account id, which is an internal identifier the UI never
- * needs: every occurrence is replaced with the `{account_id}` placeholder the
- * account id was substituted into. Everything else is shown unchanged, so the
- * panel can still report which endpoint a provider talks to.
+ * A base URL as the control panel may show it. Provider URLs can embed things
+ * that must not leave the process: the Cloudflare account id sits in the path
+ * (`/accounts/<id>/...`), and an operator may have put credentials in the
+ * userinfo or query string. Those are replaced or dropped; the host and the
+ * rest of the path stay, which is what an operator needs to recognise it.
  */
-function displayBaseUrl(provider) {
-  const base = String(provider?.baseUrl || "");
-  if (!base) return null;
-  const accounts = Array.isArray(provider?.accountIds) ? provider.accountIds : [];
-  let safe = base;
-  for (const account of accounts) {
-    const value = String(account || "").trim();
-    if (!value) continue;
-    for (const form of new Set([value, encodeURIComponent(value)])) {
-      safe = safe.split(form).join("{account_id}");
-    }
+export function publicBaseUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    url.pathname = url.pathname.replace(/(\/accounts\/)[^/]+/i, "$1[account-id]");
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "[invalid URL]";
   }
-  return safe;
 }
 
 function describeProvider(id, provider, targets, pool = "text", capabilities = null) {
@@ -84,9 +84,7 @@ function describeProvider(id, provider, targets, pool = "text", capabilities = n
     textModels: [...caps.textModels],
     visionModels: [...caps.visionModels],
 
-    // Redacted: a Cloudflare account id is an internal identifier and must not
-    // reach the panel (or any `/api/config` reader) in the resolved base URL.
-    baseUrl: displayBaseUrl(provider),
+    baseUrl: publicBaseUrl(provider.baseUrl),
     models: [...provider.models],
     modelCount: provider.models.length,
 
@@ -124,9 +122,7 @@ export function describeConfig(config, targets = []) {
     },
     routing: {
       retryableStatus: [...config.retryableStatus].sort((a, b) => a - b),
-      // The plan is deterministic (sticky -> priority -> hierarchical fallback);
-      // health only removes cooling targets from eligibility, it never reorders.
-      strategy: "deterministic plan (sticky, then priority, then hierarchical fallback)",
+      strategy: "sticky session, then priority, then provider/key/model fallback (health only skips cooling targets)",
       targetIdentity: "provider + model + keyIndex",
       exactModelPreferred: true,
       // The two pools are routed independently; a request never crosses over.
@@ -185,7 +181,9 @@ export function describeEnvironment(config) {
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
       { name: "TEXT_PRIORITY_MODELS", configured: config.priority?.text?.length > 0, kind: "list" },
       { name: "VISION_PRIORITY_MODELS", configured: config.priority?.vision?.length > 0, kind: "list" },
-      { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
+      { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" },
+      { name: "HOST", configured: Boolean(config.host), kind: "text" },
+      { name: "MAX_REQUEST_BODY_BYTES", configured: config.maxRequestBodyBytes != null, kind: "number" }
     ],
     providers: providerVars,
     visionProviders: visionProviderVars

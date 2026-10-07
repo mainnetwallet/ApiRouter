@@ -176,6 +176,12 @@ export class HealthRegistry {
     now = Date.now()
   ) {
     if (ok === true) {
+      // A probe talks to a metadata endpoint, not to the chat endpoint that
+      // failed. Its success proves reachability, not that the failure which put
+      // this target in cooldown is gone, so it must not cut that cooldown short:
+      // only the cooldown timer, or a real request that succeeds, revives it.
+      const current = this.ensureTarget(target);
+      if (current.cooldownUntil > now) return current;
       return this.markSuccess(
         target,
         { latencyMs, status: Number.isInteger(status) ? status : 200, reason },
@@ -193,11 +199,8 @@ export class HealthRegistry {
     }
 
     const state = this.ensureTarget(target);
-    // Keep the operator-visible reason current without touching health. The
-    // observation timestamp still advances, so a probe that began earlier can
-    // never later overwrite a newer outcome — even one this probe declined to
-    // judge. `acceptObservation` leaves `cooldownUntil`/`status` untouched.
-    if (this.acceptObservation(state, now)) {
+    // Keep the operator-visible reason current without touching health.
+    if (!Number.isFinite(now) || now >= state.observedAt) {
       state.lastReason = reason ?? state.lastReason;
     }
     return state;
@@ -237,6 +240,10 @@ export function markFailure(target, status, options = {}, now = Date.now()) {
 
 export function recordHealthCheck(target, result = {}, now = Date.now()) {
   return healthRegistry.recordHealthCheck(target, result, now);
+}
+
+export function rankTargets(targets, now = Date.now()) {
+  return healthRegistry.rank(targets, now);
 }
 
 async function refreshTarget(target, check) {
