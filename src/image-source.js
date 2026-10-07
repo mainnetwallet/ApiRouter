@@ -35,6 +35,29 @@ export function unsupportedImageSource(detail) {
   return error;
 }
 
+export const UNSUPPORTED_CONTENT = "unsupported_content";
+
+/**
+ * Same contract as `unsupportedImageSource`, for non-image multimodal parts
+ * (audio, documents, files) that a translation boundary cannot carry. The
+ * gateway refuses them explicitly instead of dropping them and answering 200.
+ * `retryable` + `skipCooldown`: a target speaking the client's own protocol
+ * carries the part unchanged, and a request-shape mismatch is not provider
+ * ill health.
+ */
+export function unsupportedContent(detail) {
+  const error = new Error(
+    `unsupported_content: this target cannot carry ${detail}. ` +
+    "The router never drops client content silently; " +
+    "route the request to a target that accepts it as-is, or remove it from the request."
+  );
+  error.status = 400;
+  error.errorType = UNSUPPORTED_CONTENT;
+  error.retryable = true;
+  error.skipCooldown = true;
+  return error;
+}
+
 const INLINE_DATA_URL = /^data:([^;,]*);base64,(.+)$/s;
 
 /**

@@ -19,6 +19,7 @@ import {
 } from "./health.js";
 import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
 import { fetchUpstream, isRedirectStatus } from "./upstream-fetch.js";
+import { guardUpstreamStream, readBoundedBody, bufferUpTo, isUpstreamFault, MAX_ERROR_BODY_BYTES } from "./upstream-body.js";
 import { ClientAbortError, RouteSession, SessionStore, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream, parseGeminiPath } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
@@ -137,62 +138,19 @@ function toTimeoutError(message) {
 }
 
 /**
- * Read an upstream response body with a post-header inactivity bound.
- *
- * `fetch` resolves on headers, so only time-to-first-byte is bounded by the
- * connect timeout: without this a provider that answers 200 and then stalls
- * holds the client connection open forever. Each chunk resets the timer. Every
- * read failure is tagged with its cause ("client" when the client's own signal
- * aborted it, "upstream" otherwise) so the caller can cool a dead provider
- * without charging a provider for a client that walked away.
+ * Post-header body bounds (idle gap, absolute deadline, buffered size) live in
+ * src/upstream-body.js. `fetch` resolves on headers, so the attempt timer only
+ * bounds time-to-first-response; everything after is bounded there.
  */
-export async function* guardUpstreamStream(webStream, { idleMs = 0, clientSignal = null } = {}) {
-  const reader = webStream.getReader();
-  try {
-    while (true) {
-      let timer = null;
-      let chunk;
-      try {
-        chunk = idleMs > 0
-          ? await Promise.race([
-            reader.read(),
-            new Promise((_, reject) => {
-              timer = setTimeout(() => {
-                const error = new Error("Upstream stream idle timeout");
-                error.code = "STREAM_IDLE_TIMEOUT";
-                reject(error);
-              }, idleMs);
-            })
-          ])
-          : await reader.read();
-      } catch (error) {
-        error.streamCause = error?.code !== "STREAM_IDLE_TIMEOUT" && clientSignal?.aborted ? "client" : "upstream";
-        throw error;
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-      if (chunk.done) return;
-      yield chunk.value;
-    }
-  } finally {
-    // Cancel the upstream reader so a timeout or client abort tears the
-    // provider connection down rather than leaving it draining in the vacuum.
-    try { await reader.cancel(); } catch { /* already closed */ }
-  }
-}
+export { guardUpstreamStream };
 
 /**
- * Buffer a whole upstream body under the same post-header inactivity bound a
- * streamed body gets. The attempt timer only covers time-to-headers, so a bare
- * `arrayBuffer()` / `json()` on a provider that answers `200` and then goes
- * quiet was cut off only by the HTTP client's own 5 minute default, ignoring
- * the configured timeout. Failures carry the same `streamCause` tag.
+ * Buffer a whole upstream body under the idle bound, the attempt's absolute
+ * deadline and a byte ceiling. Failures carry the `streamCause` tag.
  */
-export async function readUpstreamBody(webStream, { idleMs = 0, clientSignal = null } = {}) {
-  if (!webStream) return Buffer.alloc(0);
-  const chunks = [];
-  for await (const chunk of guardUpstreamStream(webStream, { idleMs, clientSignal })) chunks.push(chunk);
-  return Buffer.concat(chunks);
+export async function readUpstreamBody(webStream, { idleMs = 0, deadlineAt = null, clientSignal = null, maxBytes = config.maxUpstreamBodyBytes } = {}) {
+  const { body } = await readBoundedBody(webStream, { idleMs, deadlineAt, clientSignal, maxBytes });
+  return body;
 }
 
 /**
@@ -405,10 +363,11 @@ async function proxy(req, res, protocol, pathname) {
   const receivedAt = Date.now();
   const attempts = [];
   let liveSeq = null;
-  // Set by the invoke callback for a streamed response: a 200 only carried the
-  // headers, so the attempt is not settled as a success until the body has been
-  // delivered (or has failed). See the stream terminal below.
-  let settleStreamAttempt = null;
+  // Set by the invoke callback for every 200: a 200 only carried the headers,
+  // so the attempt is not settled as a success until the body has been consumed
+  // and delivered (or has failed). Streamed and non-streamed attempts settle
+  // through the same once-only finisher; see the terminals below.
+  let settleAttempt = null;
 
   // One abort signal per request, driven by the client connection. It stops the
   // fallback walk before another target is invoked and cancels the in-flight
@@ -656,6 +615,13 @@ async function proxy(req, res, protocol, pathname) {
         // instead of only noticing between steps that nobody is listening.
         const signal = AbortSignal.any([controller.signal, clientGone.signal]);
         const attemptStartedAt = Date.now();
+        let bodyBuf = null;
+        // Absolute deadlines, anchored at the attempt's start. A non-streamed
+        // attempt owns REQUEST_TIMEOUT_MS end to end (headers and body). A
+        // stream may legitimately outlive that, so it has its own much larger
+        // ceiling (STREAM_TOTAL_TIMEOUT_MS, 0 = none) on top of the idle gap.
+        const attemptDeadlineAt = attemptStartedAt + config.timeoutMs;
+        const streamDeadlineAt = config.streamTotalTimeoutMs > 0 ? attemptStartedAt + config.streamTotalTimeoutMs : null;
         // Every invoke is a new attempt with its own id, even when the very same
         // provider/model/key was called a moment ago (or by an earlier request).
         const attemptId = startAttemptEvent(liveSeq, {
@@ -672,6 +638,8 @@ async function proxy(req, res, protocol, pathname) {
         // reconstructed from the final error.
         let recorded = false;
         const attempt = (ok, status, errorMessage) => {
+          // An attempt settles exactly once: the first verdict is the real one.
+          if (recorded) return;
           recorded = true;
           const completedAt = Date.now();
           attempts.push({
@@ -704,8 +672,28 @@ async function proxy(req, res, protocol, pathname) {
           // fetchUpstream never follows a redirect: the target's credential
           // must not be replayed to a host the operator did not configure.
           const upstream = await fetchUpstream(request.url, { ...request.options, signal });
+          // Headers are in: the connect/TTFB timer has done its job. What bounds
+          // the body from here is the idle gap and the absolute deadline, not
+          // this timer, so the three limits stay independent.
+          clearTimeout(timer);
           if (!upstream.ok) {
-            const text = await upstream.text();
+            // Only the head of an error body is ever surfaced, so it is read
+            // under a hard byte cap and the rest is cancelled. A failure to
+            // read it must not hide the status the provider already sent; only
+            // a client that left ends the attempt.
+            let text = "";
+            try {
+              ({ body: bodyBuf } = await readBoundedBody(upstream.body, {
+                maxBytes: MAX_ERROR_BODY_BYTES,
+                overflow: "truncate",
+                idleMs: config.streamIdleTimeoutMs,
+                deadlineAt: attemptStartedAt + config.timeoutMs,
+                clientSignal: clientGone.signal
+              }));
+              text = bodyBuf.toString("utf8");
+            } catch (readError) {
+              if (clientAborted()) throw readError;
+            }
             const error = new Error(text.slice(0, 2000) || ("Upstream HTTP " + upstream.status));
             error.status = upstream.status;
             // A redirect the gateway refused to follow means this configured
@@ -730,17 +718,16 @@ async function proxy(req, res, protocol, pathname) {
             attempt(false, upstream.status, error.message);
             throw error;
           }
-          if (wantsStream) {
-            // A 200 so far only carried the headers. Hand the finisher back and
-            // let the stream terminal settle the attempt: a translated stream
-            // that dies mid-body must be a FAILED attempt, not an accepted one.
-            settleStreamAttempt = attempt;
-            return { upstream, target, upstreamProtocol, translated };
-          }
-          // The successful attempt is recorded too — otherwise the log would
-          // show a chain of failures with no terminal success.
-          attempt(true, upstream.status, null);
-          return { upstream, target, upstreamProtocol, translated };
+          // A 200 so far only carried the headers. Hand the finisher back and
+          // let the terminal settle the attempt once the body is consumed: a
+          // body that truncates, stalls or cannot be parsed must be a FAILED
+          // attempt, not an accepted one. The terminal records the success, so
+          // the log still ends a chain of failures with a real terminal success.
+          settleAttempt = attempt;
+          return {
+            upstream, target, upstreamProtocol, translated,
+            deadlineAt: wantsStream ? streamDeadlineAt : attemptDeadlineAt
+          };
         } catch (error) {
           if (isAbortError(error)) {
             // A client disconnect is not a provider fault: stop the walk without
@@ -838,6 +825,7 @@ async function proxy(req, res, protocol, pathname) {
         try {
           const upstreamJson = JSON.parse(new TextDecoder().decode(await readUpstreamBody(result.upstream.body, {
             idleMs: config.streamIdleTimeoutMs,
+            deadlineAt: result.deadlineAt,
             clientSignal: clientGone.signal
           })));
           converted = bridgeKind === "codex"
@@ -854,6 +842,7 @@ async function proxy(req, res, protocol, pathname) {
           // and leave health untouched — never a silent `{}` and never a
           // cooldown for a healthy target.
           if (error?.errorType === INVALID_TOOL_ARGUMENTS) {
+            settleAttempt?.(false, clientAborted() ? null : (error.status || 400), clientAborted() ? "Client disconnected" : sanitizeMessage(error.message));
             commit(false, { status: error.status || 400, skipCooldown: true, reason: sanitizeMessage(error.message) });
             // The log carries what the client was actually answered, not the
             // upstream's 200: a failed row filed as 200 is invisible to the
@@ -868,7 +857,15 @@ async function proxy(req, res, protocol, pathname) {
             return json(res, error.status || 400, { error: { message, type: error.errorType } }, meta);
           }
           // A 200 that could not be read or translated is not a success: cool
-          // the target instead of recording it healthy.
+          // the target instead of recording it healthy. A client that left is
+          // not the provider's fault, but a provider fault (timeout, size) that
+          // happened first still is.
+          const bodyAborted = clientAborted() && error?.streamCause !== "upstream" && !isUpstreamFault(error);
+          settleAttempt?.(
+            false,
+            bodyAborted ? null : 502,
+            bodyAborted ? "Client disconnected" : (sanitizeMessage(error?.message) || "Upstream response could not be read")
+          );
           commit(false, clientAborted() ? { clientAborted: true } : { status: 502 });
           record("failed", {
             httpStatus: clientAborted() ? 499 : 502,
@@ -879,6 +876,7 @@ async function proxy(req, res, protocol, pathname) {
           const message = clientMessage(error?.message) || "Upstream response could not be read";
           return json(res, 502, { error: { message, type: "upstream_error" } }, meta);
         }
+        settleAttempt?.(true, result.upstream.status, null);
         commit(true, { status: result.upstream.status });
         record("success", {
           tokens: convertedTokens(converted),
@@ -895,8 +893,9 @@ async function proxy(req, res, protocol, pathname) {
       try {
         const upstreamEvents = sseData(guardUpstreamStream(result.upstream.body, {
           idleMs: config.streamIdleTimeoutMs,
+          deadlineAt: result.deadlineAt,
           clientSignal: clientGone.signal
-        }));
+        }), { maxEventBytes: config.maxSseEventBytes });
         const events = bridgeKind === "codex"
           ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
           : bridgeKind === "chat"
@@ -910,21 +909,21 @@ async function proxy(req, res, protocol, pathname) {
         streamError = error;
         // An upstream fault is this provider's failure, so the target is
         // cooled. A client that left is not the provider's fault.
-        streamOutcome = (error?.streamCause === "upstream" || error?.code === "STREAM_IDLE_TIMEOUT" || !clientAborted())
+        streamOutcome = (error?.streamCause === "upstream" || isUpstreamFault(error) || !clientAborted())
           ? "truncated"
           : "aborted";
       }
 
       if (streamOutcome === "completed") {
-        settleStreamAttempt?.(true, result.upstream.status, null);
+        settleAttempt?.(true, result.upstream.status, null);
         commit(true, { status: result.upstream.status });
         record("success", { streamOutcome });
       } else if (streamOutcome === "aborted") {
-        settleStreamAttempt?.(false, null, "Client disconnected");
+        settleAttempt?.(false, null, "Client disconnected");
         commit(false, { clientAborted: true });
         record("failed", { streamOutcome, errorType: "client_aborted", errorMessage: "Client disconnected" });
       } else {
-        settleStreamAttempt?.(
+        settleAttempt?.(
           false,
           result.upstream.status,
           sanitizeMessage(streamError?.message) || "Upstream stream ended before completion"
@@ -948,28 +947,40 @@ async function proxy(req, res, protocol, pathname) {
     }
 
     const contentType = result.upstream.headers.get("content-type") || "application/json";
-    const declaredLength = Number(result.upstream.headers.get("content-length"));
+    // Content-Length is only a hint that lets an obviously large body skip
+    // inspection; it is never the limit. A missing, wrong or chunked length is
+    // held to the same byte ceiling, enforced on the bytes actually read.
+    const lengthHeader = result.upstream.headers.get("content-length");
+    const declaredLength = lengthHeader === null ? Number.NaN : Number(lengthHeader);
     let usage = { tokens: null, finishReason: null };
     let buffered = null;
+    // When inspection read past the ceiling, the bytes already consumed plus
+    // the rest of the body, still streamed (with backpressure) to the client.
+    let replay = null;
     let bodyReadError = null;
 
-    // Only small, explicitly-sized JSON bodies are inspected for usage. The
-    // bytes forwarded to the client are unchanged either way.
+    // Only small JSON bodies are inspected for usage. The bytes forwarded to
+    // the client are unchanged either way.
     if (
       result.upstream.body &&
       contentType.includes("application/json") &&
-      Number.isFinite(declaredLength) &&
-      declaredLength <= MAX_INSPECT_BYTES
+      !(Number.isFinite(declaredLength) && declaredLength > MAX_INSPECT_BYTES)
     ) {
       try {
-        const raw = await readUpstreamBody(result.upstream.body, {
+        const inspected = await bufferUpTo(result.upstream.body, {
+          maxBytes: MAX_INSPECT_BYTES,
           idleMs: config.streamIdleTimeoutMs,
+          deadlineAt: result.deadlineAt,
           clientSignal: clientGone.signal
         });
-        // The body is consumed now, so it must be forwarded from this buffer even
-        // when it is not valid JSON; only the usage lookup may fail.
-        buffered = raw;
-        try { usage = extractUsage(JSON.parse(raw.toString("utf8"))); } catch { /* usage stays unreported */ }
+        if (inspected.buffered) {
+          // The body is consumed now, so it must be forwarded from this buffer even
+          // when it is not valid JSON; only the usage lookup may fail.
+          buffered = inspected.buffered;
+          try { usage = extractUsage(JSON.parse(buffered.toString("utf8"))); } catch { /* usage stays unreported */ }
+        } else {
+          replay = inspected.replay;
+        }
       } catch (error) {
         // The body died after the headers said 200. Nothing has reached the
         // client yet, so this is still answerable and the target must be cooled.
@@ -1007,6 +1018,11 @@ async function proxy(req, res, protocol, pathname) {
 
     if (bodyReadError) {
       const aborted = clientAborted();
+      settleAttempt?.(
+        false,
+        aborted ? null : 502,
+        aborted ? "Client disconnected" : (sanitizeMessage(bodyReadError?.message) || "Upstream response could not be read")
+      );
       commit(false, aborted ? { clientAborted: true } : { status: 502 });
       record("failed", {
         httpStatus: aborted ? 499 : 502,
@@ -1040,8 +1056,9 @@ async function proxy(req, res, protocol, pathname) {
         // when the client disconnects; the idle guard bounds the gap between
         // chunks after the headers have arrived.
         await pipeline(
-          Readable.from(guardUpstreamStream(result.upstream.body, {
+          Readable.from(replay ?? guardUpstreamStream(result.upstream.body, {
             idleMs: config.streamIdleTimeoutMs,
+            deadlineAt: result.deadlineAt,
             clientSignal: clientGone.signal
           })),
           res
@@ -1053,8 +1070,8 @@ async function proxy(req, res, protocol, pathname) {
       // Headers are already on the wire, so the failure cannot be reported as a
       // JSON error response. Cool the target (unless the client left) and drop
       // the connection instead.
-      const aborted = error?.streamCause !== "upstream" && error?.code !== "STREAM_IDLE_TIMEOUT" && clientAborted();
-      settleStreamAttempt?.(
+      const aborted = error?.streamCause !== "upstream" && !isUpstreamFault(error) && clientAborted();
+      settleAttempt?.(
         false,
         result.upstream.status,
         sanitizeMessage(error?.message) || "Upstream stream ended before completion"
@@ -1071,13 +1088,23 @@ async function proxy(req, res, protocol, pathname) {
 
     // Only now is the response actually delivered: commit health/sticky and
     // file the request as a success.
-    settleStreamAttempt?.(true, result.upstream.status, null);
+    settleAttempt?.(true, result.upstream.status, null);
     commit(true, { status: result.upstream.status });
     record("success", streamed ? { streamOutcome: "completed" } : {});
   } catch (error) {
     // The client walked away. Nothing can be sent, and the provider was not at
     // fault (no target was cooled), so this is recorded as a client abort
     // rather than an upstream failure.
+    // Safety net: a 200 attempt whose terminal never ran (an unexpected throw
+    // after the headers) must not be left looking like it is still in flight.
+    // A no-op once the attempt has settled.
+    settleAttempt?.(
+      false,
+      null,
+      (error?.clientAborted === true || error instanceof ClientAbortError)
+        ? "Client disconnected"
+        : (sanitizeMessage(error?.message) || "Upstream response could not be read")
+    );
     if (error?.clientAborted === true || error instanceof ClientAbortError) {
       recordRequest({
         pendingSeq: liveSeq,

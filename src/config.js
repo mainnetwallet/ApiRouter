@@ -29,6 +29,9 @@ function readStatusCodes(env, name, fallback) {
 
 /** Default request-body ceiling: large enough for real payloads, bounded. */
 export const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_MAX_UPSTREAM_BODY_BYTES = 32 * 1024 * 1024;
+export const DEFAULT_STREAM_TOTAL_TIMEOUT_MS = 30 * 60 * 1000;
+export const DEFAULT_MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 /**
  * The single source of truth for which providers exist. Every other list —
  * `providers/catalog.js`, the `/health` payload, the env-var audit — hangs off
@@ -152,6 +155,20 @@ export function loadConfig(env = process.env) {
     // not by the total duration: a provider that answers 200 and then stalls
     // must not hold the client (and the walk) open forever. 0 disables it.
     streamIdleTimeoutMs: readNumber(env, "STREAM_IDLE_TIMEOUT_MS", 120000, { min: 0, expected: "a non-negative integer (0 disables the idle timeout)" }),
+    // Absolute ceiling on one streamed attempt, measured from the moment the
+    // attempt started. Non-streamed attempts are bounded by REQUEST_TIMEOUT_MS
+    // end to end; a stream may legitimately run far longer than that, so it has
+    // its own, much larger bound that stops a provider drip-feeding bytes
+    // forever. 0 disables it.
+    streamTotalTimeoutMs: readNumber(env, "STREAM_TOTAL_TIMEOUT_MS", DEFAULT_STREAM_TOTAL_TIMEOUT_MS, { min: 0, expected: "a non-negative integer (0 disables the absolute stream deadline)" }),
+    // Most bytes of one upstream response the gateway will hold in memory
+    // (translated non-stream bodies and usage inspection). Enforced while
+    // reading, never from Content-Length. 0 disables it.
+    maxUpstreamBodyBytes: readNumber(env, "MAX_UPSTREAM_BODY_BYTES", DEFAULT_MAX_UPSTREAM_BODY_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
+    // Most bytes of ONE incomplete SSE event (since the last event delimiter)
+    // held in memory while a stream is translated. Enforced as chunks arrive;
+    // exceeding it cancels the upstream stream and cools the provider. 0 disables it.
+    maxSseEventBytes: readNumber(env, "MAX_SSE_EVENT_BYTES", DEFAULT_MAX_SSE_EVENT_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
     retryableStatus: readStatusCodes(env, "RETRY_STATUS_CODES", DEFAULT_RETRY_STATUS_CODES),
     // Request-body ceiling. The gateway forwards bodies to providers, so it
     // cannot size them itself; it only guards its own memory. `0` disables the

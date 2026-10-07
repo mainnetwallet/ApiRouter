@@ -248,8 +248,20 @@ stalls must still be bounded:
 ```env
 STREAM_CONNECT_TIMEOUT_MS=30000   # time-to-first-response for a streaming request
 STREAM_IDLE_TIMEOUT_MS=120000     # max gap between chunks after the headers (0 disables)
+STREAM_TOTAL_TIMEOUT_MS=1800000   # absolute ceiling on one streamed attempt (0 disables)
+MAX_UPSTREAM_BODY_BYTES=33554432  # most bytes of one upstream body held in memory (0 disables)
+MAX_SSE_EVENT_BYTES=8388608       # most bytes of one incomplete SSE event, checked as data arrives (0 disables)
 MAX_REQUEST_BODY_BYTES=67108864   # gateway memory guard, not a provider limit (0 disables)
 ```
+
+Three bounds apply independently: time-to-headers (`STREAM_CONNECT_TIMEOUT_MS`
+for streams, `REQUEST_TIMEOUT_MS` otherwise), the gap between chunks
+(`STREAM_IDLE_TIMEOUT_MS`) and an absolute deadline measured from the start of
+the attempt (`REQUEST_TIMEOUT_MS` for a non-streamed attempt, headers and body;
+`STREAM_TOTAL_TIMEOUT_MS` for a stream). Upstream bodies held in memory are
+limited by `MAX_UPSTREAM_BODY_BYTES` on the bytes actually read, whatever
+`Content-Length` says; non-2xx bodies are read under a small fixed cap. All of
+it lives in `src/upstream-body.js`.
 
 A stream that ends before completion is recorded with a terminal `streamOutcome`
 (`completed` / `truncated` / `aborted`) and is never filed as a success.
