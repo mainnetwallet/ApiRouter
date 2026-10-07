@@ -1,32 +1,123 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { cleanSchemaForGemini } from "./anthropic-bridge.js";
+import { BridgeRequestError, MalformedUpstreamArgumentsError, UnsupportedMediaError, parseToolArguments } from "./bridge-errors.js";
+import { isHttpUrl } from "./media.js";
 
 function id(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
 }
 
-/** Tool arguments arrive as a JSON string. A malformed one must not crash. */
-function parseArgs(value) {
-  if (typeof value !== "string") return value && typeof value === "object" ? value : {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+/** Tool arguments from the upstream arrive as a JSON string; a malformed one is an upstream fault. */
+function parseArgs(value, name) {
+  return parseToolArguments(value, name, MalformedUpstreamArgumentsError);
 }
 
 function textParts(parts = []) {
   return parts.filter((p) => typeof p?.text === "string").map((p) => p.text).join("");
 }
 
-function inlineToChat(part) {
-  const data = part?.inlineData;
-  if (!data?.data) return null;
+// ------------------------------------------------ request normalisation
+//
+// Gemini's REST API accepts both camelCase and snake_case field names. The
+// router's own routing (vision detection) already recognises both, so the
+// translation has to read both too — otherwise a request is routed as
+// multimodal and then loses the very part that made it so.
+
+const pick = (object, ...names) => {
+  for (const name of names) if (object && object[name] !== undefined) return object[name];
+  return undefined;
+};
+
+function normalizePart(part) {
+  if (!part || typeof part !== "object") return part;
+  const out = { ...part };
+  const inline = pick(part, "inlineData", "inline_data");
+  if (inline && typeof inline === "object") {
+    out.inlineData = { mimeType: pick(inline, "mimeType", "mime_type"), data: inline.data };
+  }
+  const file = pick(part, "fileData", "file_data");
+  if (file && typeof file === "object") {
+    out.fileData = { mimeType: pick(file, "mimeType", "mime_type"), fileUri: pick(file, "fileUri", "file_uri") };
+  }
+  const call = pick(part, "functionCall", "function_call");
+  if (call && typeof call === "object") out.functionCall = call;
+  const response = pick(part, "functionResponse", "function_response");
+  if (response && typeof response === "object") {
+    out.functionResponse = { ...response, parts: Array.isArray(response.parts) ? response.parts.map(normalizePart) : response.parts };
+  }
+  for (const key of ["inline_data", "file_data", "function_call", "function_response"]) delete out[key];
+  return out;
+}
+
+function normalizeContent(content) {
+  if (typeof content === "string") return { role: "user", parts: [{ text: content }] };
+  if (!content || typeof content !== "object") return content;
+  return { ...content, parts: Array.isArray(content.parts) ? content.parts.map(normalizePart) : [] };
+}
+
+/** The camelCase view of a Gemini request body. Unknown fields are passed through untouched. */
+export function normalizeGeminiBody(body) {
+  const source = body && typeof body === "object" ? body : {};
+  const contentsRaw = pick(source, "contents");
+  const list = Array.isArray(contentsRaw) ? contentsRaw : contentsRaw ? [contentsRaw] : [];
+  const systemRaw = pick(source, "systemInstruction", "system_instruction");
+  const configRaw = pick(source, "generationConfig", "generation_config") || {};
+  const toolConfigRaw = pick(source, "toolConfig", "tool_config") || {};
+  const callingRaw = pick(toolConfigRaw, "functionCallingConfig", "function_calling_config");
+
   return {
-    type: "image_url",
-    image_url: { url: "data:" + (data.mimeType || "application/octet-stream") + ";base64," + data.data }
+    ...source,
+    contents: list.map(normalizeContent),
+    systemInstruction: systemRaw === undefined ? undefined : normalizeContent(systemRaw),
+    generationConfig: {
+      ...configRaw,
+      maxOutputTokens: pick(configRaw, "maxOutputTokens", "max_output_tokens"),
+      topP: pick(configRaw, "topP", "top_p"),
+      stopSequences: pick(configRaw, "stopSequences", "stop_sequences"),
+      responseMimeType: pick(configRaw, "responseMimeType", "response_mime_type"),
+      responseSchema: pick(configRaw, "responseSchema", "response_schema")
+    },
+    toolConfig: callingRaw
+      ? {
+        functionCallingConfig: {
+          mode: callingRaw.mode,
+          allowedFunctionNames: pick(callingRaw, "allowedFunctionNames", "allowed_function_names")
+        }
+      }
+      : undefined,
+    tools: (Array.isArray(source.tools) ? source.tools : []).map((tool) => ({
+      functionDeclarations: pick(tool, "functionDeclarations", "function_declarations")
+    }))
   };
+}
+
+/** Stable id for a function call the client sent without one: same history, same id, every request. */
+function stableCallId(contentIndex, partIndex, name, args) {
+  const hash = createHash("sha1").update(`${contentIndex}:${partIndex}:${name}:${JSON.stringify(args ?? {})}`).digest("hex");
+  return `call_${hash.slice(0, 24)}`;
+}
+
+const isImageMime = (mime) => typeof mime === "string" && mime.toLowerCase().startsWith("image/");
+
+/** Chat `image_url` part for a Gemini data part, or an error when chat cannot carry it. */
+function chatImageForPart(part) {
+  if (part.inlineData) {
+    const { mimeType, data } = part.inlineData;
+    if (!data) throw new UnsupportedMediaError("inlineData has no data", "invalid_inline_data");
+    if (!isImageMime(mimeType)) {
+      throw new UnsupportedMediaError(`inlineData of type "${mimeType || "unknown"}" cannot be forwarded to the selected provider`, "unsupported_media_type");
+    }
+    return { type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } };
+  }
+  if (part.fileData) {
+    const { mimeType, fileUri } = part.fileData;
+    // A file reference is only forwardable when the provider can fetch it itself.
+    if (isHttpUrl(fileUri) && (mimeType === undefined || mimeType === null || isImageMime(mimeType))) {
+      return { type: "image_url", image_url: { url: fileUri } };
+    }
+    throw new UnsupportedMediaError("This fileData reference cannot be forwarded to the selected provider", "unsupported_file_reference");
+  }
+  return null;
 }
 
 export function geminiProtocol(target) {
@@ -59,52 +150,78 @@ export function selectGeminiTargets(targets, requestedModel) {
  * configured with. Forwarding the client's name turns every fallback into a
  * model-not-found error.
  */
-export function toChatFromGemini(body, model, { stream = false } = {}) {
+export function toChatFromGemini(rawBody, model, { stream = false } = {}) {
+  const body = normalizeGeminiBody(rawBody);
   const messages = [];
-  const system = body?.systemInstruction?.parts
-    ? textParts(body.systemInstruction.parts)
-    : "";
-
+  const system = body.systemInstruction?.parts ? textParts(body.systemInstruction.parts) : "";
+  if (body.systemInstruction?.parts?.some((p) => p?.inlineData || p?.fileData)) {
+    throw new UnsupportedMediaError("Media in systemInstruction cannot be forwarded to the selected provider", "unsupported_system_media");
+  }
   if (system) messages.push({ role: "system", content: system });
 
-  for (const content of Array.isArray(body?.contents) ? body.contents : []) {
+  // Gemini pairs a functionResponse with its functionCall by name and order, not
+  // by id. Chat pairs by id, so every call gets one — the client's own when it
+  // sent one, otherwise a stable id derived from the call's position and
+  // content — and each response takes the oldest unanswered call of its name.
+  const unanswered = new Map();   // name -> [call id, ...]
+  const claim = (name, explicitId) => {
+    const queue = unanswered.get(name) || [];
+    if (explicitId) {
+      const at = queue.indexOf(explicitId);
+      if (at >= 0) queue.splice(at, 1);
+      return explicitId;
+    }
+    const next = queue.shift();
+    if (next === undefined) {
+      throw new BridgeRequestError(`functionResponse for "${String(name || "tool").slice(0, 80)}" has no matching earlier functionCall`, { code: "orphan_function_response" });
+    }
+    return next;
+  };
+
+  body.contents.forEach((content, contentIndex) => {
     const role = content?.role === "model" ? "assistant" : "user";
     const text = [];
     const parts = [];
     const toolCalls = [];
     const toolResults = [];
+    const toolMedia = [];
 
-    for (const part of Array.isArray(content?.parts) ? content.parts : []) {
+    (Array.isArray(content?.parts) ? content.parts : []).forEach((part, partIndex) => {
       if (typeof part?.text === "string") {
         text.push(part.text);
         // A mixed turn must use the content-parts form, in which every entry
         // is an object. A bare string is not a valid OpenAI content part.
         parts.push({ type: "text", text: part.text });
       }
-      if (part?.inlineData) {
-        const image = inlineToChat(part);
-        if (image) parts.push(image);
+      if (part?.inlineData || part?.fileData) {
+        if (role === "assistant") {
+          throw new UnsupportedMediaError("Media in a model turn cannot be forwarded to the selected provider", "unsupported_assistant_media");
+        }
+        parts.push(chatImageForPart(part));
       }
       if (part?.functionCall) {
-        const callId = part.functionCall.id || id("call");
-        toolCalls.push({
-          id: callId,
-          type: "function",
-          function: {
-            name: part.functionCall.name || "tool",
-            arguments: JSON.stringify(part.functionCall.args || {})
-          }
-        });
+        const name = part.functionCall.name || "tool";
+        const args = part.functionCall.args ?? {};
+        const callId = part.functionCall.id || stableCallId(contentIndex, partIndex, name, args);
+        const queue = unanswered.get(name) || [];
+        queue.push(callId);
+        unanswered.set(name, queue);
+        toolCalls.push({ id: callId, type: "function", function: { name, arguments: JSON.stringify(args) } });
       }
       if (part?.functionResponse) {
+        const name = part.functionResponse.name || "tool";
+        for (const attachment of part.functionResponse.parts || []) {
+          const image = chatImageForPart(attachment);
+          if (image) toolMedia.push(image);
+        }
         toolResults.push({
           role: "tool",
-          tool_call_id: part.functionResponse.id || part.functionResponse.name || "tool",
+          tool_call_id: claim(name, part.functionResponse.id),
           name: part.functionResponse.name || undefined,
           content: JSON.stringify(part.functionResponse.response ?? {})
         });
       }
-    }
+    });
 
     const hasImage = parts.some((p) => p.type === "image_url");
 
@@ -112,20 +229,23 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
       const message = { role, content: text.length ? text.join("") : null };
       if (toolCalls.length) message.tool_calls = toolCalls;
       messages.push(message);
-      continue;
+      return;
     }
 
-    // A functionResponse turn carries no user text. Emitting an empty user
-    // message there would separate the tool result from the assistant turn it
-    // answers, which OpenAI-compatible providers reject outright.
+    // Tool results go first: OpenAI-compatible providers require them to follow
+    // the assistant turn that made the calls with nothing in between, so text
+    // the client sent in the same turn comes after them, never before.
+    messages.push(...toolResults);
+    if (toolMedia.length) {
+      messages.push({ role: "user", content: [{ type: "text", text: "Image output of the tool call(s) above:" }, ...toolMedia] });
+    }
     if (parts.length > 0) {
       messages.push({ role, content: hasImage ? parts : text.join("") });
     }
-    messages.push(...toolResults);
-  }
+  });
 
   const tools = [];
-  for (const tool of Array.isArray(body?.tools) ? body.tools : []) {
+  for (const tool of Array.isArray(body.tools) ? body.tools : []) {
     for (const fn of Array.isArray(tool?.functionDeclarations) ? tool.functionDeclarations : []) {
       if (!fn?.name) continue;
       tools.push({
@@ -139,12 +259,12 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
     }
   }
 
-  const generation = body?.generationConfig || {};
+  const generation = body.generationConfig || {};
   const out = { model, messages };
   if (tools.length) out.tools = tools;
   if (stream) out.stream = true;
 
-  const mode = body?.toolConfig?.functionCallingConfig;
+  const mode = body.toolConfig?.functionCallingConfig;
   const declaredNames = new Set(tools.map((tool) => tool.function.name));
 
   if (mode?.mode === "NONE") {
@@ -262,9 +382,9 @@ export function chatJsonToGemini(json) {
     if (!fn?.name) continue;
     parts.push({
       functionCall: {
-        id: call.id,
+        id: call.id || id("call"),
         name: fn.name,
-        args: parseArgs(fn.arguments)
+        args: parseArgs(fn.arguments, fn.name)
       }
     });
   }
@@ -312,9 +432,9 @@ export async function* streamToGemini(events) {
       const call = pending.get(key);
       return {
         functionCall: {
-          id: call.id ?? undefined,
+          id: call.id || id("call"),
           name: call.name || "tool",
-          args: parseArgs(call.arguments)
+          args: parseArgs(call.arguments, call.name)
         }
       };
     });
@@ -323,47 +443,54 @@ export async function* streamToGemini(events) {
     return parts;
   };
 
-  for await (const data of events) {
-    if (data === "[DONE]") break;
-    let parsed;
-    try { parsed = JSON.parse(data); } catch { continue; }
-    if (parsed?.error) {
-      yield sseData(parsed);
-      continue;
-    }
-
-    const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
-    for (const choice of choices) {
-      const delta = choice?.delta || {};
-      const parts = [];
-      if (typeof delta.content === "string" && delta.content) parts.push({ text: delta.content });
-
-      const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
-      for (const call of fragments) {
-        const key = call.index ?? call.id ?? order.length;
-        let entry = pending.get(key);
-        if (!entry) {
-          entry = { id: null, name: "", arguments: "" };
-          pending.set(key, entry);
-          order.push(key);
-        }
-        if (call.id) entry.id = call.id;
-        if (call.function?.name) entry.name += call.function.name;
-        if (typeof call.function?.arguments === "string") entry.arguments += call.function.arguments;
+  try {
+    for await (const data of events) {
+      if (data === "[DONE]") break;
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { continue; }
+      if (parsed?.error) {
+        yield sseData(parsed);
+        continue;
       }
 
-      const finishing = Boolean(choice?.finish_reason);
-      if (finishing) parts.push(...drainCalls());
+      const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+      for (const choice of choices) {
+        const delta = choice?.delta || {};
+        const parts = [];
+        if (typeof delta.content === "string" && delta.content) parts.push({ text: delta.content });
 
-      if (!parts.length && !finishing) continue;
-      yield sseData({
-        candidates: [{
-          content: { role: "model", parts },
-          finishReason: finishReason(choice.finish_reason, parts.some((part) => part.functionCall)),
-          index: 0
-        }]
-      });
+        const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+        for (const call of fragments) {
+          const key = call.index ?? call.id ?? order.length;
+          let entry = pending.get(key);
+          if (!entry) {
+            entry = { id: null, name: "", arguments: "" };
+            pending.set(key, entry);
+            order.push(key);
+          }
+          if (call.id) entry.id = call.id;
+          if (call.function?.name) entry.name += call.function.name;
+          if (typeof call.function?.arguments === "string") entry.arguments += call.function.arguments;
+        }
+
+        const finishing = Boolean(choice?.finish_reason);
+        if (finishing) parts.push(...drainCalls());
+
+        if (!parts.length && !finishing) continue;
+        // Like Gemini itself, only the closing chunk carries a finishReason. A
+        // client that treats a present finishReason as "this turn is over" would
+        // otherwise stop reading at the first text delta.
+        const candidate = { content: { role: "model", parts }, index: 0 };
+        if (finishing) candidate.finishReason = finishReason(choice.finish_reason, parts.some((part) => part.functionCall));
+        yield sseData({ candidates: [candidate] });
+      }
     }
+
+  } catch (error) {
+    // Headers are already on the wire: report the truncation to the client as a
+    // Gemini error object instead of ending as if the answer were complete.
+    yield sseData({ error: { code: 502, status: "UNAVAILABLE", message: String(error?.message || "Upstream stream failed").slice(0, 300) } });
+    return;
   }
 
   // A stream cut off before any finish reason still owes the client its calls.

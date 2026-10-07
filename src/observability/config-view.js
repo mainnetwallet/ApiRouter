@@ -29,6 +29,28 @@ function configuredHeaderNames(provider) {
     .sort();
 }
 
+/**
+ * A base URL as the control panel may show it. Provider URLs can embed things
+ * that must not leave the process: the Cloudflare account id sits in the path
+ * (`/accounts/<id>/...`), and an operator may have put credentials in the
+ * userinfo or query string. Those are replaced or dropped; the host and the
+ * rest of the path stay, which is what an operator needs to recognise it.
+ */
+export function publicBaseUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    url.pathname = url.pathname.replace(/(\/accounts\/)[^/]+/i, "$1[account-id]");
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "[invalid URL]";
+  }
+}
+
 function describeProvider(id, provider, targets, pool = "text", capabilities = null) {
   const providerTargets = targets.filter((target) => target.provider === id && (target.pool ?? "text") === pool);
   const configured = isProviderConfigured(provider);
@@ -62,7 +84,7 @@ function describeProvider(id, provider, targets, pool = "text", capabilities = n
     textModels: [...caps.textModels],
     visionModels: [...caps.visionModels],
 
-    baseUrl: provider.baseUrl || null,
+    baseUrl: publicBaseUrl(provider.baseUrl),
     models: [...provider.models],
     modelCount: provider.models.length,
 
@@ -100,7 +122,7 @@ export function describeConfig(config, targets = []) {
     },
     routing: {
       retryableStatus: [...config.retryableStatus].sort((a, b) => a - b),
-      strategy: "health-ranked with sticky session and automatic fallback",
+      strategy: "sticky session, then priority, then provider/key/model fallback (health only skips cooling targets)",
       targetIdentity: "provider + model + keyIndex",
       exactModelPreferred: true,
       // The two pools are routed independently; a request never crosses over.
@@ -159,7 +181,9 @@ export function describeEnvironment(config) {
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
       { name: "TEXT_PRIORITY_MODELS", configured: config.priority?.text?.length > 0, kind: "list" },
       { name: "VISION_PRIORITY_MODELS", configured: config.priority?.vision?.length > 0, kind: "list" },
-      { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
+      { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" },
+      { name: "HOST", configured: Boolean(config.host), kind: "text" },
+      { name: "MAX_REQUEST_BODY_BYTES", configured: config.maxRequestBodyBytes != null, kind: "number" }
     ],
     providers: providerVars,
     visionProviders: visionProviderVars

@@ -176,6 +176,12 @@ export class HealthRegistry {
     now = Date.now()
   ) {
     if (ok === true) {
+      // A probe talks to a metadata endpoint, not to the chat endpoint that
+      // failed. Its success proves reachability, not that the failure which put
+      // this target in cooldown is gone, so it must not cut that cooldown short:
+      // only the cooldown timer, or a real request that succeeds, revives it.
+      const current = this.ensureTarget(target);
+      if (current.cooldownUntil > now) return current;
       return this.markSuccess(
         target,
         { latencyMs, status: Number.isInteger(status) ? status : 200, reason },

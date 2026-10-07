@@ -17,6 +17,39 @@ const split = (value) => String(value || "").split(",").map((v) => v.trim()).fil
  * startup stops with a clear message. A bad value must never degrade into NaN,
  * 0 or "no limit" (`size > NaN` is never true, which would disable the body cap).
  */
+/**
+ * A comma-separated list of HTTP status codes. Unset or blank takes the default.
+ * Anything else must be made only of valid codes (100-599): a typo that quietly
+ * shrank or emptied the list would silently turn fallback off, so it fails at
+ * startup like every other numeric setting.
+ */
+export function readStatusCodes(env, name, fallback) {
+  const raw = env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return [...fallback];
+  const codes = [];
+  for (const token of String(raw).split(",").map((item) => item.trim())) {
+    if (token === "") continue;
+    if (!/^\d{3}$/.test(token) || Number(token) < 100 || Number(token) > 599) {
+      throw new Error(`Invalid ${name}: expected a comma-separated list of HTTP status codes (100-599), got "${token.slice(0, 40)}"`);
+    }
+    if (!codes.includes(Number(token))) codes.push(Number(token));
+  }
+  if (codes.length === 0) {
+    throw new Error(`Invalid ${name}: expected at least one HTTP status code (100-599), or leave it unset`);
+  }
+  return codes;
+}
+
+/** A strict boolean flag: unset/blank is the default; otherwise 1/true/yes/on or 0/false/no/off. */
+export function readBoolean(env, name, fallback) {
+  const raw = env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
+  const value = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  throw new Error(`Invalid ${name}: expected true or false, got "${String(raw).slice(0, 40)}"`);
+}
+
 function readNumber(env, name, fallback, { integer = true, min, max = Infinity, expected }) {
   const raw = env[name];
   if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
@@ -112,8 +145,7 @@ export function readProviders(env, { vision = false } = {}) {
 export function loadConfig(env = process.env) {
   const providers = readProviders(env);
   const visionProviders = readProviders(env, { vision: true });
-  const retryableValues = split(env.RETRY_STATUS_CODES || DEFAULT_RETRY_STATUS_CODES.join(","))
-    .map(Number).filter((v) => Number.isInteger(v) && v >= 100 && v <= 599);
+  const retryableValues = readStatusCodes(env, "RETRY_STATUS_CODES", DEFAULT_RETRY_STATUS_CODES);
   return {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
     port: readNumber(env, "PORT", 8788, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
@@ -123,7 +155,22 @@ export function loadConfig(env = process.env) {
     retryableStatus: new Set(retryableValues),
     // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
     // exists so tests can use a short real-clock TTL).
-    stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 20 * 60 * 1000,
+    stickyTtlMs: readNumber(env, "STICKY_TTL_MS", 20 * 60 * 1000, { min: 1, expected: "a positive integer (milliseconds)" }),
+    // Network interface to listen on. Unset keeps the long-standing behaviour
+    // (all interfaces); set HOST=127.0.0.1 to accept local connections only.
+    host: String(env.HOST ?? "").trim() || undefined,
+    // Upper bound for one request body. Unset means no limit of the router's own
+    // (large multimodal and long-context requests are legitimate); it exists so
+    // an operator who exposes the router can choose a ceiling.
+    maxRequestBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", null, { min: 1, expected: "a positive integer (bytes)" }),
+    // Remote image URLs are downloaded by the router for providers that only
+    // accept inline data. Every limit is configurable; the defaults are strict.
+    remoteImages: {
+      allowHttp: readBoolean(env, "REMOTE_IMAGE_ALLOW_HTTP", false),
+      allowPrivateNetwork: readBoolean(env, "REMOTE_IMAGE_ALLOW_PRIVATE_NETWORK", false),
+      maxBytes: readNumber(env, "REMOTE_IMAGE_MAX_BYTES", 20 * 1024 * 1024, { min: 1, expected: "a positive integer (bytes)" }),
+      timeoutMs: readNumber(env, "REMOTE_IMAGE_TIMEOUT_MS", 15000, { min: 1, expected: "a positive integer (milliseconds)" })
+    },
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,

@@ -280,16 +280,27 @@ test("a fully failed request is logged with per-attempt detail", async (t) => {
   assert.equal(entry.attempts[0].errorMessage.includes(PROVIDER_KEY), false);
 });
 
-test("a single request can be fetched by its request id", async (t) => {
+test("a single request can be fetched by its own request id (not the shared session id)", async (t) => {
   const { router } = await withRig(t);
 
-  const proxied = await router.request("/v1/chat/completions", postJson({ model: "model-a", messages: [] }));
-  const requestId = proxied.headers.get("x-multi-ai-session-id");
-  assert.ok(requestId);
+  // Two requests in the same (default) session: they share a session id, and each has its own request id.
+  const first = await router.request("/v1/chat/completions", postJson({ model: "model-a", messages: [] }));
+  const second = await router.request("/v1/chat/completions", postJson({ model: "model-a", messages: [] }));
+  const sessionId = first.headers.get("x-multi-ai-session-id");
+  const firstId = first.headers.get("x-multi-ai-request-id");
+  const secondId = second.headers.get("x-multi-ai-request-id");
+  assert.ok(firstId && secondId && firstId !== secondId, "every request gets its own id");
+  assert.equal(second.headers.get("x-multi-ai-session-id"), sessionId, "the session id is shared");
 
-  const { res, body } = await getJson(router, `/api/requests/${requestId}`);
-  assert.equal(res.status, 200);
-  assert.equal(body.request.id, requestId);
+  const one = await getJson(router, `/api/requests/${firstId}`);
+  assert.equal(one.res.status, 200);
+  assert.equal(one.body.request.requestId, firstId);
+  const two = await getJson(router, `/api/requests/${secondId}`);
+  assert.equal(two.body.request.requestId, secondId, "the second request is reachable too, not shadowed by the first");
+
+  // A session id names many requests, so it identifies none of them.
+  const bySession = await getJson(router, `/api/requests/${sessionId}`);
+  assert.equal(bySession.res.status, 404);
 
   const missing = await getJson(router, "/api/requests/does-not-exist");
   assert.equal(missing.res.status, 404);

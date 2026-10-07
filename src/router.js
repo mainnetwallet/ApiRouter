@@ -91,11 +91,66 @@ export class RouteSession {
     return health.rank(targets)[0];
   }
 
+  /** Forget the sticky target, but only if it is `targetId` (a failed stream must not stay preferred). */
+  clear(targetId) {
+    if (this.targetId !== null && this.targetId === targetId) {
+      this.targetId = null;
+      this.expiresAt = null;
+    }
+  }
+
   /** A success makes this target sticky and starts a fresh TTL from `now`. */
   saveSuccess(target, health, now = Date.now()) {
     this.targetId = health.key(target);
     this.expiresAt = now + this.ttlMs;
   }
+}
+
+/** A stream that broke after its headers cools the target down briefly, not for the full failure window. */
+export const STREAM_FAILURE_COOLDOWN_MS = 60 * 1000;
+export const STREAM_FAILURE_REASON = "stream interrupted after response headers";
+
+/**
+ * Books the outcome of an invoke() that returned.
+ *
+ * A response whose body is already fully read (buffered JSON, or a translated
+ * non-stream body) is a settled success: health and sticky are updated now.
+ * A response that is still streaming (`deferSettlement`) is NOT a success yet —
+ * only its headers arrived. Nothing is recorded; instead the caller gets a
+ * `settle` handle and reports the real outcome when the body ends:
+ *   - `success()`  the stream completed cleanly: health success + sticky saved;
+ *   - `failure()`  the upstream broke mid-stream: health failure (short cooldown),
+ *                  and the target is no longer sticky;
+ *   - `abandon()`  the client left: the provider did nothing wrong and nothing
+ *                  proved it right, so health and sticky are left alone.
+ * Fallback is never possible once headers were sent, so none is attempted.
+ */
+function settleResult(result, target, health, session, startedAt) {
+  const latencyMs = Date.now() - startedAt;
+  if (!result?.deferSettlement) {
+    health.markSuccess(target, { latencyMs });
+    session.saveSuccess(target, health);
+    return result;
+  }
+  let settled = false;
+  result.settle = {
+    success() {
+      if (settled) return;
+      settled = true;
+      health.markSuccess(target, { latencyMs });
+      session.saveSuccess(target, health);
+    },
+    failure() {
+      if (settled) return;
+      settled = true;
+      health.markFailure(target, null, { cooldownMs: STREAM_FAILURE_COOLDOWN_MS, reason: STREAM_FAILURE_REASON });
+      session.clear(health.key(target));
+    },
+    abandon() {
+      settled = true;
+    }
+  };
+  return result;
 }
 
 /**
@@ -159,16 +214,17 @@ export async function withFallback(
 
       try {
         const result = await invoke(target);
-        health.markSuccess(target, { latencyMs: Date.now() - startedAt });
-        session.saveSuccess(target, health);
-        return result;
+        return settleResult(result, target, health, session, startedAt);
       } catch (error) {
+        // The client is gone: nothing is left to answer, so the walk ends here.
+        if (error?.clientAborted) throw error;
         const status = Number(error?.status || 0);
 
         failures.push({
           target,
           status,
-          message: error?.message || String(error)
+          message: error?.message || String(error),
+          errorType: error?.errorType
         });
 
         if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) {
@@ -215,6 +271,7 @@ export async function withFallback(
     ? failures[failures.length - 1].message
     : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;
+  if (allBadRequest) err.errorType = failures[failures.length - 1].errorType;
   err.failures = failures;
   throw err;
 }
@@ -280,12 +337,12 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
 
     try {
       const result = await invoke(target, { phase: step.phase });
-      health.markSuccess(target, { latencyMs: Date.now() - startedAt });
-      session.saveSuccess(target, health);
-      return result;
+      return settleResult(result, target, health, session, startedAt);
     } catch (error) {
+      // The client is gone: nothing is left to answer, so the walk ends here.
+      if (error?.clientAborted) throw error;
       const status = Number(error?.status || 0);
-      failures.push({ target, status, message: error?.message || String(error) });
+      failures.push({ target, status, message: error?.message || String(error), errorType: error?.errorType });
 
       if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) throw error;
       if (error?.skipCooldown) continue;
@@ -314,6 +371,7 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
   const allBadRequest = failures.length > 0 && failures.every((failure) => failure.status === 400);
   const err = new Error(allBadRequest ? failures[failures.length - 1].message : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;
+  if (allBadRequest) err.errorType = failures[failures.length - 1].errorType;
   err.failures = failures;
   throw err;
 }

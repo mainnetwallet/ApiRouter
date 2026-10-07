@@ -1,13 +1,13 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 /**
  * Minimal static file handler for the built control panel.
  *
  * Deliberately not a general-purpose server: it serves one directory, has no
- * directory listing, follows no symlinks out of the root, and never serves a
- * dotfile. The gateway is a security boundary, so the static path is written
+ * directory listing, never serves a file whose real path (symlinks resolved)
+ * lies outside the root, and never serves a dotfile. The gateway is a security boundary, so the static path is written
  * as a strict allow-list rather than a path-join convenience.
  */
 
@@ -85,10 +85,20 @@ export function resolveWithinRoot(root, pathname) {
 export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
   const indexPath = path.join(root, indexFile);
 
+  /**
+   * The lexical check in resolveWithinRoot cannot see symlinks, so the boundary
+   * is enforced on the REAL path: a link inside the root that points outside it
+   * resolves to a path outside the root and is refused. The file is then read
+   * through that resolved path, so the link cannot be swapped in between.
+   */
   async function statFile(filePath) {
     try {
-      const stats = await stat(filePath);
-      return stats.isFile() ? stats : null;
+      const [realFile, realRoot] = await Promise.all([realpath(filePath), realpath(root)]);
+      if (realFile !== realRoot && !realFile.startsWith(realRoot + path.sep)) return null;
+      const stats = await stat(realFile);
+      if (!stats.isFile()) return null;
+      stats.realPath = realFile;
+      return stats;
     } catch {
       return null;
     }
@@ -122,7 +132,7 @@ export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
     }
 
     res.writeHead(200, headers);
-    const stream = createReadStream(filePath);
+    const stream = createReadStream(stats.realPath ?? filePath);
     stream.on("error", () => res.destroy());
     stream.pipe(res);
     return undefined;

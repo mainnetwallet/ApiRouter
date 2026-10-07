@@ -61,8 +61,11 @@ test("a record without begin() uses its own seq as startSeq", () => {
 
 test("an abandoned pending request is dropped after the TTL", () => {
   const log = new RequestLog();
-  log.begin({ id: "old", receivedAt: Date.now() - 11 * 60 * 1000 });
-  assert.equal(log.pending().length, 0);
+  // A streamed answer can run a long time, so the leak guard is an hour, not minutes.
+  log.begin({ id: "kept", receivedAt: Date.now() - 11 * 60 * 1000 });
+  assert.equal(log.pending().length, 1, "a request 11 minutes in is still in flight, not abandoned");
+  log.begin({ id: "old", receivedAt: Date.now() - 61 * 60 * 1000 });
+  assert.deepEqual(log.pending().map((entry) => entry.id), ["kept"], "only the hour-old request is dropped");
 });
 
 /** An upstream that holds each response until the test releases it. */

@@ -19,7 +19,10 @@ import {
 } from "./health.js";
 import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
 import { RouteSession, SessionStore, withFallback } from "./router.js";
-import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream } from "./adapters.js";
+import { clientProtocol, buildUpstreamRequest, readJsonBody, parseGeminiPath, isGeminiNamespace } from "./adapters.js";
+import { createMediaResolver } from "./media.js";
+import { enterSignatureScope } from "./thought-signatures.js";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
@@ -146,16 +149,43 @@ const monitor = new HealthMonitorState({
 const trackedCheckTargetHealth = monitor.wrapCheck(checkTargetHealth);
 
 function json(res, status, body, extraHeaders = {}) {
+  if (res.destroyed || res.writableEnded) return;
   const payload = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(payload), ...extraHeaders });
   res.end(payload);
 }
 
+/**
+ * The credential a client presented. `Authorization: Bearer` is the standard
+ * form; `x-api-key` (Anthropic SDKs) and `x-goog-api-key` (Gemini SDKs) are
+ * accepted too, because those clients send their key there and cannot be
+ * pointed at a router otherwise. A key in the URL query is deliberately NOT
+ * accepted: URLs end up in access logs and browser history.
+ */
+function presentedToken(req) {
+  const bearer = String(req.headers.authorization || "");
+  if (bearer.startsWith("Bearer ")) return bearer.slice(7).trim();
+  for (const name of ["x-api-key", "x-goog-api-key"]) {
+    const value = req.headers[name];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+const digest = (value) => createHash("sha256").update(String(value)).digest();
+
 function authorized(req) {
   if (config.routerApiKeys.length === 0) return true;
-  const value = String(req.headers.authorization || "");
-  const token = value.startsWith("Bearer ") ? value.slice(7).trim() : "";
-  return Boolean(token && config.routerApiKeys.includes(token));
+  const token = presentedToken(req);
+  if (!token) return false;
+  // Compare fixed-length digests in constant time, against every key without
+  // stopping at the first match, so the response time reveals nothing about a key.
+  const presented = digest(token);
+  let ok = false;
+  for (const key of config.routerApiKeys) {
+    if (timingSafeEqual(presented, digest(key))) ok = true;
+  }
+  return ok;
 }
 
 // Clients such as Claude Code, Codex and the OpenAI SDKs never send
@@ -299,10 +329,56 @@ pinnedHealth.isAvailable = () => true;
 
 const lastRealAttempt = (list) => [...list].reverse().find((item) => !item.skipped);
 
+/** Thrown (and never retried) when the client hung up before the answer was ready. */
+function clientAbortError() {
+  const error = new Error("Client disconnected");
+  error.name = "ClientAbortError";
+  error.status = 499;
+  error.errorType = "client_aborted";
+  error.clientAborted = true;
+  return error;
+}
+
+/** A 3xx from a provider is an error: redirects are never followed with credentials attached. */
+function redirectError(status) {
+  const error = new Error(`Upstream redirected (HTTP ${status}); redirects are not followed`);
+  error.status = 502;
+  error.retryable = true;
+  return error;
+}
+
+/**
+ * Wraps the upstream event source of a translated stream. A bridge may turn an
+ * upstream failure into a protocol-level error event (so the client is told),
+ * after which the response ends "cleanly" from the socket's point of view. This
+ * records the failure at its origin, so the request is still booked as failed.
+ */
+async function* trackUpstream(source, state) {
+  try {
+    yield* source;
+  } catch (error) {
+    if (!state.clientClosed) state.upstreamError = error;
+    throw error;
+  }
+}
+
 async function proxy(req, res, protocol, pathname) {
   const receivedAt = Date.now();
   const attempts = [];
   let liveSeq = null;
+
+  // The client hanging up must stop the work done for it: the in-flight upstream
+  // call is aborted and the fallback walk ends, instead of billing the next
+  // provider for an answer nobody will read. (`res` closing before the response
+  // finished is the reliable signal; `req` closes as soon as the body is read.)
+  const clientGone = new AbortController();
+  const streamState = { clientClosed: false, upstreamError: null };
+  res.on("close", () => {
+    if (!res.writableFinished) {
+      streamState.clientClosed = true;
+      clientGone.abort();
+    }
+  });
 
   if (!authorized(req)) {
     recordRequest({
@@ -319,7 +395,7 @@ async function proxy(req, res, protocol, pathname) {
   }
 
   let body;
-  try { body = await readJsonBody(req); }
+  try { body = await readJsonBody(req, { maxBytes: config.maxRequestBodyBytes }); }
   catch (error) {
     recordRequest({
       pendingSeq: liveSeq,
@@ -327,11 +403,18 @@ async function proxy(req, res, protocol, pathname) {
       protocol,
       httpStatus: error.status || 400,
       outcome: "failed",
-      errorType: "invalid_request_error",
+      errorType: error.errorType ?? "invalid_request_error",
       errorMessage: sanitizeMessage(error.message),
       attempts
     });
-    return json(res, error.status || 400, { error: { message: clientMessage(error.message), type: "invalid_request_error" } });
+    // After a 413 the rest of the body may still be arriving: end the connection
+    // once the answer is out instead of reading on.
+    return json(
+      res,
+      error.status || 400,
+      { error: { message: clientMessage(error.message), type: error.errorType ?? "invalid_request_error" } },
+      error.status === 413 ? { connection: "close" } : {}
+    );
   }
 
   // Basic request-shape check, before the pool, session or any target is
@@ -352,14 +435,13 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 400, { error: { message: shapeError, type: "invalid_request_error" } });
   }
 
-  const geminiPathModel = protocol === "gemini"
-    ? pathname.match(/^\/v1beta\/models\/([^:]+):(?:stream)?[Gg]enerateContent$/)?.[1] || ""
-    : "";
+  const geminiPath = protocol === "gemini" ? parseGeminiPath(pathname) : null;
+  const geminiPathModel = geminiPath?.model || "";
   const requestedModel = typeof body.model === "string" ? body.model : geminiPathModel;
 
   // A Gemini client selects streaming with the method name rather than a body
   // field, so both spellings have to be considered here.
-  const wantsStream = body.stream === true || (protocol === "gemini" && isGeminiStream(pathname));
+  const wantsStream = body.stream === true || geminiPath?.stream === true;
 
   // The pool is decided from the request body before anything else, because it
   // governs the session, the candidate targets and the capability rules for the
@@ -392,7 +474,16 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "gemini" ? geminiProtocol(target)
     : bridgeProtocol(target);
 
+  // Thought signatures are remembered per session, so one session's tool-call
+  // ids can never pick up another's.
+  enterSignatureScope(sessionInfo.id);
+
   liveSeq = beginRequest({ id: sessionInfo.id, receivedAt, protocol, pool, requestedModel });
+  // The id of THIS request (the session id is shared by many), sent back so a
+  // client can look the request up in /api/requests/:id.
+  const requestId = liveSeq === null ? null : requestLog.requestIdOf(liveSeq);
+  const idHeaders = { "x-multi-ai-session-id": sessionInfo.id, ...(requestId ? { "x-multi-ai-request-id": requestId } : {}) };
+  const mediaResolver = createMediaResolver({ options: config.remoteImages });
 
   const pin = readPin(req);
   if (pin.error) {
@@ -401,7 +492,7 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: "invalid_request_error", errorMessage: pin.error, attempts
     });
-    return json(res, 400, { error: { message: clientMessage(pin.error), type: "invalid_request_error" } }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, 400, { error: { message: clientMessage(pin.error), type: "invalid_request_error" } }, idHeaders);
   }
 
   // Nothing in this pool at all. Reported before capability validation, because
@@ -414,7 +505,7 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
       outcome: "failed", errorType: "no_vision_route", errorMessage: message, attempts
     });
-    return json(res, 503, { error: { message, type: "no_vision_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, 503, { error: { message, type: "no_vision_route" } }, idHeaders);
   }
 
   // A model the router only knows as configured for the *other* pool is a
@@ -437,7 +528,7 @@ async function proxy(req, res, protocol, pathname) {
         model: capability.model,
         required_capability: capability.required_capability
       }
-    }, { "x-multi-ai-session-id": sessionInfo.id });
+    }, idHeaders);
   }
 
   const pinned = pinTargets(poolTargets, pin, requestedModel);
@@ -449,7 +540,7 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 404,
       outcome: "failed", errorType: "no_route", errorMessage: message, attempts
     });
-    return json(res, 404, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, 404, { error: { message, type: "no_route" } }, idHeaders);
   }
 
   const selection = selectTargetsForProtocol(pinned.targets, protocol, requestedModel);
@@ -490,26 +581,42 @@ async function proxy(req, res, protocol, pathname) {
   }
 
   try {
+    const clientModel = typeof body.model === "string" ? body.model : null;
     const result = await withFallback(
       selection.selected,
       async (target, { phase } = {}) => {
+        // A client that already left gets no further provider calls.
+        if (clientGone.signal.aborted) throw clientAbortError();
+
         const upstreamProtocol = bridged
           ? upstreamProtocolFor(target)
           : protocol;
         const translated = bridged && upstreamProtocol !== nativeProtocol;
+
+        // Gemini only accepts inline image data, so a remote image URL from a
+        // translated client request is downloaded first (once per request, with
+        // SSRF protection). A URL that cannot be fetched is a 4xx for this
+        // target — never an image silently removed from a request that then 200s.
+        const media = translated && bridgeKind !== "gemini" && upstreamProtocol === "gemini"
+          ? await mediaResolver.resolve(protocol, body, { signal: clientGone.signal })
+          : null;
+
         const request = !translated
           ? buildUpstreamRequest(target, protocol, body, req.headers, { stream: wantsStream })
           : bridgeKind === "codex"
-            ? buildCodexRequest(target, upstreamProtocol, body, req.headers)
+            ? buildCodexRequest(target, upstreamProtocol, body, req.headers, { media })
             : bridgeKind === "chat"
-              ? buildChatRequest(target, upstreamProtocol, body, req.headers)
+              ? buildChatRequest(target, upstreamProtocol, body, req.headers, { media })
               : bridgeKind === "gemini"
                 ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream })
-                : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
+                : buildBridgeRequest(target, upstreamProtocol, body, req.headers, { media });
         const controller = new AbortController();
+        const abortForClient = () => controller.abort();
+        clientGone.signal.addEventListener("abort", abortForClient, { once: true });
         // fetch() resolves once response headers arrive, so for streaming
         // requests this is a time-to-first-response limit: a hung provider
         // fails over after connectTimeoutMs rather than the full request timeout.
+        // For a response read to the end inside this attempt, it covers the body too.
         const attemptTimeoutMs = wantsStream && config.connectTimeoutMs > 0
           ? Math.min(config.timeoutMs, config.connectTimeoutMs)
           : config.timeoutMs;
@@ -531,6 +638,7 @@ async function proxy(req, res, protocol, pathname) {
         // reconstructed from the final error.
         let recorded = false;
         const attempt = (ok, status, errorMessage) => {
+          if (recorded) return;
           recorded = true;
           const completedAt = Date.now();
           attempts.push({
@@ -560,7 +668,15 @@ async function proxy(req, res, protocol, pathname) {
         };
 
         try {
-          const upstream = await fetch(request.url, { ...request.options, signal: controller.signal });
+          const upstream = await fetch(request.url, { ...request.options, signal: controller.signal, redirect: "manual" });
+          if (upstream.status >= 300 && upstream.status < 400) {
+            // Never follow a redirect: it would carry this provider's credentials
+            // to wherever the response points.
+            await upstream.body?.cancel().catch(() => {});
+            const error = redirectError(upstream.status);
+            attempt(false, upstream.status, error.message);
+            throw error;
+          }
           if (!upstream.ok) {
             const text = await upstream.text();
             const error = new Error(text.slice(0, 2000) || ("Upstream HTTP " + upstream.status));
@@ -584,11 +700,61 @@ async function proxy(req, res, protocol, pathname) {
             attempt(false, upstream.status, error.message);
             throw error;
           }
-          // The successful attempt is recorded too — otherwise the log would
-          // show a chain of failures with no terminal success.
-          attempt(true, upstream.status, null);
-          return { upstream, target, upstreamProtocol, translated };
+
+          const headersLatencyMs = Date.now() - receivedAt;
+          const base = { upstream, target, upstreamProtocol, translated, headersLatencyMs };
+
+          // A translated, non-streamed answer is read and converted HERE, inside
+          // the attempt: a body that cuts off or cannot be translated is this
+          // target's failure, and nothing has been sent to the client yet, so the
+          // walk can still move on to the next target.
+          if (translated && !wantsStream) {
+            const upstreamJson = await upstream.json();
+            const modelName = clientModel ?? target.model;
+            const converted = bridgeKind === "codex"
+              ? convertCodexJson(upstreamProtocol, upstreamJson, modelName, bridgeCtx)
+              : bridgeKind === "chat"
+                ? convertChatJson(upstreamProtocol, upstreamJson, modelName, bridgeCtx)
+                : bridgeKind === "gemini"
+                  ? chatJsonToGemini(upstreamJson)
+                  : convertJsonResponse(upstreamProtocol, upstreamJson, modelName);
+            attempt(true, upstream.status, null);
+            return { ...base, converted };
+          }
+
+          // Small, explicitly-sized JSON bodies are read here for the same reason
+          // and inspected for usage. The bytes forwarded to the client are unchanged.
+          const contentType = upstream.headers.get("content-type") || "application/json";
+          // Number(null) is 0, which would make a chunked (length-less) body look
+          // "small" and get buffered whole: only a body that declares its size is read here.
+          const lengthHeader = upstream.headers.get("content-length");
+          const declaredLength = lengthHeader === null ? Number.NaN : Number(lengthHeader);
+          if (
+            !translated &&
+            upstream.body &&
+            contentType.includes("application/json") &&
+            Number.isFinite(declaredLength) &&
+            declaredLength <= MAX_INSPECT_BYTES
+          ) {
+            const raw = Buffer.from(await upstream.arrayBuffer());
+            let usage = { tokens: null, finishReason: null };
+            try { usage = extractUsage(JSON.parse(raw.toString("utf8"))); } catch { /* usage stays unreported */ }
+            attempt(true, upstream.status, null);
+            return { ...base, buffered: raw, usage, contentType };
+          }
+
+          // Anything that will be streamed to the client: only the HEADERS have
+          // arrived, which is not a success. The attempt stays "calling" and
+          // health/sticky stay untouched until the body has actually finished;
+          // the caller settles them (see settleResult in router.js).
+          return { ...base, deferSettlement: true, completeAttempt: attempt, contentType };
         } catch (error) {
+          if (clientGone.signal.aborted) {
+            // The client left, not the provider: not a failure of this target.
+            const gone = clientAbortError();
+            attempt(false, null, gone.message);
+            throw gone;
+          }
           if (isAbortError(error)) {
             const timeout = toTimeoutError("Upstream request timed out");
             attempt(false, timeout.status, timeout.message);
@@ -599,11 +765,15 @@ async function proxy(req, res, protocol, pathname) {
           if (!recorded) {
             attempt(false, Number(error?.status) || null, error?.message);
             // No HTTP status means the provider never answered (DNS, refused or
-            // reset connection, TLS). Another target may well succeed.
+            // reset connection, TLS) or its body could not be read/translated
+            // before anything was sent. Another target may well succeed.
             if (error && typeof error === "object" && !Number.isInteger(error.status)) error.retryable = true;
           }
           throw error;
-        } finally { clearTimeout(timer); }
+        } finally {
+          clearTimeout(timer);
+          clientGone.signal.removeEventListener("abort", abortForClient);
+        }
       },
       config.retryableStatus,
       // A pin is a one-off override (e.g. the Playground testing a key): its
@@ -635,98 +805,13 @@ async function proxy(req, res, protocol, pathname) {
     );
 
     const sessionId = sessionInfo.id;
-
-    if (result.translated) {
-      const clientModel = typeof body.model === "string" ? body.model : result.target.model;
-      const meta = {
-        "x-multi-ai-provider": result.target.provider,
-        "x-multi-ai-model": result.target.model,
-        "x-multi-ai-key-index": String(result.target.keyIndex),
-        "x-multi-ai-session-id": sessionId
-      };
-      let converted = null;
-      if (!wantsStream) {
-        const upstreamJson = await result.upstream.json();
-        converted = bridgeKind === "codex"
-          ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
-          : bridgeKind === "chat"
-            ? convertChatJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
-            : bridgeKind === "gemini"
-              ? chatJsonToGemini(upstreamJson)
-              : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
-      }
-
-      recordRequest({
-        pendingSeq: liveSeq,
-        id: sessionId,
-        receivedAt,
-        protocol,
-        pool,
-        requestedModel,
-        autoRouted: !selection.modelMatched,
-        streamed: wantsStream,
-        attempts,
-        finalProvider: result.target.provider,
-        finalModel: result.target.model,
-        finalKeyIndex: result.target.keyIndex,
-        httpStatus: 200,
-        latencyMs: Date.now() - receivedAt,
-        totalMs: Date.now() - receivedAt,
-        tokens: converted ? convertedTokens(converted) : null,
-        finishReason: converted?.stop_reason ?? converted?.incomplete_details?.reason ?? converted?.choices?.[0]?.finish_reason ?? converted?.status ?? null,
-        outcome: "success"
-      });
-
-      if (converted) return json(res, 200, converted, meta);
-
-      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...meta });
-      try {
-        const upstreamEvents = sseData(result.upstream.body);
-        const events = bridgeKind === "codex"
-          ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
-          : bridgeKind === "chat"
-            ? streamToChat(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
-            : bridgeKind === "gemini"
-              ? streamToGemini(upstreamEvents)
-              : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
-        await pipeline(Readable.from(events), res);
-      } catch {
-        res.destroy();
-      }
-      return undefined;
-    }
-
-    const contentType = result.upstream.headers.get("content-type") || "application/json";
-    const declaredLength = Number(result.upstream.headers.get("content-length"));
-    let usage = { tokens: null, finishReason: null };
-    let buffered = null;
-
-    // Only small, explicitly-sized JSON bodies are inspected for usage. The
-    // bytes forwarded to the client are unchanged either way.
-    if (
-      result.upstream.body &&
-      contentType.includes("application/json") &&
-      Number.isFinite(declaredLength) &&
-      declaredLength <= MAX_INSPECT_BYTES
-    ) {
-      try {
-        const raw = Buffer.from(await result.upstream.arrayBuffer());
-        // The body is consumed now, so it must be forwarded from this buffer even
-        // when it is not valid JSON; only the usage lookup may fail.
-        buffered = raw;
-        try { usage = extractUsage(JSON.parse(raw.toString("utf8"))); } catch { /* usage stays unreported */ }
-      } catch {
-        buffered = null;
-      }
-    }
-
-    const latencyMs = Date.now() - receivedAt;
-
-    // Recorded before the body is written: a client that reads the request log
-    // immediately after this call would otherwise race the write and see a
-    // stale list. `latencyMs` is time-to-upstream-response, which is the
-    // figure an operator acts on; stream duration is not included.
-    recordRequest({
+    const meta = {
+      "x-multi-ai-provider": result.target.provider,
+      "x-multi-ai-model": result.target.model,
+      "x-multi-ai-key-index": String(result.target.keyIndex),
+      ...idHeaders
+    };
+    const successFields = (extra = {}) => ({
       pendingSeq: liveSeq,
       id: sessionId,
       receivedAt,
@@ -734,44 +819,107 @@ async function proxy(req, res, protocol, pathname) {
       pool,
       requestedModel,
       autoRouted: !selection.modelMatched,
-      streamed: !buffered && Boolean(result.upstream.body),
       attempts,
       finalProvider: result.target.provider,
       finalModel: result.target.model,
       finalKeyIndex: result.target.keyIndex,
-      httpStatus: result.upstream.status,
-      latencyMs,
-      totalMs: Date.now() - receivedAt,
-      tokens: usage.tokens,
-      finishReason: usage.finishReason,
-      outcome: "success"
+      latencyMs: Date.now() - receivedAt,
+      ...extra
     });
 
-    res.writeHead(result.upstream.status, {
-      "content-type": contentType,
-      "cache-control": "no-cache",
-      "x-multi-ai-provider": result.target.provider,
-      "x-multi-ai-model": result.target.model,
-      "x-multi-ai-key-index": String(result.target.keyIndex),
-      "x-multi-ai-session-id": sessionId
-    });
-
-    if (buffered) {
-      res.end(buffered);
-    } else if (result.upstream.body) {
-      try {
-        // pipeline() applies backpressure and tears down the upstream reader
-        // when the client disconnects.
-        await pipeline(Readable.fromWeb(result.upstream.body), res);
-      } catch {
-        // Headers are already on the wire, so the failure cannot be reported
-        // as a JSON error response. Drop the connection instead.
-        res.destroy();
-      }
-    } else {
-      res.end();
+    // ---- answers that are complete before a byte is sent -------------------
+    if (result.converted) {
+      const converted = result.converted;
+      recordRequest(successFields({
+        streamed: false,
+        httpStatus: 200,
+        latencyMs: Date.now() - receivedAt,
+        totalMs: Date.now() - receivedAt,
+        tokens: convertedTokens(converted),
+        finishReason: converted?.stop_reason ?? converted?.incomplete_details?.reason ?? converted?.choices?.[0]?.finish_reason ?? converted?.status ?? null,
+        outcome: "success"
+      }));
+      return json(res, 200, converted, meta);
     }
+
+    if (result.buffered) {
+      recordRequest(successFields({
+        streamed: false,
+        httpStatus: result.upstream.status,
+        latencyMs: Date.now() - receivedAt,
+        totalMs: Date.now() - receivedAt,
+        tokens: result.usage.tokens,
+        finishReason: result.usage.finishReason,
+        outcome: "success"
+      }));
+      res.writeHead(result.upstream.status, { "content-type": result.contentType, "cache-control": "no-cache", ...meta });
+      res.end(result.buffered);
+      return undefined;
+    }
+
+    // ---- streamed answers: success is decided when the body ENDS ------------
+    const clientModelName = clientModel ?? result.target.model;
+    const sourceEvents = () => trackUpstream(sseData(result.upstream.body), streamState);
+    let readable;
+    if (result.translated) {
+      const upstreamEvents = sourceEvents();
+      const events = bridgeKind === "codex"
+        ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModelName, bridgeCtx)
+        : bridgeKind === "chat"
+          ? streamToChat(result.upstreamProtocol, upstreamEvents, clientModelName, bridgeCtx)
+          : bridgeKind === "gemini"
+            ? streamToGemini(upstreamEvents)
+            : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModelName);
+      readable = Readable.from(events);
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...meta });
+    } else if (result.upstream.body) {
+      readable = Readable.fromWeb(result.upstream.body);
+      readable.on("error", (error) => { if (!streamState.clientClosed) streamState.upstreamError = error; });
+      res.writeHead(result.upstream.status, { "content-type": result.contentType, "cache-control": "no-cache", ...meta });
+    } else {
+      // No body at all: nothing can fail half-way.
+      result.completeAttempt(true, result.upstream.status, null);
+      result.settle.success();
+      recordRequest(successFields({ streamed: false, httpStatus: result.upstream.status, latencyMs: result.headersLatencyMs, totalMs: Date.now() - receivedAt, outcome: "success" }));
+      res.writeHead(result.upstream.status, { "cache-control": "no-cache", ...meta });
+      res.end();
+      return undefined;
+    }
+
+    let pipelineError = null;
+    try {
+      // pipeline() applies backpressure and tears down the upstream reader when
+      // the client disconnects.
+      await pipeline(readable, res);
+    } catch (error) {
+      pipelineError = error;
+    }
+
+    const streamFields = { streamed: true, httpStatus: result.upstream.status, latencyMs: result.headersLatencyMs, totalMs: Date.now() - receivedAt };
+    if (!pipelineError && !streamState.upstreamError) {
+      // The upstream body ended and everything reached the client: only now is it a success.
+      result.completeAttempt(true, result.upstream.status, null);
+      result.settle.success();
+      recordRequest(successFields({ ...streamFields, outcome: "success" }));
+    } else if (streamState.upstreamError) {
+      // The provider's stream broke after the headers were sent. The answer is
+      // truncated, so the request, the attempt and the target's health all say
+      // so. Headers are out already: there is no safe way to retry elsewhere.
+      const message = "Upstream stream ended before it completed: " + sanitizeMessage(streamState.upstreamError?.message || "stream error");
+      result.completeAttempt(false, result.upstream.status, message);
+      result.settle.failure();
+      recordRequest(successFields({ ...streamFields, outcome: "failed", errorType: "stream_error", errorMessage: message }));
+      if (!res.writableEnded) res.destroy();
+    } else {
+      // The client went away mid-stream: neither a success nor the provider's fault.
+      result.completeAttempt(false, null, "Client disconnected before the stream finished");
+      result.settle.abandon();
+      recordRequest(successFields({ ...streamFields, outcome: "failed", errorType: "client_aborted", errorMessage: "client disconnected before the stream finished" }));
+      if (!res.writableEnded) res.destroy();
+    }
+    return undefined;
   } catch (error) {
+    const clientLeft = error?.clientAborted === true;
     recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id,
@@ -791,9 +939,11 @@ async function proxy(req, res, protocol, pathname) {
       errorMessage: sanitizeMessage(error?.message || "All routing targets failed"),
       outcome: "failed"
     });
+    // Nobody is listening any more.
+    if (clientLeft) return undefined;
     // `error.message` can be raw upstream text (an all-400 walk and non-retryable
     // statuses surface it), so it is scrubbed like every other outbound message.
-    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: error?.errorType ?? "upstream_error", failures: publicFailure(error) } }, idHeaders);
   }
 }
 
@@ -903,17 +1053,29 @@ async function handleRequest(req, res) {
   if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
     if (!authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
     try {
-      const body = await readJsonBody(req);
+      const body = await readJsonBody(req, { maxBytes: config.maxRequestBodyBytes });
       const shapeError = validateRequestShape("anthropic", body);
       if (shapeError) return json(res, 400, { error: { message: shapeError, type: "invalid_request_error" } });
       return json(res, 200, { input_tokens: estimateInputTokens(body) });
     } catch (error) {
-      return json(res, error.status || 400, { error: { message: clientMessage(error.message), type: "invalid_request_error" } });
+      return json(res, error.status || 400, { error: { message: clientMessage(error.message), type: error.errorType ?? "invalid_request_error" } }, error.status === 413 ? { connection: "close" } : {});
     }
   }
 
   const protocol = req.method === "POST" ? clientProtocol(pathname) : null;
   if (protocol) return proxy(req, res, protocol, pathname);
+
+  // Inside Gemini's namespace but not an endpoint this router serves (another
+  // casing, a ':' in the model, a trailing slash, an unsupported method): refuse
+  // it by name rather than letting it fall through as an anonymous 404.
+  if (req.method === "POST" && isGeminiNamespace(pathname)) {
+    return json(res, 404, {
+      error: {
+        message: "Unsupported Gemini endpoint. Use /v1beta/models/<model>:generateContent or :streamGenerateContent (exact casing).",
+        type: "invalid_gemini_endpoint"
+      }
+    });
+  }
 
   // Static panel assets, then the SPA shell for client-side routes.
   if (req.method === "GET" || req.method === "HEAD") {
@@ -951,7 +1113,16 @@ process.once("SIGTERM", () => {
   server.close(() => process.exit(0));
 });
 
-server.listen(config.port, () => {
+const onListening = () => {
   console.log("MultiAI Router listening on http://localhost:" + config.port);
   console.log("Control Panel UI: http://localhost:" + config.port + "/");
-});
+  const loopbackOnly = config.host && /^(127\.|::1$|localhost$)/i.test(config.host);
+  if (config.routerApiKeys.length === 0 && !loopbackOnly) {
+    console.warn(
+      "[router] MULTIAI_ROUTER_API_KEYS is empty and the router is not bound to a loopback address: anyone who can reach this port can use your provider keys. " +
+      "Set MULTIAI_ROUTER_API_KEYS, or HOST=127.0.0.1 to accept local connections only."
+    );
+  }
+};
+if (config.host) server.listen(config.port, config.host, onListening);
+else server.listen(config.port, onListening);

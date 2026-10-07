@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
+import { geminiModelUrl } from "./gemini-url.js";
+import { UnsupportedMediaError, parseToolArguments } from "./bridge-errors.js";
+import { inlineImagePart, parseDataUrl } from "./media.js";
+import { cleanSchemaForGemini } from "./anthropic-bridge.js";
+import { rememberSignature, signatureFor, ensureCallSignatures } from "./thought-signatures.js";
 
 /**
  * OpenAI chat-completions bridge.
@@ -53,27 +57,46 @@ function newId(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
 }
 
-function safeParse(text) {
-  try { return JSON.parse(text); } catch { return {}; }
-}
-
 function chatMessages(body) {
   return (Array.isArray(body?.messages) ? body.messages : []).filter(
     (message) => message && typeof message === "object"
   );
 }
 
-/** Plain text of a chat content value (string, or content-part array). */
+const MEDIA_PART_TYPES = new Set(["image_url", "input_audio", "file", "video_url", "audio_url"]);
+const isMediaPart = (part) => Boolean(part) && typeof part === "object" && MEDIA_PART_TYPES.has(part.type);
+
+/** Plain text of a chat content value (string, or content-part array). Media parts are not text. */
 function textOfContent(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
     .map((part) => {
       if (typeof part === "string") return part;
-      if (part?.type === "image_url") return "[image]";
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");
+}
+
+/** Text-only positions (system, assistant) cannot carry media to a translated provider. */
+function assertTextOnly(content, where) {
+  if (Array.isArray(content) && content.some(isMediaPart)) {
+    throw new UnsupportedMediaError(`Images or files in ${where} cannot be forwarded to the selected provider`, "unsupported_media_position");
+  }
+}
+
+/** The Gemini inline part for one chat media content part. */
+function geminiPartForChatMedia(part, media) {
+  if (part.type === "image_url") return inlineImagePart(imageUrlOf(part), media, "image");
+  if (part.type === "input_audio" && part.input_audio?.data) {
+    return { inlineData: { mimeType: `audio/${String(part.input_audio.format || "wav").toLowerCase()}`, data: part.input_audio.data } };
+  }
+  if (part.type === "file") {
+    const parsed = parseDataUrl(part.file?.file_data);
+    if (parsed) return { inlineData: { mimeType: parsed.mimeType, data: parsed.data } };
+    throw new UnsupportedMediaError("File references (file_id) cannot be forwarded to the selected provider", "unsupported_file_reference");
+  }
+  throw new UnsupportedMediaError(`Content part type "${part.type}" cannot be forwarded to the selected provider`, "unsupported_media");
 }
 
 function imageUrlOf(part) {
@@ -86,9 +109,8 @@ function argsString(args) {
   return JSON.stringify(args ?? {});
 }
 
-function argsObject(args) {
-  if (typeof args === "string") return safeParse(args);
-  return args && typeof args === "object" ? args : {};
+function argsObject(args, name) {
+  return parseToolArguments(args, name);
 }
 
 function positiveInt(value) {
@@ -121,7 +143,7 @@ function stopSequences(body) {
 
 // ---------------------------------------------------------- request -> Gemini
 
-export function toGeminiFromChat(body) {
+export function toGeminiFromChat(body, { model = "", media = null } = {}) {
   // Gemini's functionResponse must name the function; the chat protocol only
   // carries the call id, so map it from the assistant turns.
   const callNames = new Map();
@@ -139,23 +161,33 @@ export function toGeminiFromChat(body) {
     if (last && last.role === role) last.parts.push(...parts);
     else contents.push({ role, parts });
   };
+  // Media a tool returned. It follows the whole run of function responses, so
+  // parallel responses stay contiguous (FC1 FC2 FR1 FR2 media), which Gemini requires.
+  let toolMedia = [];
+  const flushToolMedia = () => {
+    if (toolMedia.length) push("user", toolMedia);
+    toolMedia = [];
+  };
 
   for (const message of chatMessages(body)) {
     const role = message.role;
+    if (role !== "tool" && role !== "function") flushToolMedia();
 
     if (role === "system" || role === "developer") {
+      assertTextOnly(message.content, "the system prompt");
       const text = textOfContent(message.content);
       if (text) system.push(text);
       continue;
     }
 
     if (role === "assistant") {
+      assertTextOnly(message.content, "an assistant turn");
       const parts = [];
       const text = textOfContent(message.content);
       if (text) parts.push({ text });
       for (const call of message.tool_calls || []) {
         if (!call || typeof call.function?.name !== "string" || !call.function.name) continue;
-        const part = { functionCall: { name: call.function.name, args: argsObject(call.function.arguments) } };
+        const part = { functionCall: { name: call.function.name, args: argsObject(call.function.arguments, call.function.name) } };
         // Echo the thoughtSignature a previous Gemini response returned with
         // this call, when the client sent the same tool-call id back.
         const signature = signatureFor(call.id);
@@ -168,10 +200,12 @@ export function toGeminiFromChat(body) {
 
     if (role === "tool" || role === "function") {
       const text = textOfContent(message.content);
+      const attachments = Array.isArray(message.content) ? message.content.filter(isMediaPart) : [];
+      for (const part of attachments) toolMedia.push(geminiPartForChatMedia(part, media));
       push("user", [{
         functionResponse: {
           name: callNames.get(message.tool_call_id) || (typeof message.name === "string" && message.name) || "tool",
-          response: { output: text }
+          response: { output: text || (attachments.length ? "[the tool returned an attachment, included below]" : "") }
         }
       }]);
       continue;
@@ -181,9 +215,8 @@ export function toGeminiFromChat(body) {
     const parts = [];
     if (Array.isArray(message.content)) {
       for (const part of message.content) {
-        if (part?.type === "image_url") {
-          const data = /^data:([^;,]+);base64,(.+)$/s.exec(imageUrlOf(part));
-          if (data) parts.push({ inlineData: { mimeType: data[1], data: data[2] } });
+        if (isMediaPart(part)) {
+          parts.push(geminiPartForChatMedia(part, media));
         } else {
           const text = textOfContent([part]);
           if (text) parts.push({ text });
@@ -195,6 +228,8 @@ export function toGeminiFromChat(body) {
     }
     push("user", parts);
   }
+  flushToolMedia();
+  ensureCallSignatures(contents, model);
 
   const payload = { contents };
   if (system.length) payload.systemInstruction = { parts: [{ text: system.join("\n\n") }] };
@@ -243,7 +278,7 @@ function joinUrl(baseUrl, suffix) {
 }
 
 /** Builds the upstream fetch request for a translated (non-chat) target. */
-export function buildChatRequest(target, upstreamProtocol, body, incomingHeaders = {}) {
+export function buildChatRequest(target, upstreamProtocol, body, incomingHeaders = {}, { media = null } = {}) {
   const headers = { "content-type": "application/json" };
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
@@ -252,9 +287,8 @@ export function buildChatRequest(target, upstreamProtocol, body, incomingHeaders
   if (upstreamProtocol === "gemini") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
-    const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
-    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
-    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromChat(body)) } };
+    const url = geminiModelUrl(base, target.model, { stream });
+    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromChat(body, { model: target.model, media })) } };
   }
   throw new Error("Unsupported Chat bridge protocol: " + upstreamProtocol);
 }

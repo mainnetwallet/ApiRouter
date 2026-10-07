@@ -33,7 +33,9 @@ const normalizePool = (value) => (value === POOLS.VISION ? POOLS.VISION : POOLS.
  * that has not finished. A request that never reports back is dropped after
  * this long, and the set is capped, so a leak cannot grow without bound.
  */
-const PENDING_TTL_MS = 10 * 60 * 1000;
+// A request is "pending" until its response has finished, and a streamed answer
+// can legitimately run for a long time, so this is only a leak guard.
+const PENDING_TTL_MS = 60 * 60 * 1000;
 const MAX_PENDING = 200;
 
 const PHASES = ["sticky", "priority", "fallback"];
@@ -497,13 +499,24 @@ export class RequestLog {
   }
 
   /** Look an entry up by its client-visible request id. */
+  /**
+   * One request, by its own id (`req-…`, the `x-multi-ai-request-id` response
+   * header). Not by the session id: many requests share a session id (every
+   * client that sends no session header uses "default"), so it identifies no
+   * single request.
+   */
   findById(id) {
     const wanted = String(id ?? "");
     if (!wanted) return null;
     for (const entry of this.entries.values()) {
-      if (entry.id === wanted) return entry;
+      if (entry.requestId === wanted) return entry;
     }
     return null;
+  }
+
+  /** The id of a request that is still in flight, so it can be sent to the client as a header. */
+  requestIdOf(startSeq) {
+    return this.pendingEntries.get(startSeq)?.requestId ?? null;
   }
 
   /**

@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { geminiModelUrl } from "./gemini-url.js";
+import { MalformedUpstreamArgumentsError, UnsupportedMediaError, parseToolArguments } from "./bridge-errors.js";
+import { inlineImagePart } from "./media.js";
+import { rememberSignature, signatureFor, ensureCallSignatures } from "./thought-signatures.js";
 
 /**
  * Anthropic Messages bridge.
@@ -45,15 +49,23 @@ function blocksOf(content) {
   return Array.isArray(content) ? content : [];
 }
 
+const MEDIA_BLOCKS = new Set(["image", "document"]);
+
+/** Text of a content value. Media blocks are NOT represented here: callers carry them separately. */
 function textOfBlocks(content) {
   return blocksOf(content)
-    .map((b) => (b?.type === "text" ? b.text ?? "" : b?.type === "image" ? "[image]" : ""))
+    .filter((b) => b?.type === "text")
+    .map((b) => b.text ?? "")
     .join("\n");
 }
 
+/** A system prompt is text. A media block in it cannot be forwarded to a translated provider. */
 function systemText(system) {
   if (!system) return "";
   if (typeof system === "string") return system;
+  if (blocksOf(system).some((b) => MEDIA_BLOCKS.has(b?.type))) {
+    throw new UnsupportedMediaError("Images or documents in the system prompt cannot be forwarded to the selected provider", "unsupported_system_media");
+  }
   return textOfBlocks(system);
 }
 
@@ -108,6 +120,21 @@ export function cleanSchemaForGemini(schema) {
 
 // ------------------------------------------------- request -> OpenAI chat
 
+function imageBlockToChat(block) {
+  const source = block?.source;
+  if (source?.type === "base64" && source.data) {
+    return { type: "image_url", image_url: { url: `data:${source.media_type || "image/png"};base64,${source.data}` } };
+  }
+  if (source?.type === "url" && source.url) return { type: "image_url", image_url: { url: source.url } };
+  throw new UnsupportedMediaError("This image source type cannot be forwarded to the selected provider", "unsupported_image_source");
+}
+
+function assertNoDocument(block) {
+  if (block?.type === "document") {
+    throw new UnsupportedMediaError("Document attachments cannot be forwarded to the selected provider", "unsupported_document");
+  }
+}
+
 export function toOpenAIChatRequest(body, model) {
   const messages = [];
   const sys = systemText(body.system);
@@ -115,6 +142,7 @@ export function toOpenAIChatRequest(body, model) {
 
   for (const msg of body.messages || []) {
     const blocks = blocksOf(msg.content);
+    blocks.forEach(assertNoDocument);
 
     if (msg.role === "assistant") {
       const text = blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
@@ -125,6 +153,9 @@ export function toOpenAIChatRequest(body, model) {
           type: "function",
           function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) }
         }));
+      if (blocks.some((b) => b.type === "image")) {
+        throw new UnsupportedMediaError("Images in an assistant turn cannot be forwarded to the selected provider", "unsupported_assistant_media");
+      }
       const out = { role: "assistant", content: text };
       if (toolCalls.length) out.tool_calls = toolCalls;
       if (text || toolCalls.length) messages.push(out);
@@ -132,14 +163,22 @@ export function toOpenAIChatRequest(body, model) {
     }
 
     // user: tool results first (they must follow the assistant tool_calls),
-    // then the remaining text/images.
+    // then the remaining text/images. A chat `tool` message carries text only, so
+    // an image a tool returned follows it as a user message that carries the image.
+    const toolImages = [];
     for (const b of blocks.filter((x) => x.type === "tool_result")) {
+      const inner = blocksOf(b.content);
+      inner.forEach(assertNoDocument);
       const content = typeof b.content === "string" ? b.content : textOfBlocks(b.content);
+      for (const image of inner.filter((x) => x.type === "image")) toolImages.push(imageBlockToChat(image));
       messages.push({
         role: "tool",
         tool_call_id: b.tool_use_id,
         content: b.is_error ? "Error: " + content : content
       });
+    }
+    if (toolImages.length) {
+      messages.push({ role: "user", content: [{ type: "text", text: "Image output of the tool call(s) above:" }, ...toolImages] });
     }
     const rest = blocks.filter((b) => b.type === "text" || b.type === "image");
     if (rest.length === 0) continue;
@@ -149,12 +188,7 @@ export function toOpenAIChatRequest(body, model) {
     } else {
       messages.push({
         role: "user",
-        content: rest.map((b) =>
-          b.type === "image" && b.source?.type === "base64"
-            ? { type: "image_url", image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } }
-            : b.type === "image" && b.source?.url
-              ? { type: "image_url", image_url: { url: b.source.url } }
-              : { type: "text", text: b.text ?? "" })
+        content: rest.map((b) => (b.type === "image" ? imageBlockToChat(b) : { type: "text", text: b.text ?? "" }))
       });
     }
   }
@@ -187,21 +221,30 @@ export function toOpenAIChatRequest(body, model) {
 
 // ------------------------------------------------------ request -> Gemini
 
-// Gemini 3 needs the thoughtSignature echoed back with a functionCall. The
-// Anthropic protocol has no field for it, so keep it keyed by tool id.
-const signatures = new Map();
-const MAX_SIGNATURES = 2000;
-export function rememberSignature(id, signature) {
-  if (!signature) return;
-  signatures.set(id, signature);
-  while (signatures.size > MAX_SIGNATURES) signatures.delete(signatures.keys().next().value);
+// Gemini 3 needs the thoughtSignature echoed back with a functionCall; see
+// thought-signatures.js for how it is stored (scoped, bounded, with a fallback).
+export { rememberSignature, signatureFor };
+
+/** Gemini inline part for an Anthropic image/document block, resolving a URL source from `media`. */
+function geminiPartForBlock(block, media) {
+  if (block.type === "image") {
+    const source = block.source;
+    if (source?.type === "base64" && source.data) {
+      return { inlineData: { mimeType: source.media_type || "image/png", data: source.data } };
+    }
+    if (source?.type === "url" && source.url) return inlineImagePart(source.url, media, "image");
+    throw new UnsupportedMediaError("This image source type cannot be forwarded to the selected provider", "unsupported_image_source");
+  }
+  // document
+  const source = block.source;
+  if (source?.type === "base64" && source.data) {
+    return { inlineData: { mimeType: source.media_type || "application/pdf", data: source.data } };
+  }
+  if (source?.type === "text" && typeof source.data === "string") return { text: source.data };
+  throw new UnsupportedMediaError("This document source cannot be forwarded to the selected provider", "unsupported_document");
 }
 
-export function signatureFor(id) {
-  return signatures.get(id);
-}
-
-export function toGeminiRequest(body) {
+export function toGeminiRequest(body, { model = "", media = null } = {}) {
   const toolNames = new Map();
   for (const msg of body.messages || []) {
     for (const b of blocksOf(msg.content)) if (b.type === "tool_use") toolNames.set(b.id, b.name);
@@ -218,28 +261,37 @@ export function toGeminiRequest(body) {
   for (const msg of body.messages || []) {
     const blocks = blocksOf(msg.content);
     const parts = [];
+    // Media a tool returned follows the function responses of this turn.
+    const trailing = [];
     for (const b of blocks) {
       if (b.type === "text") {
         if (b.text) parts.push({ text: b.text });
-      } else if (b.type === "image" && b.source?.type === "base64") {
-        parts.push({ inlineData: { mimeType: b.source.media_type, data: b.source.data } });
+      } else if (b.type === "image" || b.type === "document") {
+        if (msg.role === "assistant") {
+          throw new UnsupportedMediaError("Media in an assistant turn cannot be forwarded to the selected provider", "unsupported_assistant_media");
+        }
+        parts.push(geminiPartForBlock(b, media));
       } else if (b.type === "tool_use") {
         const part = { functionCall: { name: b.name, args: b.input ?? {} } };
-        const sig = signatures.get(b.id);
+        const sig = signatureFor(b.id);
         if (sig) part.thoughtSignature = sig;
         parts.push(part);
       } else if (b.type === "tool_result") {
+        const inner = blocksOf(b.content);
         const content = typeof b.content === "string" ? b.content : textOfBlocks(b.content);
+        for (const block of inner.filter((x) => MEDIA_BLOCKS.has(x.type))) trailing.push(geminiPartForBlock(block, media));
+        const output = content || (trailing.length ? "[the tool returned an attachment, included below]" : "");
         parts.push({
           functionResponse: {
             name: toolNames.get(b.tool_use_id) || "tool",
-            response: b.is_error ? { error: content } : { output: content }
+            response: b.is_error ? { error: output } : { output }
           }
         });
       }
     }
-    push(msg.role === "assistant" ? "model" : "user", parts);
+    push(msg.role === "assistant" ? "model" : "user", [...parts, ...trailing]);
   }
+  ensureCallSignatures(contents, model);
 
   const payload = { contents, generationConfig: {} };
   // The client's own limit is forwarded as sent; when it sends none, none is added.
@@ -275,7 +327,7 @@ function joinUrl(baseUrl, suffix) {
 }
 
 /** Builds the upstream fetch request for a translated (non-Anthropic) target. */
-export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeaders = {}) {
+export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeaders = {}, { media = null } = {}) {
   const headers = { "content-type": "application/json" };
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
@@ -290,9 +342,8 @@ export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeade
   if (upstreamProtocol === "gemini") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
-    const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
-    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
-    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiRequest(body)) } };
+    const url = geminiModelUrl(base, target.model, { stream });
+    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiRequest(body, { model: target.model, media })) } };
   }
   throw new Error("Unsupported bridge protocol: " + upstreamProtocol);
 }
@@ -315,7 +366,7 @@ export function openAIJsonToAnthropic(json, model) {
       type: "tool_use",
       id: call.id || newId("toolu"),
       name: call.function?.name || "tool",
-      input: safeParse(call.function?.arguments || "{}")
+      input: parseToolArguments(call.function?.arguments, call.function?.name, MalformedUpstreamArgumentsError)
     });
   }
   if (content.length === 0) content.push({ type: "text", text: "" });
@@ -431,59 +482,66 @@ export async function* streamToAnthropic(upstreamProtocol, events, model) {
     yield sse("content_block_delta", { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text } });
   };
 
-  for await (const data of events) {
-    if (data === "[DONE]") break;
-    let chunk;
-    try { chunk = JSON.parse(data); } catch { continue; }
+  try {
+    for await (const data of events) {
+      if (data === "[DONE]") break;
+      let chunk;
+      try { chunk = JSON.parse(data); } catch { continue; }
 
-    if (upstreamProtocol === "gemini") {
-      const candidate = chunk.candidates?.[0];
-      for (const part of candidate?.content?.parts || []) {
-        if (part.thought) continue;
-        if (typeof part.text === "string") {
-          yield* writeText(part.text);
-        } else if (part.functionCall) {
+      if (upstreamProtocol === "gemini") {
+        const candidate = chunk.candidates?.[0];
+        for (const part of candidate?.content?.parts || []) {
+          if (part.thought) continue;
+          if (typeof part.text === "string") {
+            yield* writeText(part.text);
+          } else if (part.functionCall) {
+            yield* closeText();
+            const index = nextIndex++;
+            const id = newId("toolu");
+            rememberSignature(id, part.thoughtSignature);
+            sawTool = true;
+            yield sse("content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id, name: part.functionCall.name, input: {} } });
+            yield sse("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(part.functionCall.args ?? {}) } });
+            yield sse("content_block_stop", { type: "content_block_stop", index });
+          }
+        }
+        if (candidate?.finishReason) finish = candidate.finishReason === "MAX_TOKENS" ? "max_tokens" : "end_turn";
+        if (chunk.usageMetadata?.candidatesTokenCount) outputTokens = chunk.usageMetadata.candidatesTokenCount;
+        continue;
+      }
+
+      // OpenAI chat chunk
+      if (chunk.usage?.completion_tokens) outputTokens = chunk.usage.completion_tokens;
+      const choice = chunk.choices?.[0];
+      if (!choice) continue;
+      const delta = choice.delta || {};
+      if (typeof delta.content === "string" && delta.content) yield* writeText(delta.content);
+
+      for (const call of delta.tool_calls || []) {
+        const key = call.index ?? 0;
+        if (!toolBlocks.has(key)) {
           yield* closeText();
           const index = nextIndex++;
-          const id = newId("toolu");
-          rememberSignature(id, part.thoughtSignature);
+          open.push(index);
+          toolBlocks.set(key, index);
           sawTool = true;
-          yield sse("content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id, name: part.functionCall.name, input: {} } });
-          yield sse("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(part.functionCall.args ?? {}) } });
-          yield sse("content_block_stop", { type: "content_block_stop", index });
+          yield sse("content_block_start", {
+            type: "content_block_start", index,
+            content_block: { type: "tool_use", id: call.id || newId("toolu"), name: call.function?.name || "tool", input: {} }
+          });
+        }
+        const args = call.function?.arguments;
+        if (typeof args === "string" && args) {
+          yield sse("content_block_delta", { type: "content_block_delta", index: toolBlocks.get(key), delta: { type: "input_json_delta", partial_json: args } });
         }
       }
-      if (candidate?.finishReason) finish = candidate.finishReason === "MAX_TOKENS" ? "max_tokens" : "end_turn";
-      if (chunk.usageMetadata?.candidatesTokenCount) outputTokens = chunk.usageMetadata.candidatesTokenCount;
-      continue;
+      if (choice.finish_reason) finish = STOP_REASONS[choice.finish_reason] || "end_turn";
     }
-
-    // OpenAI chat chunk
-    if (chunk.usage?.completion_tokens) outputTokens = chunk.usage.completion_tokens;
-    const choice = chunk.choices?.[0];
-    if (!choice) continue;
-    const delta = choice.delta || {};
-    if (typeof delta.content === "string" && delta.content) yield* writeText(delta.content);
-
-    for (const call of delta.tool_calls || []) {
-      const key = call.index ?? 0;
-      if (!toolBlocks.has(key)) {
-        yield* closeText();
-        const index = nextIndex++;
-        open.push(index);
-        toolBlocks.set(key, index);
-        sawTool = true;
-        yield sse("content_block_start", {
-          type: "content_block_start", index,
-          content_block: { type: "tool_use", id: call.id || newId("toolu"), name: call.function?.name || "tool", input: {} }
-        });
-      }
-      const args = call.function?.arguments;
-      if (typeof args === "string" && args) {
-        yield sse("content_block_delta", { type: "content_block_delta", index: toolBlocks.get(key), delta: { type: "input_json_delta", partial_json: args } });
-      }
-    }
-    if (choice.finish_reason) finish = STOP_REASONS[choice.finish_reason] || "end_turn";
+  } catch (error) {
+    // Headers are already on the wire. Anthropic clients understand an `error`
+    // event, so the truncation is reported instead of looking like a clean end.
+    yield sse("error", { type: "error", error: { type: "api_error", message: String(error?.message || "Upstream stream failed").slice(0, 300) } });
+    return;
   }
 
   yield* closeText();

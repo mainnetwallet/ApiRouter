@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { shouldRefreshOnResume } from "../lib/polling.js";
 
 /**
  * Interval engine used by `useApi`.
@@ -31,10 +32,14 @@ export function usePolling(task, { intervalMs = null, enabled = true } = {}) {
   }, []);
 
   // Refresh on the hidden -> visible edge, so the first thing an operator sees
-  // when they switch back is current data.
+  // when they switch back is current data. Not on mount: the owner of the data
+  // fetches once on its own (see shouldRefreshOnResume).
+  const previous = useRef({ visible, enabled });
   useEffect(() => {
-    if (!visible || !enabled) return;
-    void taskRef.current?.({ reason: "focus" });
+    const next = { visible, enabled };
+    const resumed = shouldRefreshOnResume(previous.current, next);
+    previous.current = next;
+    if (resumed) void taskRef.current?.({ reason: "focus" });
   }, [visible, enabled]);
 
   useEffect(() => {

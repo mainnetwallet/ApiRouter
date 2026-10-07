@@ -87,18 +87,40 @@ test("an older routing failure cannot overwrite a newer health-check success", (
   assert.equal(state.failures, 0);
 });
 
-test("a newer health-check success still recovers a cooled-down target", () => {
+test("a health-check success does NOT cut a routing cooldown short", () => {
   const registry = new HealthRegistry({ cooldownMs: 900000 });
   const t = target();
 
   registry.markFailure(t, 503, {}, 1000);
   assert.equal(registry.isAvailable(t, 2000), false);
 
+  // The probe only proves the metadata endpoint answers; the chat failure that
+  // caused the cooldown may well persist. Only the timer or a real success revives.
   registry.recordHealthCheck(t, { ok: true, status: 200 }, 2000);
 
-  assert.equal(registry.isAvailable(t, 2000), true);
+  assert.equal(registry.isAvailable(t, 2000), false);
+  assert.equal(registry.ensureTarget(t).status, HEALTH_STATES.FAILED);
+  assert.equal(registry.ensureTarget(t).cooldownUntil, 1000 + 900000);
+});
+
+test("a health-check success after the cooldown has elapsed recovers the target", () => {
+  const registry = new HealthRegistry({ cooldownMs: 900000 });
+  const t = target();
+
+  registry.markFailure(t, 503, {}, 1000);
+  registry.recordHealthCheck(t, { ok: true, status: 200 }, 1000 + 900000 + 1);
+
+  assert.equal(registry.isAvailable(t, 1000 + 900000 + 1), true);
   assert.equal(registry.ensureTarget(t).status, HEALTH_STATES.HEALTHY);
   assert.equal(registry.ensureTarget(t).cooldownUntil, 0);
+});
+
+test("a real routing success recovers a cooled-down target immediately", () => {
+  const registry = new HealthRegistry({ cooldownMs: 900000 });
+  const t = target();
+  registry.markFailure(t, 503, {}, 1000);
+  registry.markSuccess(t, { latencyMs: 5 }, 2000);
+  assert.equal(registry.isAvailable(t, 2000), true);
 });
 
 test("the first observation is accepted regardless of its timestamp", () => {

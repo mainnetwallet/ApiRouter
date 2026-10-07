@@ -41,6 +41,11 @@ export function HealthProvider({ children }) {
     } catch (error) {
       if (error?.category === "cooldown") {
         toast.info("A health cycle is already running");
+      } else if (error?.kind === "abort") {
+        // Even the long limit ran out: the server is still working through the
+        // targets, which is not a failed refresh. Show what it has so far.
+        toast.info("The health cycle is still running; results will appear as it finishes");
+        health.reload();
       } else {
         toast.error(error?.label ?? "Health refresh failed", { detail: error?.hint ?? error?.message });
       }

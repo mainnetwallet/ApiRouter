@@ -18,7 +18,7 @@ test("detects images in every client protocol", () => {
 test("text-only requests and tool schemas are not images", () => {
   assert.equal(requestHasImage({ messages: [{ role: "user", content: "hello image_url" }] }), false);
   assert.equal(requestHasImage({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }], tools: [{ input_schema: { properties: { image: { type: "string" } } } }] }), false);
-  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "audio/wav", data: "x" } }] }] }), false);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "text/plain", data: "x" } }] }] }), false);
   assert.equal(requestHasImage(null), false);
 });
 

@@ -109,7 +109,8 @@ test("consecutive same-role messages merge into one Gemini content", () => {
   assert.deepEqual(out.contents[0].parts, [{ text: "one" }, { text: "two" }]);
 });
 
-test("image parts become inlineData only when they are data URLs", () => {
+test("image parts: data URLs and already-fetched remote URLs both become inlineData; nothing is dropped", () => {
+  const media = new Map([["https://example.test/cat.png", { mimeType: "image/png", data: "BBBB" }]]);
   const out = toGeminiFromChat({
     messages: [{
       role: "user",
@@ -119,12 +120,20 @@ test("image parts become inlineData only when they are data URLs", () => {
         { type: "image_url", image_url: { url: "https://example.test/cat.png" } }
       ]
     }]
-  });
-  assert.deepEqual(out.contents[0].parts[0], { text: "see" });
-  assert.deepEqual(out.contents[0].parts[1], { inlineData: { mimeType: "image/png", data: "AAAA" } });
-  // A remote URL has no generateContent equivalent; it is dropped, not guessed.
-  assert.equal(out.contents[0].parts.length, 2);
+  }, { media });
+  assert.deepEqual(out.contents[0].parts, [
+    { text: "see" },
+    { inlineData: { mimeType: "image/png", data: "AAAA" } },
+    { inlineData: { mimeType: "image/png", data: "BBBB" } }
+  ]);
 });
+
+test("a remote image URL that was not fetched is refused (400), never dropped", () => {
+  const body = { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.test/cat.png" } }] }] };
+  assert.throws(() => toGeminiFromChat(body), (error) => error.status === 400 && /fetched/.test(error.message));
+  assert.throws(() => toGeminiFromChat({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "gs://bucket/cat.png" } }] }] }, { media: new Map() }), (error) => error.status === 400);
+});
+
 
 test("tool_choice variants and json_schema output map to Gemini equivalents", () => {
   const tools = [{ type: "function", function: { name: "f", parameters: { type: "object", properties: {} } } }];
@@ -165,7 +174,8 @@ test("buildChatRequest builds the Gemini URL and auth, and rejects anything else
   assert.equal(request.options.headers.accept, "text/event-stream");
 
   const trailingSlash = buildChatRequest({ ...target("gm", "m", ["gemini"]), baseUrl: "http://x/v1beta/" }, "gemini", { messages: [] });
-  assert.equal(trailingSlash.url, "http://x/v1beta/v1beta/models/m:generateContent");
+  // The version already in the base URL is replaced, never repeated.
+  assert.equal(trailingSlash.url, "http://x/v1beta/models/m:generateContent");
 
   assert.throws(() => buildChatRequest(target("a", "m", ["anthropic"]), "anthropic", {}), /Unsupported/);
   assert.throws(() => buildChatRequest(target("c", "m", ["openai-chat"]), "openai-chat", {}), /Unsupported/);

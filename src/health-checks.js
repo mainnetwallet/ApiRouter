@@ -2,8 +2,9 @@
  * Provider-aware health probing.
  */
 
+import { geminiModelsUrl } from "./gemini-url.js";
+
 export const PROBE_TIMEOUT_MS = 10000;
-const GEMINI_API_VERSION = "v1beta";
 const OPENAI_API_VERSION = "v1";
 const VERSION_SUFFIX = /\/v\d+(?:alpha|beta)?\d*$/i;
 const trimBase = (baseUrl) => String(baseUrl || "").replace(/\/+$/, "");
@@ -30,7 +31,7 @@ export function healthProbePlan(target) {
   if (protocols.includes("gemini")) {
     return {
       provider: "gemini",
-      url: versionedBase(base, GEMINI_API_VERSION) + "/models",
+      url: geminiModelsUrl(base),
       headers: { accept: "application/json", "x-goog-api-key": target.apiKey }
     };
   }
@@ -83,7 +84,8 @@ export async function probeTargetHealth(target, options = {}) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = Date.now();
   try {
-    const upstream = await fetchImpl(plan.url, { method: "GET", headers: plan.headers, signal: controller.signal });
+    // A redirect is never followed: it would carry the provider key to another host.
+    const upstream = await fetchImpl(plan.url, { method: "GET", headers: plan.headers, signal: controller.signal, redirect: "manual" });
     const latencyMs = Date.now() - startedAt;
     try { await upstream.body?.cancel(); } catch {}
     return { ...classifyProbeStatus(upstream.status), status: upstream.status, latencyMs };

@@ -86,6 +86,63 @@ Configure them in `.env`.
 
 
 
+### LLM7
+
+```env
+LLM7_API_KEYS=
+LLM7_MODELS=DeepSeek-V4-Flash-0731,GLM-5.3-Flash,minimax-m2.7,DeepSeek-V4.1-Flash
+LLM7_BASE_URL=https://api.llm7.io/v1
+
+LLM7_VISION_API_KEYS=
+LLM7_VISION_MODELS=kimi-k3,llama-4-maverick,minimax-m3
+LLM7_VISION_BASE_URL=https://api.llm7.io/v1
+```
+
+- Provider ID: `llm7`. LLM7 provides a **free-token quota**, not permanently free model pricing: the models
+  themselves have model-level pricing. Quotas, limits and model availability can change, so check your
+  account's current quota; nothing here promises unlimited usage.
+
+Retryable statuses (the default for `RETRY_STATUS_CODES`):
+
+```text
+401,402,403,404,408,409,425,429,500,501,502,503,504,520,521,522,523,524,529
+```
+
+`RETRY_STATUS_CODES` is validated at startup: every entry must be an HTTP status code from 100 to 599.
+A typo stops the router with an error instead of silently disabling fallback. Leave it unset for the default.
+
+HTTP 400 from a provider also falls back to the next target. A generic 400
+(unsupported parameter, schema quirk) does not cool the target down, and if
+every target answers 400 the client receives the 400 instead of a 502.
+
+## Safety and limits
+
+- **Who can connect.** With `MULTIAI_ROUTER_API_KEYS` set, clients authenticate with
+  `Authorization: Bearer <key>`, `x-api-key` (Anthropic SDKs) or `x-goog-api-key`
+  (Gemini SDKs). A key in the URL query is not accepted. Without keys the router is
+  open; set `HOST=127.0.0.1` to accept local connections only. At startup the router
+  warns when it is open and not bound to loopback.
+- **Request size.** There is no size limit of the router's own by default.
+  `MAX_REQUEST_BODY_BYTES` sets one; larger requests get HTTP 413.
+- **Images.** A request is never answered with part of it silently removed. Base64
+  images are forwarded. A remote image URL goes to providers that accept URLs as it
+  is, and is downloaded and inlined for Gemini (https only, public addresses only,
+  size and time limits, redirects re-validated; see `REMOTE_IMAGE_*`). An image,
+  PDF or other attachment a provider cannot take is refused with HTTP 400
+  (`unsupported_media`). Any attachment selects the vision pool, and without a
+  vision route the answer is `503 no_vision_route`.
+- **Streams.** A streamed answer counts as a success only when it ends cleanly. If the
+  provider's stream breaks after the first byte, the request, the attempt and the
+  target's health record a failure, the target is not made sticky, and the client is
+  told (an error event, or a closed connection). Once the headers are sent there is no
+  fallback. A client that disconnects stops the work: the upstream call is cancelled and
+  no further provider is tried.
+- **Request ids.** Every response carries `x-multi-ai-request-id`;
+  `/api/requests/:id` takes that id. `x-multi-ai-session-id` names the session, which
+  many requests share.
+- **Redirects.** Provider calls and health probes never follow redirects, so a provider
+  key cannot be sent to another host.
+
 ## Priority Routing
 
 ```env

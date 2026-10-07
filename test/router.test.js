@@ -370,7 +370,7 @@ test("ranking excludes cooled-down targets but keeps sibling keys", () => {
   assert.equal(health.isAvailable(key1), true);
 });
 
-test("health refreshes recover a cooled-down target", async (t) => {
+test("a health refresh does not revive a target still in routing cooldown", async (t) => {
   const target = { provider: "probe", model: "recover", keyIndex: 0 };
   t.after(() => healthRegistry.states.delete("probe:recover:key-0"));
 
@@ -379,8 +379,21 @@ test("health refreshes recover a cooled-down target", async (t) => {
 
   await refreshAllHealth([target], async () => ({ ok: true, status: 200 }));
 
+  assert.equal(healthRegistry.isAvailable(target), false, "cooldown is not cut short by a metadata probe");
+  assert.equal(healthRegistry.get("probe:recover:key-0").status, "failed");
+});
+
+test("a health refresh recovers a target whose cooldown has elapsed", async (t) => {
+  const target = { provider: "probe", model: "elapsed", keyIndex: 0 };
+  t.after(() => healthRegistry.states.delete("probe:elapsed:key-0"));
+
+  healthRegistry.markFailure(target, 503, { cooldownMs: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  await refreshAllHealth([target], async () => ({ ok: true, status: 200 }));
+
   assert.equal(healthRegistry.isAvailable(target), true);
-  assert.equal(healthRegistry.get("probe:recover:key-0").status, "healthy");
+  assert.equal(healthRegistry.get("probe:elapsed:key-0").status, "healthy");
 });
 
 test("a failed health check records the provider status", async (t) => {

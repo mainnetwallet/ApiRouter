@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
+import { geminiModelUrl } from "./gemini-url.js";
+import { UnsupportedMediaError, parseToolArguments } from "./bridge-errors.js";
+import { inlineImagePart, parseDataUrl } from "./media.js";
+import { cleanSchemaForGemini } from "./anthropic-bridge.js";
+import { rememberSignature, signatureFor, ensureCallSignatures } from "./thought-signatures.js";
 
 /**
  * Codex (OpenAI Responses) bridge.
@@ -67,17 +71,31 @@ function itemKind(item) {
   return item?.type || (item?.role ? "message" : "");
 }
 
-/** Plain text of a Responses content value (string or content-part array). */
+const MEDIA_PART_TYPES = new Set(["input_image", "input_file", "input_audio"]);
+const isMediaPart = (part) => Boolean(part) && typeof part === "object" && MEDIA_PART_TYPES.has(part.type);
+
+/** Plain text of a Responses content value (string or content-part array). Media parts are not text. */
 function textOf(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
     .map((part) => {
       if (typeof part === "string") return part;
-      if (part?.type === "input_image") return "[image]";
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");
+}
+
+function assertTextOnly(content, where) {
+  if (Array.isArray(content) && content.some(isMediaPart)) {
+    throw new UnsupportedMediaError(`Images or files in ${where} cannot be forwarded to the selected provider`, "unsupported_media_position");
+  }
+}
+
+/** Media parts of a content value or function output, in order. */
+function mediaPartsOf(value) {
+  if (Array.isArray(value)) return value.filter(isMediaPart);
+  return isMediaPart(value) ? [value] : [];
 }
 
 function outputText(output) {
@@ -86,6 +104,7 @@ function outputText(output) {
   if (output && typeof output === "object") {
     if (typeof output.content === "string") return output.content;
     if (Array.isArray(output.content)) return textOf(output.content);
+    if (isMediaPart(output)) return "";
     return JSON.stringify(output);
   }
   return output == null ? "" : String(output);
@@ -99,6 +118,34 @@ function argsString(args) {
 function imageUrlOf(part) {
   const url = part?.image_url;
   return typeof url === "string" ? url : url?.url || "";
+}
+
+/** Chat Completions content part for a Responses media part. */
+function chatPartForMedia(part) {
+  if (part.type === "input_image") {
+    const url = imageUrlOf(part);
+    if (url) return { type: "image_url", image_url: { url } };
+    throw new UnsupportedMediaError("Image file references (file_id) cannot be forwarded to the selected provider", "unsupported_file_reference");
+  }
+  throw new UnsupportedMediaError(`Content part type "${part.type}" cannot be forwarded to the selected provider`, "unsupported_media");
+}
+
+/** Gemini inline part for a Responses media part. */
+function geminiPartForMedia(part, media) {
+  if (part.type === "input_image") {
+    const url = imageUrlOf(part);
+    if (url) return inlineImagePart(url, media, "image");
+    throw new UnsupportedMediaError("Image file references (file_id) cannot be forwarded to the selected provider", "unsupported_file_reference");
+  }
+  if (part.type === "input_file") {
+    const parsed = parseDataUrl(part.file_data);
+    if (parsed) return { inlineData: { mimeType: parsed.mimeType, data: parsed.data } };
+    throw new UnsupportedMediaError("File references (file_id / file_url) cannot be forwarded to the selected provider", "unsupported_file_reference");
+  }
+  if (part.type === "input_audio" && part.input_audio?.data) {
+    return { inlineData: { mimeType: `audio/${String(part.input_audio.format || "wav").toLowerCase()}`, data: part.input_audio.data } };
+  }
+  throw new UnsupportedMediaError(`Content part type "${part.type}" cannot be forwarded to the selected provider`, "unsupported_media");
 }
 
 const CUSTOM_PARAMETERS = {
@@ -173,34 +220,33 @@ export function toOpenAIChatFromResponses(body, model) {
 
     if (kind === "message") {
       if (item.role === "system" || item.role === "developer") {
+        assertTextOnly(item.content, "the system prompt");
         const text = textOf(item.content);
         if (text) system.push(text);
         continue;
       }
       if (item.role === "assistant") {
+        assertTextOnly(item.content, "an assistant turn");
         const text = textOf(item.content);
         if (text) messages.push({ role: "assistant", content: text });
         continue;
       }
       const parts = Array.isArray(item.content) ? item.content : [{ type: "input_text", text: textOf(item.content) }];
-      const hasImage = parts.some((p) => p?.type === "input_image" && imageUrlOf(p));
-      if (!hasImage) {
+      const mediaParts = parts.filter(isMediaPart);
+      if (mediaParts.length === 0) {
         const text = textOf(parts);
         if (text) messages.push({ role: "user", content: text });
       } else {
         messages.push({
           role: "user",
-          content: parts
-            .map((p) => p?.type === "input_image"
-              ? (imageUrlOf(p) ? { type: "image_url", image_url: { url: imageUrlOf(p) } } : null)
-              : { type: "text", text: textOf([p]) })
-            .filter(Boolean)
+          content: parts.map((p) => (isMediaPart(p) ? chatPartForMedia(p) : { type: "text", text: textOf([p]) }))
         });
       }
     } else if (kind === "function_call" || kind === "custom_tool_call") {
       const args = kind === "custom_tool_call"
         ? JSON.stringify({ input: typeof item.input === "string" ? item.input : "" })
         : argsString(item.arguments);
+      if (kind === "function_call") parseToolArguments(args, item.name);
       const call = {
         id: item.call_id || item.id,
         type: "function",
@@ -211,6 +257,11 @@ export function toOpenAIChatFromResponses(body, model) {
       else messages.push({ role: "assistant", content: "", tool_calls: [call] });
     } else if (kind === "function_call_output" || kind === "custom_tool_call_output") {
       messages.push({ role: "tool", tool_call_id: item.call_id, content: outputText(item.output) });
+      // A chat `tool` message carries text only; an image the tool returned follows as a user message.
+      const returned = mediaPartsOf(item.output);
+      if (returned.length) {
+        messages.push({ role: "user", content: [{ type: "text", text: "Image output of the tool call above:" }, ...returned.map(chatPartForMedia)] });
+      }
     }
     // reasoning items and hosted-tool calls have no chat equivalent: dropped.
   }
@@ -250,7 +301,7 @@ export function toOpenAIChatFromResponses(body, model) {
 
 // ---------------------------------------------------------- request -> Gemini
 
-export function toGeminiFromResponses(body) {
+export function toGeminiFromResponses(body, { model = "", media = null } = {}) {
   const items = inputItems(body);
   const names = callNames(items);
   const system = [];
@@ -263,22 +314,30 @@ export function toGeminiFromResponses(body) {
     if (last && last.role === role) last.parts.push(...parts);
     else contents.push({ role, parts });
   };
+  // Media a tool returned follows the whole run of function outputs (FC1 FC2 FR1 FR2 media).
+  let toolMedia = [];
+  const flushToolMedia = () => {
+    if (toolMedia.length) push("user", toolMedia);
+    toolMedia = [];
+  };
 
   for (const item of items) {
     const kind = itemKind(item);
+    if (kind !== "function_call_output" && kind !== "custom_tool_call_output") flushToolMedia();
 
     if (kind === "message") {
       if (item.role === "system" || item.role === "developer") {
+        assertTextOnly(item.content, "the system prompt");
         const text = textOf(item.content);
         if (text) system.push(text);
         continue;
       }
+      if (item.role === "assistant") assertTextOnly(item.content, "an assistant turn");
       const parts = [];
       const content = Array.isArray(item.content) ? item.content : [{ type: "input_text", text: textOf(item.content) }];
       for (const p of content) {
-        if (p?.type === "input_image") {
-          const m = /^data:([^;,]+);base64,(.+)$/s.exec(imageUrlOf(p));
-          if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+        if (isMediaPart(p)) {
+          parts.push(geminiPartForMedia(p, media));
         } else {
           const text = textOf([p]);
           if (text) parts.push({ text });
@@ -289,20 +348,24 @@ export function toGeminiFromResponses(body) {
       const callId = item.call_id || item.id;
       const args = kind === "custom_tool_call"
         ? { input: typeof item.input === "string" ? item.input : "" }
-        : safeParse(argsString(item.arguments));
+        : parseToolArguments(argsString(item.arguments), item.name);
       const part = { functionCall: { name: item.name, args } };
       const sig = signatureFor(callId);
       if (sig) part.thoughtSignature = sig;
       push("model", [part]);
     } else if (kind === "function_call_output" || kind === "custom_tool_call_output") {
+      const returned = mediaPartsOf(item.output);
+      for (const part of returned) toolMedia.push(geminiPartForMedia(part, media));
       push("user", [{
         functionResponse: {
           name: names.get(item.call_id) || "tool",
-          response: { output: outputText(item.output) }
+          response: { output: outputText(item.output) || (returned.length ? "[the tool returned an attachment, included below]" : "") }
         }
       }]);
     }
   }
+  flushToolMedia();
+  ensureCallSignatures(contents, model);
 
   const payload = { contents };
   const generationConfig = {};
@@ -346,7 +409,7 @@ function joinUrl(baseUrl, suffix) {
 }
 
 /** Builds the upstream fetch request for a translated (non-Responses) target. */
-export function buildCodexRequest(target, upstreamProtocol, body, incomingHeaders = {}) {
+export function buildCodexRequest(target, upstreamProtocol, body, incomingHeaders = {}, { media = null } = {}) {
   const headers = { "content-type": "application/json" };
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
@@ -361,9 +424,8 @@ export function buildCodexRequest(target, upstreamProtocol, body, incomingHeader
   if (upstreamProtocol === "gemini") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
-    const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
-    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
-    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromResponses(body)) } };
+    const url = geminiModelUrl(base, target.model, { stream });
+    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromResponses(body, { model: target.model, media })) } };
   }
   throw new Error("Unsupported Codex bridge protocol: " + upstreamProtocol);
 }

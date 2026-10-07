@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { geminiModelUrl } from "./gemini-url.js";
 
 export function providerProtocols(provider) {
   if (provider === "agentrouter") return ["anthropic", "openai-chat", "openai-responses"];
@@ -50,12 +51,7 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
   } else if (protocol === "gemini") {
     // The client picks streaming by calling :streamGenerateContent, so the
     // method name — not a body field — decides which one to ask the provider for.
-    const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
-    // A configured base URL may already carry the API version — `health-checks.js`
-    // accepts either form — so it is stripped before the model path is appended.
-    // Otherwise the request goes to `/v1beta/v1beta/models/...`.
-    const root = base.replace(/\/v\d+(?:alpha|beta)?\d*$/i, "");
-    url = joinUrl(root, "v1beta/models/" + encodeURIComponent(target.model) + method);
+    url = geminiModelUrl(base, target.model, { stream });
     headers["x-goog-api-key"] = target.apiKey;
   } else {
     throw new Error("Unsupported upstream protocol: " + protocol);
@@ -67,10 +63,44 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
 
 export function createSessionId() { return randomUUID(); }
 
-export async function readJsonBody(req) {
-  // No size limit of our own: the whole body is read as sent.
+/** Reads the request body. `maxBytes` (optional) is the operator's ceiling; without it there is none. */
+export async function readJsonBody(req, { maxBytes = null } = {}) {
+  const tooLarge = () => {
+    const error = new Error(`Request body is larger than the configured limit of ${maxBytes} bytes`);
+    error.status = 413;
+    error.errorType = "request_too_large";
+    return error;
+  };
+  const declared = Number(req.headers?.["content-length"]);
+  if (maxBytes && Number.isFinite(declared) && declared > maxBytes) {
+    // Refused from the header alone: not a byte of the body is buffered.
+    throw tooLarge();
+  }
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let size = 0;
+  // Events rather than `for await`: breaking out of an async iterator destroys
+  // the request, and with it the socket the 413 has to be written to.
+  await new Promise((resolve, reject) => {
+    let finished = false;
+    const done = (error) => {
+      if (finished) return;
+      finished = true;
+      if (error) reject(error); else resolve();
+    };
+    req.on("data", (chunk) => {
+      if (finished) return;        // over the limit: keep draining, buffer nothing
+      size += chunk.length;
+      if (maxBytes && size > maxBytes) {
+        chunks.length = 0;
+        done(tooLarge());
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => done());
+    req.on("error", (error) => done(error));
+    req.on("aborted", () => done(Object.assign(new Error("Request body was not fully received"), { status: 400 })));
+  });
   if (chunks.length === 0) return {};
   let parsed;
   try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
@@ -90,16 +120,38 @@ export async function readJsonBody(req) {
   return parsed;
 }
 
+/**
+ * The one parser for a Gemini endpoint path. Routing, stream detection and model
+ * extraction all use it, so they cannot disagree about what a path means.
+ *
+ * Exactly `/v1beta/models/<model>:generateContent` or `:streamGenerateContent`
+ * (the casing Google defines). Anything else — another casing, a `:` inside the
+ * model, a trailing slash, a malformed percent-escape — is not a Gemini endpoint.
+ * Returns `{ model, stream }`, or null.
+ */
+export function parseGeminiPath(pathname) {
+  const match = /^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent)$/.exec(String(pathname));
+  if (!match) return null;
+  let model;
+  try { model = decodeURIComponent(match[1]); } catch { return null; }
+  if (!model || /[/:\s]/.test(model)) return null;
+  return { model, stream: match[2] === "streamGenerateContent" };
+}
+
+/** A path that is in Gemini's namespace but is not a supported endpoint (so it can be refused clearly). */
+export function isGeminiNamespace(pathname) {
+  return /^\/v1beta\/models(?:\/|$)/i.test(String(pathname));
+}
+
 export function clientProtocol(pathname) {
   if (pathname === "/v1/messages") return "anthropic";
   if (pathname === "/v1/responses") return "openai-responses";
   if (pathname === "/v1/chat/completions") return "openai-chat";
   // Gemini clients choose streaming with the method name, so both are routes.
-  if (/^\/v1beta\/models\/[^/]+:(?:stream)?[Gg]enerateContent$/.test(pathname)) return "gemini";
+  if (parseGeminiPath(pathname)) return "gemini";
   return null;
 }
 
-/** True when a Gemini client asked for the streaming method. */
 export function isGeminiStream(pathname) {
-  return /:streamGenerateContent$/.test(pathname);
+  return parseGeminiPath(pathname)?.stream === true;
 }

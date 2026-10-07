@@ -54,8 +54,15 @@ test("legitimate image content is still detected in every supported protocol", (
   assert.equal(requestHasImage({ contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/jpeg", data: "AAAA" } }] }] }), true);
   assert.equal(requestHasImage({ contents: { role: "user", parts: [{ fileData: { mimeType: "image/png", fileUri: "gs://b/o" } }] } }), true);
   assert.equal(requestHasImage({ contents: [{ role: "user", parts: [{ functionResponse: { name: "f", response: {}, parts: [{ inlineData: { mimeType: "image/png", data: "AAAA" } }] } }] }] }), true);
-  // A non-image mime type is not an image.
-  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "audio/wav", data: "AAAA" } }] }] }), false);
+  // Other multimodal media (audio, video, PDF) is not text either: it needs the multimodal pool too.
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "audio/wav", data: "AAAA" } }] }] }), true);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "video/mp4", data: "AAAA" } }] }] }), true);
+  assert.equal(requestHasImage({ contents: [{ parts: [{ fileData: { fileUri: "https://x/y" } }] }] }), true, "a fileData with no mime type is still media");
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inline_data: { mime_type: "application/pdf", data: "AAAA" } }] }] }), true, "snake_case is detected too");
+  assert.equal(requestHasImage({ messages: [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: "AAAA" } }] }] }), true);
+  assert.equal(requestHasImage({ input: [{ type: "message", role: "user", content: [{ type: "input_file", file_id: "f" }] }] }), true);
+  // Plain text carried as inlineData is still text.
+  assert.equal(requestHasImage({ contents: [{ parts: [{ inlineData: { mimeType: "text/plain", data: "AAAA" } }] }] }), false);
   // And the pool follows: an image request is vision-only.
   const real = { messages: [{ role: "user", content: [{ type: "image", source: png }] }] };
   assert.equal(selectPool(real, { textTargets: [{ t: 1 }], visionTargets: [{ v: 1 }] }).pool, "vision");
