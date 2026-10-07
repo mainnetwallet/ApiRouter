@@ -239,7 +239,7 @@ The control-panel API is authenticated with `MULTIAI_ROUTER_API_KEYS` when gatew
 | OpenAI SDK / compatible clients | `/v1/chat/completions` |
 | Gemini clients | `/v1beta/models/{model}:generateContent` |
 
-Guides:
+### CLI Guides
 
 - [All client protocols](docs/clients/CLIENTS.md)
 - [Claude Code](docs/clients/CLAUDE_CODE.md)
@@ -307,14 +307,6 @@ The `/health` endpoint exposes health information but never returns provider API
 - Provider credentials stay on the server and are not exposed to clients.
 
 ## Troubleshooting
-
-### Port already in use
-
-Change `PORT`:
-
-```env
-PORT=8788
-```
 
 ### No route
 
