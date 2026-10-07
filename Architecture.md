@@ -355,7 +355,7 @@ See [docs/ROUTER_COMMAND.md](docs/ROUTER_COMMAND.md).
 
 Because `npm start` builds the panel, `vite` and `@vitejs/plugin-react` are production
 `dependencies` (not `devDependencies`); a production-only install
-(`npm ci --omit=dev`) can therefore start the gateway. `vitest` stays a dev dependency.
+(`npm ci --omit=dev`) can therefore start the gateway.
 
 ## Source Architecture
 
