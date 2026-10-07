@@ -310,9 +310,6 @@ The `/health` endpoint exposes health information but never returns provider API
 | `npm run ui:dev` | Vite frontend development server |
 | `npm run ui:build` | Build `ui/dist` |
 | `npm run ui:preview` | Preview the built UI |
-| `npm test` | Backend tests |
-| `npm run test:ui` | UI tests |
-| `npm run test:all` | Backend + UI tests |
 
 ## Security
 

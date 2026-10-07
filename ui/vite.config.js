@@ -50,11 +50,5 @@ export default defineConfig({
           { target: ROUTER_ORIGIN, changeOrigin: true }
         ])
       )
-  },
-  test: {
-    // Pure-function tests only; no DOM environment is pulled in.
-    environment: "node",
-    include: ["src/**/__tests__/**/*.test.jsx", "src/**/__tests__/**/*.test.js"],
-    reporters: "default"
   }
 });
