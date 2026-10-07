@@ -410,37 +410,111 @@ export function convertJsonResponse(upstreamProtocol, json, model, options = {})
 
 // -------------------------------------------------------- streaming
 
+const LF = 0x0a;
+const CR = 0x0d;
+/** Longest event delimiter (`\r\n\r\n`) in bytes. */
+const MAX_DELIMITER_BYTES = 4;
+
+const dataOf = (raw) => raw.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
+
+/**
+ * Byte-level equivalent of `/\r?\n\r?\n/`: the leftmost event delimiter at or
+ * after `from`, as `{ start, end }`, or null. LF and CR never occur inside a
+ * multi-byte UTF-8 sequence, so this is safe on undecoded bytes.
+ */
+function findDelimiter(buf, from) {
+  let i = buf.indexOf(LF, from);
+  while (i !== -1) {
+    let end = -1;
+    if (buf[i + 1] === LF) end = i + 2;
+    else if (buf[i + 1] === CR && buf[i + 2] === LF) end = i + 3;
+    if (end !== -1) return { start: i > 0 && buf[i - 1] === CR ? i - 1 : i, end };
+    i = buf.indexOf(LF, i + 1);
+  }
+  return null;
+}
+
+/** Bytes at the end of `buf` that could still grow into a delimiter (they are not event content yet). */
+function delimiterPrefixBytes(buf) {
+  const n = buf.length;
+  const at = (back) => buf[n - back];
+  // Longest first: CR LF CR, LF CR, CR LF, then a lone CR or LF.
+  if (n >= 3 && at(3) === CR && at(2) === LF && at(1) === CR) return 3;
+  if (n >= 2 && at(2) === LF && at(1) === CR) return 2;
+  if (n >= 2 && at(2) === CR && at(1) === LF) return 2;
+  if (n >= 1 && (at(1) === CR || at(1) === LF)) return 1;
+  return 0;
+}
+
 /**
  * Yields the `data:` payload of each SSE event from a web ReadableStream.
  *
- * `maxEventBytes` bounds ONE incomplete event: the bytes received since the
- * last event delimiter. It is checked on every chunk as it arrives, so a
- * provider that never sends the delimiter is cut off at the limit rather than
- * after the whole event has piled up. Exceeding it throws
- * UPSTREAM_SSE_EVENT_TOO_LARGE (an upstream fault); leaving the generator
- * cancels the upstream stream. 0 / unset disables the bound.
+ * `maxEventBytes` is a hard bound, in UTF-8 bytes, on ONE incomplete event: the
+ * bytes received since the last event delimiter. The work happens on raw bytes,
+ * and an incoming chunk is consumed in windows that never let the retained
+ * buffer exceed `maxEventBytes` of event content (plus at most 3 trailing bytes
+ * that may still turn out to be the delimiter). An oversized chunk is therefore
+ * never appended or decoded whole, and a complete event larger than the limit is
+ * rejected even when its delimiter arrives in the same chunk. Only complete
+ * events are decoded, so a multi-byte character split across chunks is simply
+ * not decoded until the rest of it has arrived.
+ *
+ * Exceeding the limit throws UPSTREAM_SSE_EVENT_TOO_LARGE (an upstream fault);
+ * leaving the generator cancels the upstream stream. 0 / unset disables the
+ * bound and keeps the original unbounded text path.
  */
 export async function* sseData(webStream, { maxEventBytes = 0 } = {}) {
   const decoder = new TextDecoder();
   const limited = Number.isFinite(maxEventBytes) && maxEventBytes > 0;
-  let buffer = "";
-  for await (const chunk of webStream) {
-    buffer += decoder.decode(chunk, { stream: true });
-    let idx;
-    while ((idx = buffer.search(/\r?\n\r?\n/)) !== -1) {
-      const raw = buffer.slice(0, idx);
-      buffer = buffer.slice(idx).replace(/^\r?\n\r?\n/, "");
-      const data = raw.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
-      if (data) yield data;
+
+  if (!limited) {
+    let buffer = "";
+    for await (const chunk of webStream) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let idx;
+      while ((idx = buffer.search(/\r?\n\r?\n/)) !== -1) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx).replace(/^\r?\n\r?\n/, "");
+        const data = dataOf(raw);
+        if (data) yield data;
+      }
     }
-    // What is left has no delimiter yet. A UTF-16 string is at most 3 UTF-8
-    // bytes per unit, so the cheap length test settles most chunks.
-    if (limited && buffer.length * 3 > maxEventBytes && Buffer.byteLength(buffer) > maxEventBytes) {
-      throw sseEventTooLarge(maxEventBytes);
+    const tail = dataOf(buffer);
+    if (tail) yield tail;
+    return;
+  }
+
+  // Bytes of the current incomplete event (always a private copy, never a view
+  // into an upstream chunk, so a big chunk is not kept alive by its tail).
+  let pending = Buffer.alloc(0);
+  for await (const chunk of webStream) {
+    const incoming = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    let offset = 0;
+    while (offset < incoming.length) {
+      // Largest window that keeps pending <= maxEventBytes + a whole delimiter.
+      const room = maxEventBytes + MAX_DELIMITER_BYTES - pending.length;
+      const window = incoming.subarray(offset, offset + room);
+      offset += window.length;
+      const scanFrom = Math.max(0, pending.length - (MAX_DELIMITER_BYTES - 1));
+      let work = pending.length === 0 ? window : Buffer.concat([pending, window]);
+
+      let pos = 0;
+      let found;
+      while ((found = findDelimiter(work, Math.max(pos, scanFrom))) !== null) {
+        if (found.start - pos > maxEventBytes) throw sseEventTooLarge(maxEventBytes);
+        const data = dataOf(decoder.decode(work.subarray(pos, found.end), { stream: true }));
+        pos = found.end;
+        if (data) yield data;
+      }
+      const rest = work.subarray(pos);
+      if (rest.length - delimiterPrefixBytes(rest) > maxEventBytes) throw sseEventTooLarge(maxEventBytes);
+      pending = Buffer.from(rest);
     }
   }
-  const tail = buffer.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
-  if (tail) yield tail;
+  if (pending.length > 0) {
+    const tail = dataOf(decoder.decode(pending, { stream: true }));
+    if (tail) yield tail;
+  }
 }
 
 const sse = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
