@@ -11,6 +11,10 @@ import net from "node:net";
  *                                      socket (a stream that dies mid-body)
  *   { status, stream, stallAfter: n }    - write n chunks, then stop writing
  *                                      and never end (an idle, hung stream)
+ *   { status, headers, partialBody, stallBody: true }
+ *                                    - send the headers and `partialBody`, then
+ *                                      go silent without ending the response
+ *                                      (a NON-streamed 200 whose body stalls)
  *   { hang: true }                   - never responds (timeout tests)
  *
  * `options.health` scripts the health-probe (GET) response, which defaults to
@@ -90,6 +94,12 @@ export async function startMockUpstream(script, options = {}) {
           setTimeout(writeNext, descriptor.delayMs || 0);
         };
         return writeNext();
+      }
+
+      if (descriptor.stallBody) {
+        res.writeHead(status, headers);
+        res.write(descriptor.partialBody ?? "");
+        return; // headers + a prefix are out; the rest never arrives
       }
 
       const body = typeof descriptor.body === "string" || Buffer.isBuffer(descriptor.body)
