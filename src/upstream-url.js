@@ -13,6 +13,10 @@
 // A trailing API version: /v1, /v1beta, /v1alpha2, ...
 const VERSION_SUFFIX = /\/v\d+(?:alpha|beta)?\d*$/i;
 
+// A trailing plain numeric version (/v1, /v4). OpenAI-compatible bases that
+// already carry one (Z.ai serves `.../paas/v4`) must not get another `/v1`.
+const NUMERIC_VERSION = /\/v\d+$/i;
+
 /** Trailing whitespace and slashes removed; never throws on a non-string. */
 export function trimBaseUrl(baseUrl) {
   return String(baseUrl ?? "").trim().replace(/\/+$/, "");
@@ -56,16 +60,16 @@ export function openAiModelsProbeUrl(baseUrl) {
   return joinUrl(versionedBase(baseUrl, "v1"), "models");
 }
 
-/** OpenAI-compatible chat completions, tolerating a base that ends in `/v1`. */
+/** OpenAI-compatible chat completions, tolerating a base that ends in a numeric version (`/v1`, `/v4`). */
 export function openAiChatUrl(baseUrl) {
   const base = trimBaseUrl(baseUrl);
-  return joinUrl(base, /\/v1$/i.test(base) ? "chat/completions" : "v1/chat/completions");
+  return joinUrl(base, NUMERIC_VERSION.test(base) ? "chat/completions" : "v1/chat/completions");
 }
 
 /** OpenAI-compatible responses endpoint. */
 export function openAiResponsesUrl(baseUrl) {
   const base = trimBaseUrl(baseUrl);
-  return joinUrl(base, /\/v1$/i.test(base) ? "responses" : "v1/responses");
+  return joinUrl(base, NUMERIC_VERSION.test(base) ? "responses" : "v1/responses");
 }
 
 /** Anthropic Messages endpoint; AgentRouter serves it from the host root. */
