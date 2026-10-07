@@ -47,23 +47,42 @@ npm start
 Do not run `Copy-Item .env.example .env` again — it would overwrite your keys.
 Stop the router with `Ctrl + C`.
 
-### Windows `Router` command
+### The `Router` command (Windows, Linux, Linux VPS, macOS)
 
-Install the repository launcher once from PowerShell:
+`Router` is a convenient cross-platform production launcher. It checks Node.js/npm,
+installs dependencies if they are missing, builds the control panel **once**, starts the
+gateway and prints the URL. It runs the same two steps as `npm start`, and never starts
+the Vite dev server.
+
+Install it once from the checkout:
 
 ```powershell
-.\scripts\install-router.ps1
+.\scripts\install-router.ps1      # Windows: then open a new PowerShell or CMD
 ```
 
-Open a new PowerShell window. From then on, run:
+```bash
+./scripts/install-router.sh        # Linux, VPS, macOS: installs ~/.local/bin/Router (no root)
+```
 
-```powershell
+Then run, from any directory:
+
+```text
 Router
 ```
 
-The launcher changes to the repository directory, installs dependencies if needed,
-builds the control panel, opens the control panel in the browser, and starts the gateway
-on `localhost:999`.
+| Command | Use it for |
+| --- | --- |
+| `Router` | convenient production launcher on any platform |
+| `npm start` | canonical production command (`npm run ui:build && node src/server.js`) |
+| `npm run dev` | development with Vite hot reload |
+
+`PORT` and `HOST` come from `.env` exactly as for `npm start` (default port `999`);
+`Router` never changes them. On a desktop it can open the control panel in your browser
+(`--no-open` to skip); on a headless machine or VPS over SSH it simply prints the URL, and
+you can reach it with an SSH tunnel or, once you have set `HOST` and
+`MULTIAI_ROUTER_API_KEYS` on purpose, at `http://SERVER_IP:PORT`. See
+[docs/ROUTER_COMMAND.md](docs/ROUTER_COMMAND.md) for each platform, headless/VPS behavior,
+security notes and troubleshooting.
 
 ## Configuration
 

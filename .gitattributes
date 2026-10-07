@@ -15,3 +15,7 @@
 *.ico binary
 *.woff binary
 *.woff2 binary
+
+# Windows batch files are safest with CRLF in the working tree (the index stays LF).
+*.cmd text eol=crlf
+*.bat text eol=crlf

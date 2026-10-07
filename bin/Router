@@ -1,0 +1,29 @@
+#!/bin/sh
+# Router: thin POSIX launcher (Linux, Linux VPS, macOS).
+# It only finds this checkout and hands over to the canonical startup logic in
+# scripts/router.mjs. `exec` makes Node the process itself, so signals and the
+# exit status are Node's and no wrapper process is left behind.
+
+# Resolve symlinks by hand (readlink -f is not available on older macOS), so
+# `~/.local/bin/Router -> <checkout>/bin/Router` finds the real checkout.
+self=$0
+while [ -h "$self" ]; do
+  dir=$(cd -P "$(dirname -- "$self")" >/dev/null 2>&1 && pwd) || exit 1
+  link=$(readlink "$self") || exit 1
+  case $link in
+    /*) self=$link ;;
+    *) self=$dir/$link ;;
+  esac
+done
+bin_dir=$(cd -P "$(dirname -- "$self")" >/dev/null 2>&1 && pwd) || {
+  echo "Router: cannot locate the MultiAI Router checkout." >&2
+  exit 1
+}
+root=$(dirname -- "$bin_dir")
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "Router: Node.js was not found on PATH. Install Node.js 20 or newer from https://nodejs.org" >&2
+  exit 127
+fi
+
+exec node "$root/scripts/router.mjs" "$@"
