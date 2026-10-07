@@ -11,7 +11,7 @@ npm start
 Gateway:
 
 ```text
-http://localhost:999/v1
+http://localhost:9999/v1
 ```
 
 ## Configure provider
@@ -56,7 +56,7 @@ model_provider = "multi_ai_router"
 
 [model_providers.multi_ai_router]
 name = "MultiAI Router"
-base_url = "http://localhost:999/v1"
+base_url = "http://localhost:9999/v1"
 env_key = "MULTIAI_ROUTER_API_KEY"
 wire_api = "responses"
 ```

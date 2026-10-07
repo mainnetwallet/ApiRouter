@@ -144,7 +144,7 @@ export function loadConfig(env = process.env) {
   const visionProviders = readProviders(env, { vision: true });
   return {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
-    port: readNumber(env, "PORT", 999, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
+    port: readNumber(env, "PORT", 9999, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
     // Bind address. Unset keeps the historical behaviour (all interfaces);
     // `HOST=127.0.0.1` keeps an unauthenticated gateway on loopback.
     host: String(env.HOST || "").trim(),

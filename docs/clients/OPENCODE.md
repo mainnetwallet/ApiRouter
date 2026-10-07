@@ -5,7 +5,7 @@ OpenCode can use the router as an OpenAI-compatible provider.
 ## Gateway
 
 ```text
-http://localhost:999/v1
+http://localhost:9999/v1
 ```
 
 ## Configure
@@ -22,7 +22,7 @@ Example:
       "package": "@opencode/ai/providers/openai-compatible",
       "name": "MultiAI Router",
       "settings": {
-        "baseURL": "http://localhost:999/v1",
+        "baseURL": "http://localhost:9999/v1",
         "apiKey": "{env:MULTIAI_ROUTER_API_KEY}"
       },
       "models": {

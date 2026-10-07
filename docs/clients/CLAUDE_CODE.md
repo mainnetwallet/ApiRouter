@@ -11,7 +11,7 @@ npm start
 Default:
 
 ```text
-http://localhost:999
+http://localhost:9999
 ```
 
 ## Configure provider
@@ -29,7 +29,7 @@ AGENTROUTER_BASE_URL=https://agentrouter.org/
 PowerShell:
 
 ```powershell
-$env:ANTHROPIC_BASE_URL="http://localhost:999"
+$env:ANTHROPIC_BASE_URL="http://localhost:9999"
 $env:ANTHROPIC_AUTH_TOKEN="YOUR_LOCAL_ROUTER_KEY"
 $env:ANTHROPIC_API_KEY=$null
 claude
@@ -40,7 +40,7 @@ Bash / Termux (permanent, `~/.claude/settings.json`):
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:999",
+    "ANTHROPIC_BASE_URL": "http://localhost:9999",
     "ANTHROPIC_AUTH_TOKEN": "any-key",
     "ANTHROPIC_MODEL": "router",
     "DISABLE_AUTOUPDATER": "1"
@@ -51,7 +51,7 @@ Bash / Termux (permanent, `~/.claude/settings.json`):
 Bash (current session only):
 
 ```bash
-export ANTHROPIC_BASE_URL="http://localhost:999"
+export ANTHROPIC_BASE_URL="http://localhost:9999"
 export ANTHROPIC_AUTH_TOKEN="any-key"
 unset ANTHROPIC_API_KEY
 claude
@@ -73,12 +73,12 @@ The router selects only compatible Anthropic targets.
 ## Check
 
 ```powershell
-Invoke-RestMethod http://localhost:999/health
+Invoke-RestMethod http://localhost:9999/health
 ```
 
 ```bash
-curl http://localhost:999/health
-curl http://localhost:999/v1/models
+curl http://localhost:9999/health
+curl http://localhost:9999/v1/models
 ```
 
 ## Optional: permanent config (`~/.claude/settings.json`)
@@ -89,7 +89,7 @@ Set once and Claude Code picks it up every run, with no shell `export` needed.
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:999",
+    "ANTHROPIC_BASE_URL": "http://localhost:9999",
     "ANTHROPIC_AUTH_TOKEN": "any-key",
     "ANTHROPIC_MODEL": "router",
     "DISABLE_AUTOUPDATER": "1",
@@ -104,7 +104,7 @@ Set once and Claude Code picks it up every run, with no shell `export` needed.
 ### `API Error: 405 status code (no body)`
 
 Cause: a system proxy (`HTTP_PROXY` / `HTTPS_PROXY`, VPN or corporate proxy) is
-intercepting Claude Code's request to `localhost:999`. The proxy never reaches the
+intercepting Claude Code's request to `localhost:9999`. The proxy never reaches the
 router, so nothing shows in the router log. The router itself never returns an
 empty-body 405.
 

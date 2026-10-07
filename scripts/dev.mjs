@@ -3,7 +3,7 @@
  *
  * Starts the gateway (`node --watch src/server.js`) and the Vite dev server,
  * and wires the gateway to Vite through `MULTIAI_DEV_UI_ORIGIN` so the browser
- * only ever talks to the gateway port (default http://localhost:999). Vite runs
+ * only ever talks to the gateway port (default http://localhost:9999). Vite runs
  * on a free private loopback port that developers never need to open.
  *
  * Plain Node, no shell syntax and no extra dependency, so it behaves the same

@@ -43,7 +43,7 @@ your browser once the gateway is ready; pass `--no-open` to skip that.
 
 ### Custom PORT
 
-Set `PORT` in `.env` (default `999`), or for one run:
+Set `PORT` in `.env` (default `9999`), or for one run:
 
 ```powershell
 $env:PORT = 8080; Router        # PowerShell
@@ -88,8 +88,8 @@ POSIX `sh` only (no Bash needed).
 PORT=8080 Router
 ```
 
-or set `PORT` in `.env`. On Linux, ports below 1024 normally need root; the
-default `999` is such a port, so pick something like `8788` if you see `EACCES`.
+or set `PORT` in `.env`. On Linux and Android (Termux), ports below 1024
+need root. The default `9999` is fine; if you set a lower port and see `EACCES`, use a higher one.
 
 ### Stop
 
@@ -133,7 +133,7 @@ session or CI, a graphical session exists (`DISPLAY`/`WAYLAND_DISPLAY`) and
 
 ```text
 MultiAI Router is running:
-http://localhost:999
+http://localhost:9999
 ```
 
 You can force or forbid the attempt with `--open` / `--no-open` or
@@ -147,7 +147,7 @@ requests from the machine itself). The safest way to reach the panel is an SSH
 tunnel, which needs no configuration on the server:
 
 ```bash
-ssh -L 8080:localhost:999 user@SERVER_IP     # then open http://localhost:8080
+ssh -L 8080:localhost:9999 user@SERVER_IP     # then open http://localhost:8080
 ```
 
 To serve other machines directly, you must set this up on purpose: choose
@@ -243,7 +243,7 @@ cleanly: delete `node_modules` and run `Router`.
 
 **PORT already in use.** The gateway exits with `EADDRINUSE` and `Router` reminds you to
 set a different `PORT` in `.env` (or `PORT=8080 Router`). On Linux/macOS find the other
-process with `lsof -i :999`; on Windows, `netstat -ano | findstr :999`. `EACCES` on Linux
+process with `lsof -i :9999`; on Windows, `netstat -ano | findstr :9999`. `EACCES` on Linux
 means the port is below 1024: use a higher one.
 
 **HOST configuration.** `HOST` is used exactly as set in `.env`/the environment.

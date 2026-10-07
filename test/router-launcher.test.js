@@ -200,7 +200,7 @@ test("custom PORT and HOST: the printed URL and the readiness check follow the c
   const router = startRouter(f, ["--no-open"], { PORT: String(port), HOST: "127.0.0.1" });
   await router.waitFor(() => router.output().includes("MultiAI Router is running:"), "the running banner");
   assert.ok(router.output().includes(`http://localhost:${port}`), router.output());
-  assert.ok(!router.output().includes(":999"), "the default port must not leak into a custom-port run");
+  assert.ok(!router.output().includes(":9999"), "the default port must not leak into a custom-port run");
   const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
   assert.equal(health.service, "multi-ai-router");
   router.child.kill("SIGTERM");
@@ -294,7 +294,7 @@ test("--no-open wins even on a desktop", { skip: process.platform !== "linux" },
 });
 
 test("browserCommand decision table (every platform, without needing that platform)", () => {
-  const url = "http://localhost:999";
+  const url = "http://localhost:9999";
   const has = (...names) => (name) => (names.includes(name) ? `/usr/bin/${name}` : null);
   const tty = { url, isTTY: true };
   assert.deepEqual(browserCommand({ ...tty, platform: "win32", env: {} }), { command: "cmd.exe", args: ["/c", "start", "", url] });
@@ -429,7 +429,7 @@ test("wrappers hold no startup logic: both only locate Node and run scripts/rout
   assert.match(sh, /exec node "\$root\/scripts\/router\.mjs" "\$@"/);
   assert.match(cmd, /node "%~dp0\.\.\\scripts\\router\.mjs" %\*/);
   for (const [name, text] of [["bin/Router", sh], ["bin/Router.cmd", cmd], ["install-router.ps1", ps1]]) {
-    assert.doesNotMatch(text, /ui:build|npm (start|install|run)|server\.js|999/, `${name} must not duplicate startup logic or hardcode the port`);
+    assert.doesNotMatch(text, /ui:build|npm (start|install|run)|server\.js|9999/, `${name} must not duplicate startup logic or hardcode the port`);
   }
   assert.match(ps1, /call "\$repo\\bin\\Router\.cmd" %\*/, "the Windows shim delegates to the repository launcher");
 });
@@ -440,7 +440,7 @@ test("the canonical flow is the production one: `npm run ui:build` then src/serv
   assert.match(source, /npm\(\["run", "ui:build"\]\)/);
   assert.match(source, /process\.execPath, \["src\/server\.js"\]/);
   assert.doesNotMatch(source, /ui:dev|vite|"start"|\["dev"\]|npm\(\["start"\]\)/, "no dev server, no `npm start` (that would build twice)");
-  assert.doesNotMatch(source, /localhost:9|:999|PORT\s*=\s*\d/, "no hardcoded port in the platform-independent launcher");
+  assert.doesNotMatch(source, /localhost:9|:9999|PORT\s*=\s*\d/, "no hardcoded port in the platform-independent launcher");
   assert.equal(pkg.scripts.start, "npm run ui:build && node src/server.js");
   assert.equal(pkg.scripts.dev, "node scripts/dev.mjs");
 });
@@ -448,7 +448,7 @@ test("the canonical flow is the production one: `npm run ui:build` then src/serv
 // ---- helper unit tests --------------------------------------------------------------
 
 test("URLs follow PORT/HOST without hardcoding", () => {
-  assert.equal(consoleUrl("", 999), "http://localhost:999");
+  assert.equal(consoleUrl("", 9999), "http://localhost:9999");
   assert.equal(consoleUrl("", 8080), "http://localhost:8080");
   assert.equal(consoleUrl("0.0.0.0", 8080), "http://localhost:8080");
   assert.equal(consoleUrl("127.0.0.1", 3000), "http://localhost:3000");

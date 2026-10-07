@@ -83,7 +83,7 @@ npm start
 `git pull` gets the latest updates (safe to run every time). `npm start` builds the control panel and starts the production gateway. The default address is:
 
 ```text
-http://localhost:999
+http://localhost:9999
 ```
 
 Set `PORT` in `.env` to use another port.
@@ -123,7 +123,7 @@ npm run dev
 Development mode runs the gateway and Vite with hot reload. Open:
 
 ```text
-http://localhost:999
+http://localhost:9999
 ```
 
 ## Configuration
@@ -133,7 +133,7 @@ All configuration is loaded from `.env`. See [.env.example](.env.example) for th
 ### Gateway
 
 ```env
-PORT=999
+PORT=9999
 HOST=
 MULTIAI_ROUTER_API_KEYS=
 ```
