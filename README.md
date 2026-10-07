@@ -14,7 +14,7 @@ Multi-provider AI gateway with priority routing, sticky sessions, automatic fall
 
 ## Manual model order
 
-The panel's **Manual Order** page lets you pick provider/model entries and number them 1, 2, 3 for the **text** and **vision** pools separately. New requests try your list first, in that order (every key of an entry before the next entry). If every entry fails, the router continues with its normal sticky, priority and Provider -> Key -> Models fallback. An empty list changes nothing, and a request that names one specific model still uses that model.
+The panel's **Model Manual Order** page lets you pick provider/model entries and number them 1, 2, 3 for the **text** and **vision** pools separately. New requests try your list first, in that order (every key of an entry before the next entry). If every entry fails, the router continues with its normal sticky, priority and Provider -> Key -> Models fallback. An empty list changes nothing, and a request that names one specific model still uses that model.
 
 The order is saved to `data/manual-selection.json` (override with `MANUAL_SELECTION_FILE`), so it survives restarts. It is also available as `GET` / `PUT /api/manual-selection` (`{"text": ["provider/model", ...], "vision": [...]}`).
 

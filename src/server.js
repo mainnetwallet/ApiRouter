@@ -85,7 +85,7 @@ const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
 // Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
 const targets = [...textTargets, ...visionTargets];
 
-// Operator-chosen model order (panel page "Manual Order"). Empty by default, in which
+// Operator-chosen model order (panel page "Model Manual Order"). Empty by default, in which
 // case routing is exactly what it was before.
 const manualSelection = new ManualSelection();
 // Which pools each configured model id belongs to. Static for the process

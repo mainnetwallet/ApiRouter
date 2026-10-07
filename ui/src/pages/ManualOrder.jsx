@@ -74,7 +74,7 @@ export default function ManualOrder() {
   return (
     <div className="page">
       <PageHeader
-        title="Manual Order"
+        title="Model Manual Order"
         description="Choose the models a request tries first, in your own order"
         actions={
           <div className="row" style={{ gap: "var(--sp-2)" }}>

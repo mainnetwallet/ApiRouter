@@ -43,7 +43,7 @@ export const ROUTES = [
     description: "How the gateway resolves a request to a target" },
   { path: "/fallback", label: "Fallback", icon: "layers", group: "Operate", element: Fallback,
     description: "The ordered chain the router walks when a target fails" },
-  { path: "/manual-order", label: "Manual Order", icon: "sliders", group: "Operate", element: ManualOrder,
+  { path: "/manual-order", label: "Model Manual Order", icon: "sliders", group: "Operate", element: ManualOrder,
     description: "Pick the models requests try first, in your own order (text and vision separately)" },
   { path: "/playground", label: "Playground", icon: "terminal", group: "Operate", element: Playground,
     description: "Send a real request through the gateway router" },
