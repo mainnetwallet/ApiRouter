@@ -96,9 +96,12 @@ export class RouteSession {
    * timestamped) sticky is cleared and reported as absent, so the request
    * routes Priority -> Normal and the expired target is never used again.
    */
-  validTargetId(now = Date.now()) {
+  validTargetId(now = Date.now(), { notBefore = 0 } = {}) {
     if (!this.targetId) return null;
-    if (this.expiresAt === null || !(now < this.expiresAt)) {
+    // `notBefore`: a sticky saved before the operator last changed the manual
+    // order is dropped, so a removed or cleared model is not revived by it.
+    const savedAt = this.expiresAt === null ? null : this.expiresAt - this.ttlMs;
+    if (this.expiresAt === null || !(now < this.expiresAt) || (notBefore > 0 && savedAt < notBefore)) {
       this.targetId = null;
       this.expiresAt = null;
       return null;

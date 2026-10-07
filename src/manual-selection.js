@@ -84,6 +84,26 @@ export class ManualSelection {
     this.mtimeMs = null;
     this.lastCheck = 0;
     this.load();
+    // When each pool's list last changed. Sticky sessions older than this are
+    // ignored, so a removed model is not brought back by a previous success.
+    this.changed = { text: 0, vision: 0 };
+  }
+
+  /** ms epoch of the last real change to this pool's list (0 = unchanged since start). */
+  changedAt(pool = "text") {
+    this.refresh();
+    return this.changed[pool === "vision" ? "vision" : "text"];
+  }
+
+  noteChanges(before) {
+    if (!this.changed) return; // the first load, from the constructor
+    const now = Date.now();
+    for (const pool of MANUAL_POOLS) {
+      const after = this.lists[pool].map(manualEntryId);
+      if (after.length !== before[pool].length || after.some((id, i) => id !== before[pool][i])) {
+        this.changed[pool] = now;
+      }
+    }
   }
 
   /**
@@ -117,8 +137,10 @@ export class ManualSelection {
   set(next = {}) {
     const text = normalizeList(next?.text, "text");
     const vision = normalizeList(next?.vision, "vision");
+    const before = { text: this.lists.text.map(manualEntryId), vision: this.lists.vision.map(manualEntryId) };
     if (text) this.lists.text = text;
     if (vision) this.lists.vision = vision;
+    this.noteChanges(before);
     this.updatedAt = new Date().toISOString();
     this.persist();
     return this.snapshot();
@@ -135,13 +157,18 @@ export class ManualSelection {
   }
 
   load() {
+    const before = { text: this.lists.text.map(manualEntryId), vision: this.lists.vision.map(manualEntryId) };
+    const hadFile = this.mtimeMs !== null;
     let raw;
     try {
       this.mtimeMs = fs.statSync(this.file).mtimeMs;
       raw = fs.readFileSync(this.file, "utf8");
     } catch {
       this.mtimeMs = null;
-      return; // no file yet: no manual selection
+      // No file yet means no manual selection; a file that vanished means the same.
+      if (hadFile) this.lists = { text: [], vision: [] };
+      this.noteChanges(before);
+      return;
     }
     try {
       const parsed = JSON.parse(raw);
@@ -153,6 +180,7 @@ export class ManualSelection {
       this.lists = { text: [], vision: [] };
       console.warn(`[router] ignoring unreadable manual selection file ${this.file}: ${error.message}`);
     }
+    this.noteChanges(before);
   }
 
   /** Atomic write (temp file + rename) so a crash never leaves half a file. */

@@ -563,7 +563,7 @@ async function proxy(req, res, protocol, pathname) {
     // The operator's manual order leads everything; a pin is strict and ignores it.
     manual: pinned.pinned ? [] : manualSelection.get(pool),
     // Sticky is a first phase, only while its TTL is valid; a pin is strict.
-    stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
+    stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId(Date.now(), { notBefore: manualSelection.changedAt(pool) })
   });
 
   if (selection.compatible.length === 0) {
