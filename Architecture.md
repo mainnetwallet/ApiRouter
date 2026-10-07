@@ -322,9 +322,14 @@ Real credentials must stay in `.env` and must not be committed.
 
 ```text
 Node.js >= 20
-npm start
+npm start    # builds ui/dist, then starts the gateway
 npm test
 ```
+
+`npm start` is the single production command. It runs `npm run ui:build` first and only
+starts `src/server.js` when the UI build succeeds. The gateway then serves the built
+`ui/dist` panel and the backend from the same origin. No separate production UI-build
+command is required.
 
 ## Source Architecture
 
