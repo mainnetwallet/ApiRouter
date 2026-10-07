@@ -14,38 +14,27 @@ Multi-provider AI routing gateway with health-based fallback.
 
 ## Quick Start
 
-One-time setup:
-
 ```powershell
 git clone https://github.com/mainnetwallet/MultiAI-Router.git
 cd MultiAI-Router
 npm install
-Copy-Item .env.example .env   # then edit .env (never repeat this: it overwrites your keys)
-npm start                     # builds the control panel, then starts the gateway
+Copy-Item .env.example .env   # add your keys (do this once only)
+npm start                     # builds the panel and starts the gateway
 ```
 
-Open `http://localhost:999` (port = `PORT` in `.env`, default `999`). Stop with `Ctrl + C`.
+Open **http://localhost:999** (change with `PORT` in `.env`). Stop with `Ctrl + C`.
+Next time: `git pull origin main`, then `npm start`.
 
-Next runs: `git pull origin main` then `npm start`.
+### `Router` command
 
-### `Router` command (Windows, Linux, VPS, macOS)
+Optional launcher: installs missing dependencies, builds the panel and starts the gateway, same as `npm start`.
 
-A cross-platform launcher: checks Node/npm, installs missing dependencies, builds the panel once, starts the gateway and prints the URL. Same as `npm start`; never starts Vite.
-
-```powershell
-.\scripts\install-router.ps1   # Windows (then open a new terminal)
-```
-```bash
-./scripts/install-router.sh    # Linux/VPS/macOS: installs ~/.local/bin/Router (no root)
-```
-
-Then run `Router` from any directory. `PORT`/`HOST` come from `.env`; `--no-open` skips opening the browser. On a headless VPS it only prints the URL: use an SSH tunnel, or set `HOST` and `MULTIAI_ROUTER_API_KEYS` and open `http://SERVER_IP:PORT`. Details: [docs/ROUTER_COMMAND.md](docs/ROUTER_COMMAND.md).
-
-| Command | Purpose |
+| Platform | Install once |
 | --- | --- |
-| `npm start` | Production: `npm run ui:build && node src/server.js` |
-| `Router` | Same, as a launcher |
-| `npm run dev` | Development with hot reload |
+| Windows | `.\scripts\install-router.ps1` (then open a new terminal) |
+| Linux / VPS / macOS | `./scripts/install-router.sh` (no root) |
+
+Then run `Router` from any folder. Use `--no-open` to skip opening the browser. On a headless VPS, use an SSH tunnel, or set `HOST` and `MULTIAI_ROUTER_API_KEYS` to open it remotely. More: [docs/ROUTER_COMMAND.md](docs/ROUTER_COMMAND.md).
 
 ## Configuration
 
