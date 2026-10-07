@@ -75,11 +75,12 @@ Add the providers, models, and API keys you want to use, then save and close.
 ### Production
 
 ```bash
-cd MultiAI-Router
+cd ~/MultiAI-Router
+git pull origin main
 npm start
 ```
 
-This builds the control panel and starts the production gateway. The default address is:
+`git pull` gets the latest updates (safe to run every time). `npm start` builds the control panel and starts the production gateway. The default address is:
 
 ```text
 http://localhost:999
