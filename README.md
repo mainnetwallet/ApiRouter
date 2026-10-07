@@ -2,7 +2,15 @@
 
 Multi-provider AI routing gateway with health-based fallback.
 
-**Client guides:** [Claude Code](docs/clients/CLAUDE_CODE.md) · [Codex](docs/clients/CODEX.md) · [Qwen Code](docs/clients/QWEN_CODE.md) · [OpenCode](docs/clients/OPENCODE.md) · [Generic OpenAI](docs/clients/GENERIC_OPENAI.md) · [Other clients](docs/clients/OTHER_CLIENTS.md) · [All protocols](docs/clients/CLIENTS.md)
+## Client Integration Guides
+
+- [Claude Code](docs/clients/CLAUDE_CODE.md)
+- [Codex](docs/clients/CODEX.md)
+- [Qwen Code](docs/clients/QWEN_CODE.md)
+- [OpenCode](docs/clients/OPENCODE.md)
+- [Generic OpenAI-compatible Clients](docs/clients/GENERIC_OPENAI.md)
+- [Other AI Clients](docs/clients/OTHER_CLIENTS.md)
+- [All Client Protocols](docs/clients/CLIENTS.md)
 
 ## Quick Start
 
