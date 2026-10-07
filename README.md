@@ -12,17 +12,6 @@ Multi-provider AI gateway with priority routing, sticky sessions, automatic fall
 - [OpenAI-compatible clients](docs/clients/GENERIC_OPENAI.md)
 - [Other clients](docs/clients/OTHER_CLIENTS.md)
 
-## Features
-
-- Multi-provider text and vision routing
-- Anthropic Messages, OpenAI Responses, OpenAI Chat, and Gemini gateway protocols
-- Sticky sessions and configurable priority models
-- Automatic fallback across providers, models, and keys
-- Per-provider/model/key health tracking and cooldown
-- React + Vite control panel
-- Cross-platform `Router` launcher for Windows, Linux, VPS, and macOS
-- OpenAI-compatible provider support
-
 ## Requirements
 
 - Node.js 20+
@@ -327,6 +316,17 @@ Check:
 For a VPS, prefer an SSH tunnel for private access. For direct remote access, configure `HOST`, set `MULTIAI_ROUTER_API_KEYS`, and protect the exposed port.
 
 See [docs/ROUTER_COMMAND.md](docs/ROUTER_COMMAND.md) for platform-specific instructions.
+
+## Features
+
+- Multi-provider text and vision routing
+- Anthropic Messages, OpenAI Responses, OpenAI Chat, and Gemini gateway protocols
+- Sticky sessions and configurable priority models
+- Automatic fallback across providers, models, and keys
+- Per-provider/model/key health tracking and cooldown
+- React + Vite control panel
+- Cross-platform `Router` launcher for Windows, Linux, VPS, and macOS
+- OpenAI-compatible provider support
 
 ## Documentation
 
