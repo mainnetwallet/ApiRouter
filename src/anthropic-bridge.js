@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { unsupportedImageSource } from "./image-source.js";
+import { unsupportedContent, unsupportedImageSource } from "./image-source.js";
 import { geminiModelsUrl, openAiChatUrl } from "./upstream-url.js";
 import { parseToolArguments } from "./bridge-errors.js";
 
@@ -54,6 +54,7 @@ function textOfBlocks(content) {
       // A text-only extraction must never silently discard an image: the
       // caller has to preserve it (as inlineData / image_url) or refuse it.
       if (b?.type === "image") throw unsupportedImageSource("an image inside a tool result");
+      if (b?.type === "document") throw unsupportedContent("an Anthropic document block");
       return b?.type === "text" ? b.text ?? "" : "";
     })
     .join("\n");
@@ -145,6 +146,9 @@ export function toOpenAIChatRequest(body, model) {
         content: b.is_error ? "Error: " + content : content
       });
     }
+    // A document block has no OpenAI chat-completions equivalent here; it must
+    // be refused, not filtered out of the translated request.
+    if (blocks.some((b) => b?.type === "document")) throw unsupportedContent("an Anthropic document block");
     const rest = blocks.filter((b) => b.type === "text" || b.type === "image");
     if (rest.length === 0) continue;
     const hasImage = rest.some((b) => b.type === "image");
@@ -258,6 +262,9 @@ export function toGeminiRequest(body, { sessionId = "" } = {}) {
         throw unsupportedImageSource(
           b.source?.url ? "an image URL (the gateway never fetches it)" : "an image file reference"
         );
+      } else if (b.type === "document") {
+        // Not expressible by this Gemini translation; refuse rather than drop.
+        throw unsupportedContent("an Anthropic document block");
       } else if (b.type === "tool_use") {
         const part = { functionCall: { name: b.name, args: b.input ?? {} } };
         const sig = signatureFor(b.id, sessionId);

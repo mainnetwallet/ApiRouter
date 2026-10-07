@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
 import { invalidToolArguments, markStreamFailure } from "./bridge-errors.js";
-import { splitInlineDataUrl, unsupportedImageSource } from "./image-source.js";
+import { splitInlineDataUrl, unsupportedContent, unsupportedImageSource } from "./image-source.js";
 import { geminiModelsUrl, openAiChatUrl } from "./upstream-url.js";
 
 /**
@@ -95,6 +95,8 @@ function textOf(content) {
     .map((part) => {
       if (typeof part === "string") return part;
       if (part?.type === "input_image") return "[image]";
+      // Neither bridge target carries input_audio; refuse instead of returning "".
+      if (part?.type === "input_audio") throw unsupportedContent("a Responses input_audio part");
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");

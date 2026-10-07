@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
 import { markStreamFailure, parseToolArguments } from "./bridge-errors.js";
-import { splitInlineDataUrl, unsupportedImageSource } from "./image-source.js";
+import { splitInlineDataUrl, unsupportedContent, unsupportedImageSource } from "./image-source.js";
 import { geminiModelsUrl } from "./upstream-url.js";
 
 /**
@@ -70,6 +70,10 @@ function textOfContent(content) {
     .map((part) => {
       if (typeof part === "string") return part;
       if (part?.type === "image_url") return "[image]";
+      // Gemini generateContent translation does not carry these parts; a text
+      // extraction must refuse them instead of returning "" and dropping them.
+      if (part?.type === "input_audio") throw unsupportedContent("an OpenAI Chat input_audio part");
+      if (part?.type === "file") throw unsupportedContent("an OpenAI Chat file part");
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");
