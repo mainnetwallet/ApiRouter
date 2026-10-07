@@ -31,6 +31,7 @@ function readStatusCodes(env, name, fallback) {
 export const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_MAX_UPSTREAM_BODY_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_STREAM_TOTAL_TIMEOUT_MS = 30 * 60 * 1000;
+export const DEFAULT_MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 /**
  * The single source of truth for which providers exist. Every other list —
  * `providers/catalog.js`, the `/health` payload, the env-var audit — hangs off
@@ -164,6 +165,10 @@ export function loadConfig(env = process.env) {
     // (translated non-stream bodies and usage inspection). Enforced while
     // reading, never from Content-Length. 0 disables it.
     maxUpstreamBodyBytes: readNumber(env, "MAX_UPSTREAM_BODY_BYTES", DEFAULT_MAX_UPSTREAM_BODY_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
+    // Most bytes of ONE incomplete SSE event (since the last event delimiter)
+    // held in memory while a stream is translated. Enforced as chunks arrive;
+    // exceeding it cancels the upstream stream and cools the provider. 0 disables it.
+    maxSseEventBytes: readNumber(env, "MAX_SSE_EVENT_BYTES", DEFAULT_MAX_SSE_EVENT_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
     retryableStatus: readStatusCodes(env, "RETRY_STATUS_CODES", DEFAULT_RETRY_STATUS_CODES),
     // Request-body ceiling. The gateway forwards bodies to providers, so it
     // cannot size them itself; it only guards its own memory. `0` disables the

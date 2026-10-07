@@ -250,6 +250,7 @@ STREAM_CONNECT_TIMEOUT_MS=30000   # time-to-first-response for a streaming reque
 STREAM_IDLE_TIMEOUT_MS=120000     # max gap between chunks after the headers (0 disables)
 STREAM_TOTAL_TIMEOUT_MS=1800000   # absolute ceiling on one streamed attempt (0 disables)
 MAX_UPSTREAM_BODY_BYTES=33554432  # most bytes of one upstream body held in memory (0 disables)
+MAX_SSE_EVENT_BYTES=8388608       # most bytes of one incomplete SSE event, checked as data arrives (0 disables)
 MAX_REQUEST_BODY_BYTES=67108864   # gateway memory guard, not a provider limit (0 disables)
 ```
 

@@ -17,14 +17,22 @@
  */
 
 export const DEFAULT_MAX_UPSTREAM_BODY_BYTES = 32 * 1024 * 1024;
+/**
+ * Cap on ONE incomplete SSE event (bytes received since the last event
+ * delimiter). Far above any real event, including a Gemini inline-image
+ * frame, but a provider that never sends the delimiter cannot grow memory
+ * without bound.
+ */
+export const DEFAULT_MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 /** Cap on a non-2xx body: only the first 2000 characters are ever surfaced. */
 export const MAX_ERROR_BODY_BYTES = 64 * 1024;
 
 export const STREAM_IDLE_TIMEOUT = "STREAM_IDLE_TIMEOUT";
 export const UPSTREAM_DEADLINE_EXCEEDED = "UPSTREAM_DEADLINE_EXCEEDED";
 export const UPSTREAM_BODY_TOO_LARGE = "UPSTREAM_BODY_TOO_LARGE";
+export const UPSTREAM_SSE_EVENT_TOO_LARGE = "UPSTREAM_SSE_EVENT_TOO_LARGE";
 
-const UPSTREAM_FAULT_CODES = new Set([STREAM_IDLE_TIMEOUT, UPSTREAM_DEADLINE_EXCEEDED, UPSTREAM_BODY_TOO_LARGE]);
+const UPSTREAM_FAULT_CODES = new Set([STREAM_IDLE_TIMEOUT, UPSTREAM_DEADLINE_EXCEEDED, UPSTREAM_BODY_TOO_LARGE, UPSTREAM_SSE_EVENT_TOO_LARGE]);
 
 /** True for failures that are the provider's doing even if the client also left. */
 export function isUpstreamFault(error) {
@@ -34,6 +42,16 @@ export function isUpstreamFault(error) {
 function bodyTooLarge(maxBytes) {
   const error = new Error(`Upstream response body exceeded the ${maxBytes} byte limit`);
   error.code = UPSTREAM_BODY_TOO_LARGE;
+  error.status = 502;
+  error.maxBytes = maxBytes;
+  error.streamCause = "upstream";
+  return error;
+}
+
+/** An SSE event that outgrew `maxBytes` before its delimiter arrived: the provider's fault. */
+export function sseEventTooLarge(maxBytes) {
+  const error = new Error(`Upstream SSE event exceeded the ${maxBytes} byte limit without completing`);
+  error.code = UPSTREAM_SSE_EVENT_TOO_LARGE;
   error.status = 502;
   error.maxBytes = maxBytes;
   error.streamCause = "upstream";

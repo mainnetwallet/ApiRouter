@@ -895,7 +895,7 @@ async function proxy(req, res, protocol, pathname) {
           idleMs: config.streamIdleTimeoutMs,
           deadlineAt: result.deadlineAt,
           clientSignal: clientGone.signal
-        }));
+        }), { maxEventBytes: config.maxSseEventBytes });
         const events = bridgeKind === "codex"
           ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
           : bridgeKind === "chat"

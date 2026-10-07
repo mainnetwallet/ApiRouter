@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { unsupportedContent, unsupportedImageSource } from "./image-source.js";
 import { geminiModelsUrl, openAiChatUrl } from "./upstream-url.js";
 import { parseToolArguments } from "./bridge-errors.js";
+import { sseEventTooLarge } from "./upstream-body.js";
 
 /**
  * Anthropic Messages bridge.
@@ -409,9 +410,19 @@ export function convertJsonResponse(upstreamProtocol, json, model, options = {})
 
 // -------------------------------------------------------- streaming
 
-/** Yields the `data:` payload of each SSE event from a web ReadableStream. */
-export async function* sseData(webStream) {
+/**
+ * Yields the `data:` payload of each SSE event from a web ReadableStream.
+ *
+ * `maxEventBytes` bounds ONE incomplete event: the bytes received since the
+ * last event delimiter. It is checked on every chunk as it arrives, so a
+ * provider that never sends the delimiter is cut off at the limit rather than
+ * after the whole event has piled up. Exceeding it throws
+ * UPSTREAM_SSE_EVENT_TOO_LARGE (an upstream fault); leaving the generator
+ * cancels the upstream stream. 0 / unset disables the bound.
+ */
+export async function* sseData(webStream, { maxEventBytes = 0 } = {}) {
   const decoder = new TextDecoder();
+  const limited = Number.isFinite(maxEventBytes) && maxEventBytes > 0;
   let buffer = "";
   for await (const chunk of webStream) {
     buffer += decoder.decode(chunk, { stream: true });
@@ -421,6 +432,11 @@ export async function* sseData(webStream) {
       buffer = buffer.slice(idx).replace(/^\r?\n\r?\n/, "");
       const data = raw.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
       if (data) yield data;
+    }
+    // What is left has no delimiter yet. A UTF-16 string is at most 3 UTF-8
+    // bytes per unit, so the cheap length test settles most chunks.
+    if (limited && buffer.length * 3 > maxEventBytes && Buffer.byteLength(buffer) > maxEventBytes) {
+      throw sseEventTooLarge(maxEventBytes);
     }
   }
   const tail = buffer.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
