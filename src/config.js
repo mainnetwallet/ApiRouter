@@ -157,9 +157,13 @@ export function loadConfig(env = process.env) {
     // guard, and MAX_REQUEST_BODY_MB stays ignored for backwards compatibility
     // (see .env.example).
     maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", DEFAULT_MAX_BODY_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
-    // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
-    // exists so tests can use a short real-clock TTL).
-    stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 20 * 60 * 1000,
+    // Sticky target lifetime after a success: 20 minutes. Unlike older
+    // numeric settings, this must not silently fall back when configured:
+    // a typo or zero would change routing semantics in a surprising way.
+    stickyTtlMs: readNumber(env, "STICKY_TTL_MS", 20 * 60 * 1000, {
+      min: 1,
+      expected: "a positive integer"
+    }),
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,
