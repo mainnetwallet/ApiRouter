@@ -11,5 +11,5 @@ if not exist "ui\dist\index.html" (
   call npm run ui:build
   if errorlevel 1 exit /b 1
 )
-start "" "http://localhost:8788"
+start "" "http://localhost:999"
 call npm start

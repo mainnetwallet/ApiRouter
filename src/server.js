@@ -23,6 +23,7 @@ import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream, par
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { createStaticHandler } from "./static-files.js";
+import { createDevUiProxy, isReservedWhenDecoded } from "./dev-proxy.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, routeOrderByPool } from "./routing-plan.js";
 import { selectPool } from "./vision.js";
@@ -95,6 +96,13 @@ const HEALTH_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const staticFiles = createStaticHandler({
   root: fileURLToPath(new URL("../ui/dist/", import.meta.url))
 });
+
+/**
+ * Development only. `npm run dev` sets MULTIAI_DEV_UI_ORIGIN to the private
+ * Vite dev server so this gateway stays the one browser-facing origin. Unset
+ * (as with `npm start`), this is null and `ui/dist` is served as before.
+ */
+const devUi = createDevUiProxy(process.env.MULTIAI_DEV_UI_ORIGIN);
 
 /**
  * Largest JSON response that will be buffered to read token usage. Anything
@@ -1218,6 +1226,11 @@ async function handleRequest(req, res) {
   // Static panel assets, then the SPA shell for client-side routes.
   if (req.method === "GET" || req.method === "HEAD") {
     if (!isReserved(pathname)) {
+      if (devUi) {
+        // An encoded gateway prefix (/api%2fconfig) is not a panel route; keep it away from Vite.
+        if (isReservedWhenDecoded(pathname, isReserved)) return json(res, 404, { error: { message: "Not found", type: "not_found" } });
+        return devUi.handle(req, res);
+      }
       if (await staticFiles.serve(req, res, pathname)) return undefined;
 
       // Extensionless paths are client-side routes, so they get the shell.
@@ -1237,17 +1250,38 @@ const server = http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => respondUnexpected(res, error));
 });
 
+// Vite HMR rides a WebSocket upgrade. Registered only in development, so the
+// production server's upgrade behaviour is untouched.
+if (devUi) {
+  server.on("upgrade", (req, socket, head) => {
+    let pathname = "";
+    try {
+      pathname = new URL(String(req.url).replace(/^\/{2,}/, "/"), "http://localhost").pathname.replace(/\/{2,}/g, "/");
+    } catch {
+      socket.destroy();
+      return;
+    }
+    if (isReserved(pathname) || isReservedWhenDecoded(pathname, isReserved)) {
+      socket.destroy();
+      return;
+    }
+    devUi.upgrade(req, socket, head);
+  });
+}
+
 const stopHealthMonitor = startHealthMonitor(targets, trackedCheckTargetHealth, HEALTH_CHECK_INTERVAL_MS);
 process.once("SIGINT", () => {
   monitor.stop();
   stopHealthMonitor();
   handleApi.closeStreams();
+  devUi?.close();
   server.close(() => process.exit(0));
 });
 process.once("SIGTERM", () => {
   monitor.stop();
   stopHealthMonitor();
   handleApi.closeStreams();
+  devUi?.close();
   server.close(() => process.exit(0));
 });
 
