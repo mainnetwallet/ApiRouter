@@ -331,6 +331,29 @@ starts `src/server.js` when the UI build succeeds. The gateway then serves the b
 `ui/dist` panel and the backend from the same origin. No separate production UI-build
 command is required.
 
+### The `Router` launcher
+
+`Router` is a convenience launcher around the same two production steps, for Windows, Linux
+(including a headless VPS) and macOS. There is exactly one implementation of its startup flow:
+
+```text
+bin/Router (POSIX sh) ┐
+bin/Router.cmd        ┴─> scripts/router.mjs ─> npm install (only if missing)
+                                              ─> load .env + environment (src/config.js)
+                                              ─> npm run ui:build   (once; failure stops here)
+                                              ─> node src/server.js
+                                              ─> /health ready: print URL, optional browser
+```
+
+The wrappers only locate Node and run `scripts/router.mjs`; `scripts/router-lib.mjs` holds the
+pure decisions (URL for a given `PORT`/`HOST`, whether a browser may be opened, exit codes).
+`scripts/install-router.sh` / `install-router.ps1` put a symlink or shim on `PATH`.
+`npm start` stays the canonical npm command and `npm run dev` is unchanged. The launcher does
+not run `npm start` (the UI would not be built exactly once), does not start Vite, does not
+modify `PORT` or `HOST`, never prints `.env` contents, and treats the browser as optional: it is
+only attempted from an interactive desktop terminal with a display, never over SSH or in CI.
+See [docs/ROUTER_COMMAND.md](docs/ROUTER_COMMAND.md).
+
 Because `npm start` builds the panel, `vite` and `@vitejs/plugin-react` are production
 `dependencies` (not `devDependencies`); a production-only install
 (`npm ci --omit=dev`) can therefore start the gateway. `vitest` stays a dev dependency.
@@ -360,6 +383,9 @@ src/
     └── sanitize.js        credential scrubbing
 
 ui/                        React + Vite control panel (built into ui/dist)
+bin/Router, Router.cmd     thin platform wrappers for the Router launcher
+scripts/router.mjs         canonical Router startup flow (+ router-lib.mjs helpers)
+scripts/install-router.*   put the Router command on PATH (sh / PowerShell)
 ```
 
 ## Control Panel
