@@ -75,6 +75,7 @@ Add the providers, models, and API keys you want to use, then save and close.
 ### Production
 
 ```bash
+cd MultiAI-Router
 npm start
 ```
 
