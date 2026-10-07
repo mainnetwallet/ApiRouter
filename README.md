@@ -49,15 +49,9 @@ Then run `Router` from any directory. `PORT`/`HOST` come from `.env`; `--no-open
 
 ## Configuration
 
-Each provider needs API keys, models and a base URL, all set in `.env` (`.env.example` lists every variable).
+Set provider API keys, models and base URL in `.env` (see `.env.example`).
 
-Retryable statuses (fall back to the next target):
-
-```text
-401,402,403,404,408,409,425,429,500,501,502,503,504,520,521,522,523,524,529
-```
-
-HTTP `400` also falls back, but a generic 400 (unsupported parameter, schema quirk) does not cool the target down. If every target returns 400, the client gets the 400 instead of a 502.
+Falls back to the next target on: `400` (no cooldown; if all targets return 400, the client gets 400) and `401, 402, 403, 404, 408, 409, 425, 429, 500-504, 520-524, 529`.
 
 ## Routing
 
