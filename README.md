@@ -27,10 +27,11 @@ npm start
 Default server:
 
 ```text
-http://localhost:8788
+http://localhost:999
 ```
 
-Open `http://localhost:8788` for the control panel.
+Open `http://localhost:999` for the control panel. The port comes from `PORT` in
+`.env` (default `999`).
 
 ### Running again (second time onwards)
 
@@ -70,7 +71,7 @@ Router
 
 The launcher changes to the repository directory, installs dependencies if needed,
 builds the control panel if `ui/dist/index.html` is missing, opens the control panel
-in the browser, and starts the gateway on `localhost:8788`. If the panel has not been
+in the browser, and starts the gateway on `localhost:999`. If the panel has not been
 built, that address serves a short page explaining how to build it — the
 gateway itself needs no build step and is unaffected.
 
@@ -205,12 +206,50 @@ that reads key material, so credentials cannot leak through it.
 
 A React + Vite single-page app in `ui/`, served by the gateway itself.
 
+### Development (one command)
+
 ```powershell
-npm run ui:dev      # dev server on :5173, proxying /api and /v1 to :8788
+npm install
+npm run dev
+```
+
+Then open **http://localhost:999**. That is the only URL you need.
+
+`npm run dev` starts everything in one terminal:
+
+- the gateway (`node --watch src/server.js`) on `PORT` (default `999`), and
+- the Vite dev server for the React panel on a private loopback port.
+
+The gateway stays the single browser-facing origin. In development it forwards
+panel requests (the page, modules and the HMR WebSocket) to Vite, and keeps
+handling `/api/*`, `/v1/*`, `/v1beta/*` and `/health` itself, so the panel uses
+the same relative URLs as in production, with no CORS setup. The Vite port is
+chosen automatically and is an implementation detail; you never open it.
+
+- **Frontend changes** (`ui/src`) hot-reload in the browser through Vite HMR.
+- **Backend changes** (`src/`) restart the gateway automatically.
+- **Ctrl+C** stops both processes. If either one exits, the other is stopped too.
+
+Production does not use any of this: `npm run ui:build` writes `ui/dist` and
+`npm start` serves it with no Vite involved.
+
+```powershell
+npm run dev         # gateway + Vite, open http://localhost:999
+npm run dev:server  # gateway only, with restart on change (no hot-reloading UI)
+npm run ui:dev      # optional: Vite on its own, frontend-only work (see below)
 npm run ui:build    # production build into ui/dist
+npm start           # production: gateway serving ui/dist
 npm run test:ui     # frontend unit tests
 npm run test:all    # backend + frontend
 ```
+
+`npm run ui:dev` is only for advanced frontend-only work against a gateway you
+started separately: Vite prints its own URL (default `:5173`) and proxies `/api`,
+`/v1`, `/v1beta` and `/health` to `http://localhost:999` (override with
+`MULTIAI_ROUTER_ORIGIN`). Normal development does not need it.
+
+If `npm run dev` reports that the gateway is not listening, the port is usually
+taken or, on Linux, below 1024 without root. Set `PORT` in `.env` to a free port.
 
 Twelve pages: Dashboard, Providers, Models, Health Monitor, Router, Fallback,
 Playground, Requests, Live Logs, Analytics, Configuration, System.

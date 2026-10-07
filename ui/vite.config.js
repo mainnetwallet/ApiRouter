@@ -12,12 +12,16 @@ import react from "@vitejs/plugin-react";
  * The build output is therefore `ui/dist`, which is what `src/static-files.js`
  * serves and what `.gitignore` already excludes.
  *
- * The dev server proxies the gateway's own routes so `npm run ui:dev` talks to
- * a real router on 8788 with no CORS shim and no second code path for API
- * calls. Production uses the same relative URLs, served from the same origin.
+ * Normal development is `npm run dev`: the gateway (default :999) is the only
+ * URL you open and it forwards panel requests to this Vite server on a private
+ * port. Running `npm run ui:dev` directly is the optional frontend-only mode;
+ * there the dev server proxies the gateway's own routes to a router already
+ * running on :999 (override with MULTIAI_ROUTER_ORIGIN), with no CORS shim and
+ * no second code path for API calls. Production uses the same relative URLs,
+ * served from the same origin.
  */
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
-const ROUTER_ORIGIN = process.env.MULTIAI_ROUTER_ORIGIN || "http://localhost:8788";
+const ROUTER_ORIGIN = process.env.MULTIAI_ROUTER_ORIGIN || "http://localhost:999";
 
 export default defineConfig({
   root: projectRoot,

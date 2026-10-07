@@ -22,7 +22,7 @@ test("unset or empty numeric env values keep their defaults", () => {
     const c = loadConfig(env);
     assert.equal(c.timeoutMs, 120000);
     assert.equal(c.connectTimeoutMs, 30000);
-    assert.equal(c.port, 8788);
+    assert.equal(c.port, 999);
   }
 });
 
