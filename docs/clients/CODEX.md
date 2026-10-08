@@ -1,60 +1,130 @@
-# Codex Setup with ApiRouter
+# Codex + ApiRouter Setup
 
-## 1. Start ApiRouter
+## 1. ApiRouter folder
 
-From the ApiRouter directory:
+PowerShell:
 
 ```powershell
-npm run start:all
+cd ApiRouter
+git pull origin main
+npm install
 ```
 
-For development:
+Linux / macOS / Termux:
+
+```bash
+cd ApiRouter
+git pull origin main
+npm install
+```
+
+## 2. Open ApiRouter .env
+
+Windows PowerShell:
+
+```powershell
+notepad .env
+```
+
+If `.env` does not exist:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+Linux / macOS / Termux:
+
+```bash
+nano .env
+```
+
+If `.env` does not exist:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+## 3. ApiRouter with API key
+
+Put the router client key in `.env`:
+
+```env
+APIROUTER_API_KEYS=YOUR_APIROUTER_KEY
+```
+
+Add the provider key and model you want to use. Example:
+
+```env
+GEMINI_API_KEYS=YOUR_GEMINI_KEY
+GEMINI_MODELS=gemini-3.8-flash
+```
+
+You can add other providers from `.env.example` in the same way.
+
+## 4. ApiRouter without API key
+
+For local use without client authentication:
+
+```env
+APIROUTER_API_KEYS=
+```
+
+Keep the provider API keys in `.env` as normal.
+
+Example:
+
+```env
+APIROUTER_API_KEYS=
+
+GEMINI_API_KEYS=YOUR_GEMINI_KEY
+GEMINI_MODELS=gemini-3.8-flash
+```
+
+## 5. Start ApiRouter
+
+Development:
 
 ```powershell
 npm run dev:all
 ```
 
-ApiRouter runs on:
+Production:
+
+```powershell
+npm run start:all
+```
+
+Router:
 
 ```text
 http://localhost:8788
 ```
 
-Codex uses:
+Codex endpoint:
 
 ```text
 http://localhost:8788/v1
 ```
 
-## 2. Set the ApiRouter API key
+## 6. Open Codex config
 
-If `APIROUTER_API_KEYS` is configured in ApiRouter, set the same client key for Codex.
-
-PowerShell:
-
-```powershell
-$env:APIROUTER_API_KEY="YOUR_APIROUTER_KEY"
-```
-
-To save it permanently:
-
-```powershell
-setx APIROUTER_API_KEY "YOUR_APIROUTER_KEY"
-```
-
-After using `setx`, open a new terminal.
-
-If ApiRouter does not require authentication, this step is not required.
-
-## 3. Configure Codex
-
-Open the Codex configuration file:
+Windows PowerShell:
 
 ```powershell
 notepad $HOME\.codex\config.toml
 ```
 
-Add:
+Linux / macOS / Termux:
+
+```bash
+nano ~/.codex/config.toml
+```
+
+## 7. Codex config — ApiRouter API key enabled
+
+If `APIROUTER_API_KEYS` is set in ApiRouter, use:
 
 ```toml
 model_provider = "multi_ai_router"
@@ -66,54 +136,103 @@ env_key = "APIROUTER_API_KEY"
 wire_api = "responses"
 ```
 
-Save the file.
+Set the same key for Codex.
 
-## 4. Start Codex
-
-Run:
+PowerShell:
 
 ```powershell
-codex
+$env:APIROUTER_API_KEY="YOUR_APIROUTER_KEY"
 ```
 
-Codex will send Responses API requests through ApiRouter.
-
-## 5. Select a model
-
-You can specify a model when starting Codex:
-
-```powershell
-codex --model YOUR_MODEL
-```
-
-Use a model configured in ApiRouter.
-
-## 6. Check ApiRouter
-
-Check the router health:
-
-```powershell
-curl http://localhost:8788/health
-```
-
-Check available models:
-
-```powershell
-curl http://localhost:8788/v1/models
-```
-
-## 7. Linux / macOS / Termux
-
-Set the client key:
+Linux / macOS / Termux:
 
 ```bash
 export APIROUTER_API_KEY="YOUR_APIROUTER_KEY"
 ```
 
-Open Codex config:
+## 8. Codex config — no ApiRouter API key
+
+If ApiRouter has:
+
+```env
+APIROUTER_API_KEYS=
+```
+
+use:
+
+```toml
+model_provider = "multi_ai_router"
+
+[model_providers.multi_ai_router]
+name = "ApiRouter"
+base_url = "http://localhost:8788/v1"
+wire_api = "responses"
+```
+
+No `APIROUTER_API_KEY` is required.
+
+## 9. Start Codex
+
+```powershell
+codex
+```
+
+Linux / macOS / Termux:
 
 ```bash
-nano ~/.codex/config.toml
+codex
+```
+
+## 10. Select a model
+
+Use a model configured in ApiRouter:
+
+```powershell
+codex --model YOUR_MODEL
+```
+
+Example:
+
+```powershell
+codex --model gemini-3.8-flash
+```
+
+## 11. Check ApiRouter
+
+Health:
+
+```powershell
+curl http://localhost:8788/health
+```
+
+Models:
+
+```powershell
+curl http://localhost:8788/v1/models
+```
+
+## 12. Quick setup — API key
+
+```powershell
+cd ApiRouter
+git pull origin main
+npm install
+notepad .env
+npm run start:all
+```
+
+Set in `.env`:
+
+```env
+APIROUTER_API_KEYS=YOUR_APIROUTER_KEY
+GEMINI_API_KEYS=YOUR_GEMINI_KEY
+GEMINI_MODELS=gemini-3.8-flash
+```
+
+Open Codex config:
+
+```powershell
+notepad $HOME\.codex\config.toml
 ```
 
 Use:
@@ -128,21 +247,30 @@ env_key = "APIROUTER_API_KEY"
 wire_api = "responses"
 ```
 
-Then run:
+Then:
 
-```bash
+```powershell
+$env:APIROUTER_API_KEY="YOUR_APIROUTER_KEY"
 codex
 ```
 
-## 8. Project-level configuration
+## 13. Quick setup — no API key
 
-To configure Codex for a single project, create or edit:
+Set in `.env`:
 
-```text
-.codex/config.toml
+```env
+APIROUTER_API_KEYS=
+GEMINI_API_KEYS=YOUR_GEMINI_KEY
+GEMINI_MODELS=gemini-3.8-flash
 ```
 
-Use the same provider configuration:
+Open:
+
+```powershell
+notepad $HOME\.codex\config.toml
+```
+
+Use:
 
 ```toml
 model_provider = "multi_ai_router"
@@ -150,36 +278,11 @@ model_provider = "multi_ai_router"
 [model_providers.multi_ai_router]
 name = "ApiRouter"
 base_url = "http://localhost:8788/v1"
-env_key = "APIROUTER_API_KEY"
 wire_api = "responses"
 ```
 
-## 9. Reset Codex configuration
-
-Remove the ApiRouter provider configuration from:
-
-```text
-~/.codex/config.toml
-```
-
-On Windows:
+Then:
 
 ```powershell
-notepad $HOME\.codex\config.toml
-```
-
-## 10. Quick setup
-
-Windows PowerShell:
-
-```powershell
-cd ApiRouter
-npm run start:all
-```
-
-In another terminal:
-
-```powershell
-$env:APIROUTER_API_KEY="YOUR_APIROUTER_KEY"
 codex
 ```
