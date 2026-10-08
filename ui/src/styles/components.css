@@ -1134,6 +1134,29 @@
   color: var(--text-dim);
 }
 .livelog__pool--vision { color: var(--info); }
+
+/* Input / output token tags of a call that answered. */
+.livelog__tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: var(--fs-xs);
+}
+.livelog__token {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.livelog__token b { font-weight: 600; color: var(--text); }
+.livelog__token--in { border-color: color-mix(in srgb, var(--info) 45%, var(--border)); }
+.livelog__token--out { border-color: color-mix(in srgb, var(--ok, var(--info)) 45%, var(--border)); }
+.livelog__tokens-none { padding: 1px 0; }
 /* A call that is still running: a pulsing dot ahead of its state. */
 .livelog__type--live::before {
   content: "";
