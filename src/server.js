@@ -45,6 +45,8 @@ import {
   convertCodexJson,
   streamToResponses,
   customToolNames,
+  codexToolDefs,
+  describeCodexTools,
   estimateResponsesInputTokens
 } from "./codex-bridge.js";
 import {
@@ -595,8 +597,12 @@ async function proxyRequest(req, res, protocol, pathname) {
   // `sessionId` scopes the Gemini thought-signature store: a signature captured
   // for this session is only echoed back inside the same session (see
   // anthropic-bridge.js). The default session keeps the historical behaviour.
+  if (bridgeKind === "codex" && DEBUG_INGRESS) {
+    const d = describeCodexTools(body);
+    console.log(`[CODEX_TOOLS] sent=${JSON.stringify(d.sent)} forwarded=${JSON.stringify(d.forwarded)} dropped=${JSON.stringify(d.dropped)}`);
+  }
   const bridgeCtx = bridgeKind === "codex"
-    ? { customTools: customToolNames(body), inputTokens: estimateResponsesInputTokens(body), sessionId: sessionInfo.id }
+    ? { customTools: customToolNames(body), tools: codexToolDefs(body), inputTokens: estimateResponsesInputTokens(body), sessionId: sessionInfo.id }
     : bridgeKind === "chat"
       ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true, sessionId: sessionInfo.id }
       : { sessionId: sessionInfo.id };
