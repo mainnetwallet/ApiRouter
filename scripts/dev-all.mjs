@@ -22,7 +22,7 @@ function killProcessTree(child) {
 
   try {
     if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(pid), "/t", /f/], { stdio: "ignore" });
+      spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore" });
     } else {
       process.kill(-pid, "SIGTERM");
     }
