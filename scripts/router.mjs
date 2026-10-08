@@ -22,9 +22,9 @@ async function checkPort(port) {
 }
 
 function openBrowser(url) {
-  const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
+  const command = process.platform === "win32" ? "rundll32.exe" : process.platform === "darwin" ? "open" : "xdg-open";
   setTimeout(() => {
-    const args = process.platform === "win32" ? ["/c", "start", url] : [url];
+    const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
     spawn(command, args, { stdio: "ignore" }).on("error", () => {});
   }, 2000);
 }
@@ -81,4 +81,6 @@ main().catch((err) => {
   console.error("[ApiRouter] Fatal error:", err);
   process.exit(1);
 });
+
+
 

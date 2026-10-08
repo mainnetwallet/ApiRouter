@@ -49,3 +49,21 @@ test('Router uses direct process.execPath without shell:true', () => {
   assert.strictEqual(content.includes('npmCmd'), true);
 });
 
+
+
+test("dev:all exits non-zero when 5173 is occupied and leaves process alive", async () => {
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(5173, "127.0.0.1", resolve));
+  try {
+    const child = spawn(process.execPath, ["scripts/router.mjs"], { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (d) => { stderr += d.toString(); });
+    const code = await new Promise((resolve) => child.on("exit", (c) => resolve(c)));
+    assert.notStrictEqual(code, 0);
+    assert.match(stderr, /5173 is already in use/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+
