@@ -50,3 +50,21 @@ test("stream: marker split across chunks becomes a function_call, normal text st
   assert.match(b, /response\.output_text\.delta/);
   assert.doesNotMatch(b, /"type":"function_call"/);
 });
+
+test("functions.exec header and unescaped inner quotes still become a call", () => {
+  const html = '<|message_model|>exec<|content_invoke_tool_json|>{"name":"exec","args":{"command":"cat > a.html << \'EOF\'\\n<html lang="en">\\nEOF"}}<|end_message|>';
+  const { calls } = extractTextToolCalls(html, execTools);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.cmd, "cat > a.html << 'EOF'\n<html lang=\"en\">\nEOF");
+});
+
+test("broken {\"name\":\"args\":{...}} payload with functions. prefix", () => {
+  const broken = '<|message_model|>functions.exec<|content_invoke_tool_json|>{"name":"args":{"command":"git clone https://$(echo "tok" | base64 -d 2>/dev/null || echo "tok")@github.com/a/b.git 2>&1"}}<|end_message|>';
+  for (const tools of [shellTools, execTools, [{ name: "exec", parameters: { type: "object", properties: { command: { type: "string" } } } }]]) {
+    const { text, calls } = extractTextToolCalls(broken, tools);
+    assert.equal(text, "");
+    assert.equal(calls.length, 1);
+    const cmd = calls[0].args.cmd ?? (Array.isArray(calls[0].args.command) ? calls[0].args.command[2] : calls[0].args.command);
+    assert.equal(cmd, 'git clone https://$(echo "tok" | base64 -d 2>/dev/null || echo "tok")@github.com/a/b.git 2>&1');
+  }
+});

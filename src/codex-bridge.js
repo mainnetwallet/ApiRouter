@@ -195,14 +195,13 @@ const TEXT_CALL_RE = /<\|message_model\|>\s*([^<\s]*)\s*<\|content_invoke_tool_j
 const SHELL_NAMES = new Set(["exec", "shell", "bash", "sh", "run", "run_command", "execute", "terminal", "local_shell", "shell_command", "exec_command"]);
 const SHELL_TARGETS = ["exec_command", "shell", "shell_command", "local_shell", "container.exec"];
 
-function mapTextCall(rawName, rawArgs, tools) {
-  if (!tools.length) return null;
-  const args = rawArgs && typeof rawArgs === "object" ? rawArgs : {};
-  const exact = tools.find((t) => t.name === rawName);
-  if (exact) return { name: exact.name, args: rawArgs ?? {} };
-  if (!SHELL_NAMES.has(String(rawName).toLowerCase())) return null;
-  const target = SHELL_TARGETS.map((n) => tools.find((t) => t.name === n)).find(Boolean);
-  if (!target) return null;
+/** Drops a harmony-style `functions.` namespace: `functions.exec` -> `exec`. */
+function bareToolName(name) {
+  return String(name || "").trim().replace(/^functions\./i, "");
+}
+
+/** Arguments for a declared shell-like tool, shaped by that tool's own schema. */
+function shellArgs(target, args) {
   const raw = args.command ?? args.cmd;
   const cmd = Array.isArray(raw) ? raw.join(" ") : typeof raw === "string" ? raw : "";
   if (!cmd) return null;
@@ -212,7 +211,52 @@ function mapTextCall(rawName, rawArgs, tools) {
   else if (props.command?.type === "array") mapped.command = ["bash", "-lc", cmd];
   else mapped.command = cmd;
   if (props.workdir && typeof args.workdir === "string") mapped.workdir = args.workdir;
-  return { name: target.name, args: mapped };
+  return mapped;
+}
+
+function mapTextCall(rawName, rawArgs, tools) {
+  if (!tools.length) return null;
+  const name = bareToolName(rawName);
+  const args = rawArgs && typeof rawArgs === "object" ? rawArgs : {};
+  const shellLike = SHELL_NAMES.has(name.toLowerCase());
+  const exact = tools.find((t) => t.name === name || t.name === rawName);
+  if (exact) {
+    if (shellLike) {
+      const mapped = shellArgs(exact, args);
+      if (mapped) return { name: exact.name, args: mapped };
+    }
+    return { name: exact.name, args: rawArgs ?? {} };
+  }
+  if (!shellLike) return null;
+  const target = SHELL_TARGETS.map((n) => tools.find((t) => t.name === n)).find(Boolean);
+  if (!target) return null;
+  const mapped = shellArgs(target, args);
+  return mapped ? { name: target.name, args: mapped } : null;
+}
+
+/** Undoes JSON string escapes by hand (the text is often not valid JSON). */
+function looseUnescape(text) {
+  return text.replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})/g, (_, e) => {
+    if (e[0] === "u") return String.fromCharCode(parseInt(e.slice(1), 16));
+    return { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" }[e] ?? e;
+  });
+}
+
+/**
+ * Models often write this payload as NOT-quite-JSON: inner double quotes left
+ * unescaped (`"command":"echo "hi""`) or a broken `{"name":"args":{...}}`. Try
+ * strict JSON first, then pull the single string argument out by hand.
+ */
+function parseTextCallPayload(payload) {
+  try {
+    const parsed = JSON.parse(payload);
+    if (parsed && typeof parsed === "object") {
+      return { name: typeof parsed.name === "string" ? parsed.name : "", args: parsed.args ?? parsed.arguments ?? {} };
+    }
+  } catch { /* fall through to the lenient reader */ }
+  const m = /"(command|cmd|input)"\s*:\s*"([\s\S]*)"\s*\}\s*\}?\s*$/.exec(payload);
+  if (!m) return null;
+  return { name: "", args: { [m[1]]: looseUnescape(m[2]) } };
 }
 
 /** Pulls text-encoded tool calls out of `text`. Returns { text, calls }. */
@@ -220,11 +264,10 @@ export function extractTextToolCalls(text, tools = []) {
   const calls = [];
   if (typeof text !== "string" || !text.includes(TEXT_CALL_START)) return { text, calls };
   const rest = text.replace(TEXT_CALL_RE, (whole, header, payload) => {
-    let parsed;
-    try { parsed = JSON.parse(payload); } catch { return whole; }
-    if (!parsed || typeof parsed !== "object") return whole;
-    const name = typeof parsed.name === "string" && parsed.name ? parsed.name : header;
-    const mapped = mapTextCall(name, parsed.args ?? parsed.arguments ?? {}, tools);
+    const parsed = parseTextCallPayload(payload);
+    if (!parsed) return whole;
+    const name = bareToolName(header) || bareToolName(parsed.name);
+    const mapped = mapTextCall(name, parsed.args, tools);
     if (!mapped) return whole;
     calls.push(mapped);
     return "";
