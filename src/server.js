@@ -206,18 +206,13 @@ function extractUsage(parsed) {
   if (!parsed || typeof parsed !== "object") return { tokens: null, finishReason: null };
 
   const usage = parsed.usage ?? parsed.usageMetadata ?? null;
-  const inputTokens = Number.isFinite(usage?.prompt_tokens) ? usage.prompt_tokens
-    : Number.isFinite(usage?.input_tokens) ? usage.input_tokens
-      : Number.isFinite(usage?.promptTokenCount) ? usage.promptTokenCount : null;
-  const outputTokens = Number.isFinite(usage?.completion_tokens) ? usage.completion_tokens
-    : Number.isFinite(usage?.output_tokens) ? usage.output_tokens
-      : Number.isFinite(usage?.candidatesTokenCount) ? usage.candidatesTokenCount : null;
-  const reportedTotal = Number.isFinite(usage?.total_tokens) ? usage.total_tokens
-    : Number.isFinite(usage?.totalTokens) ? usage.totalTokens
-      : Number.isFinite(usage?.totalTokenCount) ? usage.totalTokenCount : null;
-  const tokens = Number.isFinite(reportedTotal) ? reportedTotal
-    : (Number.isFinite(inputTokens) || Number.isFinite(outputTokens))
-      ? (inputTokens || 0) + (outputTokens || 0) : null;
+  const tokens = Number.isFinite(usage?.total_tokens)
+    ? usage.total_tokens
+    : Number.isFinite(usage?.totalTokens)
+      ? usage.totalTokens
+      : Number.isFinite(usage?.input_tokens) || Number.isFinite(usage?.output_tokens)
+        ? (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0)
+        : null;
 
   const candidate =
     parsed.choices?.[0]?.finish_reason ??
@@ -226,8 +221,6 @@ function extractUsage(parsed) {
     null;
 
   return {
-    inputTokens,
-    outputTokens,
     tokens,
     finishReason: typeof candidate === "string" ? candidate : null
   };
@@ -773,8 +766,6 @@ async function proxy(req, res, protocol, pathname) {
       httpStatus: result.upstream.status,
       latencyMs,
       totalMs: Date.now() - receivedAt,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
       tokens: usage.tokens,
       finishReason: usage.finishReason,
       outcome: "success"
