@@ -41,8 +41,32 @@ export function healthProbePlan(target) {
   if (target.provider === "cloudflare" && /\/accounts\/[^/]+\/ai\/v1$/i.test(base)) {
     return {
       provider: "cloudflare",
+      method: "GET",
       url: base.replace(/\/v1$/i, "") + "/models/search?per_page=1",
       headers: { accept: "application/json", authorization: "Bearer " + target.apiKey }
+    };
+  }
+
+  // Cohere's OpenAI Compatibility API is chat-first: the compatibility base
+  // is guaranteed for chat completions, while a generic GET /models probe is
+  // not a reliable health signal. Probe the exact route used by Playground,
+  // with the smallest useful generation request.
+  if (target.provider === "cohere" && protocols.includes("openai-chat")) {
+    return {
+      provider: "cohere-chat",
+      method: "POST",
+      url: base + "/chat/completions",
+      headers: {
+        accept: "application/json",
+        authorization: "Bearer " + target.apiKey,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        model: target.model,
+        messages: [{ role: "user", content: "health" }],
+        max_tokens: 1,
+        stream: false
+      })
     };
   }
 
@@ -51,6 +75,7 @@ export function healthProbePlan(target) {
     applyConfiguredClientHeaders(headers, target);
     return {
       provider: target.provider === "agentrouter" ? "agentrouter-openai" : "openai-compatible",
+      method: "GET",
       url: versionedBase(base, OPENAI_API_VERSION) + "/models",
       headers
     };
@@ -83,7 +108,12 @@ export async function probeTargetHealth(target, options = {}) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = Date.now();
   try {
-    const upstream = await fetchImpl(plan.url, { method: "GET", headers: plan.headers, signal: controller.signal });
+    const upstream = await fetchImpl(plan.url, {
+      method: plan.method || "GET",
+      headers: plan.headers,
+      ...(plan.body ? { body: plan.body } : {}),
+      signal: controller.signal
+    });
     const latencyMs = Date.now() - startedAt;
     try { await upstream.body?.cancel(); } catch {}
     return { ...classifyProbeStatus(upstream.status), status: upstream.status, latencyMs };
