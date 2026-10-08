@@ -37,6 +37,7 @@ nano ~/.codex/config.toml
 ### With ApiRouter API key
 
 ```toml
+model = "Router"
 model_provider = "multi_ai_router"
 
 [model_providers.multi_ai_router]
@@ -61,6 +62,7 @@ export APIROUTER_API_KEY="YOUR_APIROUTER_KEY"
 ### Without ApiRouter API key
 
 ```toml
+model = "Router"
 model_provider = "multi_ai_router"
 
 [model_providers.multi_ai_router]
@@ -78,5 +80,5 @@ codex
 ## Select model
 
 ```powershell
-codex --model YOUR_MODEL
+codex --model Router
 ```
