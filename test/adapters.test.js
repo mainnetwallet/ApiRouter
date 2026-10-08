@@ -119,3 +119,21 @@ test("other providers do not receive AgentRouter client headers", () => {
   assert.equal(request.options.headers.originator, undefined);
   assert.equal(request.options.headers.version, undefined);
 });
+
+test("OpenAI chat request does not add /v1 after another version segment (Z.ai /v4)", () => {
+  const request = buildUpstreamRequest(
+    { provider: "zai", model: "glm-5.3", baseUrl: "https://api.z.ai/api/paas/v4", apiKey: "secret" },
+    "openai-chat",
+    { messages: [{ role: "user", content: "hi" }] }
+  );
+  assert.equal(request.url, "https://api.z.ai/api/paas/v4/chat/completions");
+});
+
+test("OpenAI chat request still adds /v1 when the base has no version segment", () => {
+  const request = buildUpstreamRequest(
+    { provider: "x", model: "m", baseUrl: "https://example.test", apiKey: "secret" },
+    "openai-chat",
+    { messages: [] }
+  );
+  assert.equal(request.url, "https://example.test/v1/chat/completions");
+});

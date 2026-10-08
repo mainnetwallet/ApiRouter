@@ -355,7 +355,7 @@ export function buildCodexRequest(target, upstreamProtocol, body, incomingHeader
   if (upstreamProtocol === "openai-chat") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers.authorization = "Bearer " + target.apiKey;
-    const url = joinUrl(base, base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions");
+    const url = joinUrl(base, /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions");
     return { url, options: { method: "POST", headers, body: JSON.stringify(toOpenAIChatFromResponses(body, target.model)) } };
   }
   if (upstreamProtocol === "gemini") {

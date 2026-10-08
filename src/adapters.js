@@ -40,11 +40,11 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
     headers["anthropic-version"] = incomingHeaders["anthropic-version"] || "2023-06-01";
     if (incomingHeaders["anthropic-beta"]) headers["anthropic-beta"] = incomingHeaders["anthropic-beta"];
   } else if (protocol === "openai-responses") {
-    url = joinUrl(base, base.endsWith("/v1") ? "responses" : "v1/responses");
+    url = joinUrl(base, /\/v\d+$/i.test(base) ? "responses" : "v1/responses");
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
   } else if (protocol === "openai-chat") {
-    url = joinUrl(base, base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions");
+    url = joinUrl(base, /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions");
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
   } else if (protocol === "gemini") {

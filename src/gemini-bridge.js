@@ -227,7 +227,7 @@ export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { s
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
 
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
-  const path = base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions";
+  const path = /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions";
   return {
     url: joinUrl(base, path),
     options: {
