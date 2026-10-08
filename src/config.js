@@ -113,17 +113,20 @@ export function loadConfig(env = process.env) {
   const providers = readProviders(env);
   const visionProviders = readProviders(env, { vision: true });
   const retryRaw = env.RETRY_STATUS_CODES;
-  const retryableValues = split(retryRaw === undefined || String(retryRaw).trim() === ""
+  const retrySource = retryRaw === undefined || String(retryRaw).trim() === ""
     ? DEFAULT_RETRY_STATUS_CODES.join(",")
-    : retryRaw);
-  if (retryRaw !== undefined && String(retryRaw).trim() !== "") {
-    for (const raw of retryableValues) {
-      const value = Number(raw);
-      if (!Number.isInteger(value) || value < 100 || value > 599) {
-        throw new Error(`Invalid RETRY_STATUS_CODES: expected comma-separated HTTP status codes from 100 to 599, got "${String(retryRaw).slice(0, 120)}"`);
-      }
-    }
+    : String(retryRaw);
+  const retryParts = retrySource.split(",").map((v) => v.trim());
+  if (retryParts.some((v) => !v)) {
+    throw new Error(`Invalid RETRY_STATUS_CODES: expected comma-separated HTTP status codes from 100 to 599, got "${String(retryRaw).slice(0, 120)}"`);
   }
+  const retryableValues = retryParts.map((raw) => {
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 100 || value > 599) {
+      throw new Error(`Invalid RETRY_STATUS_CODES: expected comma-separated HTTP status codes from 100 to 599, got "${String(retryRaw).slice(0, 120)}"`);
+    }
+    return value;
+  });
   return {
     routerApiKeys: split(env.APIROUTER_API_KEYS),
     port: readNumber(env, "PORT", 8788, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
