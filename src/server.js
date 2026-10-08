@@ -319,7 +319,7 @@ async function proxy(req, res, protocol, pathname) {
   }
 
   let body;
-  try { body = await readJsonBody(req); }
+  try { body = await readJsonBody(req, config.maxBodyBytes); }
   catch (error) {
     recordRequest({
       pendingSeq: liveSeq,
@@ -507,6 +507,19 @@ async function proxy(req, res, protocol, pathname) {
                 ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream })
                 : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
         const controller = new AbortController();
+        // If the client goes away while an upstream attempt is pending, abort
+        // that attempt immediately. Do not turn a client cancellation into a
+        // provider failure and start spending credentials on fallback targets.
+        let clientDisconnected = false;
+        const abortForClient = () => {
+          clientDisconnected = true;
+          controller.abort();
+        };
+        const onResponseClose = () => {
+          if (!res.writableEnded) abortForClient();
+        };
+        req.once("aborted", abortForClient);
+        res.once("close", onResponseClose);
         // fetch() resolves once response headers arrive, so for streaming
         // requests this is a time-to-first-response limit: a hung provider
         // fails over after connectTimeoutMs rather than the full request timeout.
@@ -590,6 +603,13 @@ async function proxy(req, res, protocol, pathname) {
           return { upstream, target, upstreamProtocol, translated };
         } catch (error) {
           if (isAbortError(error)) {
+            if (clientDisconnected) {
+              const cancelled = new Error("Client disconnected");
+              cancelled.status = 499;
+              cancelled.retryable = false;
+              attempt(false, cancelled.status, cancelled.message);
+              throw cancelled;
+            }
             const timeout = toTimeoutError("Upstream request timed out");
             attempt(false, timeout.status, timeout.message);
             throw timeout;
@@ -603,7 +623,11 @@ async function proxy(req, res, protocol, pathname) {
             if (error && typeof error === "object" && !Number.isInteger(error.status)) error.retryable = true;
           }
           throw error;
-        } finally { clearTimeout(timer); }
+        } finally {
+          clearTimeout(timer);
+          req.off("aborted", abortForClient);
+          res.off("close", onResponseClose);
+        }
       },
       config.retryableStatus,
       // A pin is a one-off override (e.g. the Playground testing a key): its
