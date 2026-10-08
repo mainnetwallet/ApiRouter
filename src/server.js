@@ -24,6 +24,7 @@ import { ClientAbortError, RouteSession, SessionStore, withFallback } from "./ro
 import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream, parseGeminiPath } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
+import { usageFrom, totalOf, createUsageTap, tapBytes, tapEvents } from "./usage.js";
 import { createStaticHandler } from "./static-files.js";
 import { createDevUiProxy, isReservedWhenDecoded } from "./dev-proxy.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
@@ -265,13 +266,13 @@ function extractUsage(parsed) {
   if (!parsed || typeof parsed !== "object") return { tokens: null, finishReason: null };
 
   const usage = parsed.usage ?? parsed.usageMetadata ?? null;
+  // The provider's own total when it gives one, else input + output (cache included).
+  const split = usageFrom(parsed);
   const tokens = Number.isFinite(usage?.total_tokens)
     ? usage.total_tokens
     : Number.isFinite(usage?.totalTokens)
       ? usage.totalTokens
-      : Number.isFinite(usage?.input_tokens) || Number.isFinite(usage?.output_tokens)
-        ? (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0)
-        : null;
+      : totalOf(split);
 
   const candidate =
     parsed.choices?.[0]?.finish_reason ??
@@ -281,7 +282,9 @@ function extractUsage(parsed) {
 
   return {
     tokens,
-    finishReason: typeof candidate === "string" ? candidate : null
+    finishReason: typeof candidate === "string" ? candidate : null,
+    inputTokens: split?.inputTokens ?? null,
+    outputTokens: split?.outputTokens ?? null
   };
 }
 
@@ -644,7 +647,7 @@ async function proxy(req, res, protocol, pathname) {
         // them. This is the true fallback chain, observed rather than
         // reconstructed from the final error.
         let recorded = false;
-        const attempt = (ok, status, errorMessage) => {
+        const attempt = (ok, status, errorMessage, usage = null) => {
           // An attempt settles exactly once: the first verdict is the real one.
           if (recorded) return;
           recorded = true;
@@ -663,14 +666,19 @@ async function proxy(req, res, protocol, pathname) {
             startedAt: attemptStartedAt,
             completedAt,
             latencyMs: completedAt - attemptStartedAt,
-            errorMessage: sanitizeMessage(errorMessage)
+            errorMessage: sanitizeMessage(errorMessage),
+            // Only what the provider reported; set on the attempt that answered.
+            inputTokens: usage?.inputTokens ?? null,
+            outputTokens: usage?.outputTokens ?? null
           });
           finishAttemptEvent(attemptId, {
             ok,
             status,
             completedAt,
             latencyMs: completedAt - attemptStartedAt,
-            errorMessage
+            errorMessage,
+            inputTokens: usage?.inputTokens ?? null,
+            outputTokens: usage?.outputTokens ?? null
           });
           progressRequest(liveSeq, { attempts, inflight: null });
         };
@@ -829,12 +837,14 @@ async function proxy(req, res, protocol, pathname) {
 
       if (!wantsStream) {
         let converted;
+        let upstreamUsage = null;
         try {
           const upstreamJson = JSON.parse(new TextDecoder().decode(await readUpstreamBody(result.upstream.body, {
             idleMs: config.streamIdleTimeoutMs,
             deadlineAt: result.deadlineAt,
             clientSignal: clientGone.signal
           })));
+          upstreamUsage = usageFrom(upstreamJson);
           converted = bridgeKind === "codex"
             ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
             : bridgeKind === "chat"
@@ -883,10 +893,12 @@ async function proxy(req, res, protocol, pathname) {
           const message = clientMessage(error?.message) || "Upstream response could not be read";
           return json(res, 502, { error: { message, type: "upstream_error" } }, meta);
         }
-        settleAttempt?.(true, result.upstream.status, null);
+        settleAttempt?.(true, result.upstream.status, null, upstreamUsage);
         commit(true, { status: result.upstream.status });
         record("success", {
-          tokens: convertedTokens(converted),
+          tokens: convertedTokens(converted) ?? totalOf(upstreamUsage),
+          inputTokens: upstreamUsage?.inputTokens ?? null,
+          outputTokens: upstreamUsage?.outputTokens ?? null,
           finishReason: converted?.stop_reason ?? converted?.incomplete_details?.reason ?? converted?.choices?.[0]?.finish_reason ?? converted?.status ?? null
         });
         return json(res, 200, converted, meta);
@@ -897,12 +909,13 @@ async function proxy(req, res, protocol, pathname) {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...meta });
       let streamOutcome = "truncated";
       let streamError = null;
+      const usageTap = createUsageTap();
       try {
-        const upstreamEvents = sseData(guardUpstreamStream(result.upstream.body, {
+        const upstreamEvents = tapEvents(sseData(guardUpstreamStream(result.upstream.body, {
           idleMs: config.streamIdleTimeoutMs,
           deadlineAt: result.deadlineAt,
           clientSignal: clientGone.signal
-        }), { maxEventBytes: config.maxSseEventBytes });
+        }), { maxEventBytes: config.maxSseEventBytes }), usageTap);
         const events = bridgeKind === "codex"
           ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
           : bridgeKind === "chat"
@@ -922,9 +935,15 @@ async function proxy(req, res, protocol, pathname) {
       }
 
       if (streamOutcome === "completed") {
-        settleAttempt?.(true, result.upstream.status, null);
+        const streamUsage = usageTap.usage;
+        settleAttempt?.(true, result.upstream.status, null, streamUsage);
         commit(true, { status: result.upstream.status });
-        record("success", { streamOutcome });
+        record("success", {
+          streamOutcome,
+          tokens: totalOf(streamUsage),
+          inputTokens: streamUsage?.inputTokens ?? null,
+          outputTokens: streamUsage?.outputTokens ?? null
+        });
       } else if (streamOutcome === "aborted") {
         settleAttempt?.(false, null, "Client disconnected");
         commit(false, { clientAborted: true });
@@ -959,7 +978,9 @@ async function proxy(req, res, protocol, pathname) {
     // held to the same byte ceiling, enforced on the bytes actually read.
     const lengthHeader = result.upstream.headers.get("content-length");
     const declaredLength = lengthHeader === null ? Number.NaN : Number(lengthHeader);
-    let usage = { tokens: null, finishReason: null };
+    let usage = { tokens: null, finishReason: null, inputTokens: null, outputTokens: null };
+    // A streamed (SSE) body is watched for the usage the provider reports; its bytes are not touched.
+    const passthroughTap = contentType.includes("text/event-stream") ? createUsageTap() : null;
     let buffered = null;
     // When inspection read past the ceiling, the bytes already consumed plus
     // the rest of the body, still streamed (with backpressure) to the client.
@@ -1018,6 +1039,8 @@ async function proxy(req, res, protocol, pathname) {
       latencyMs,
       totalMs: Date.now() - receivedAt,
       tokens: usage.tokens,
+      inputTokens: usage.inputTokens ?? null,
+      outputTokens: usage.outputTokens ?? null,
       finishReason: usage.finishReason,
       outcome,
       ...extra
@@ -1062,14 +1085,12 @@ async function proxy(req, res, protocol, pathname) {
         // pipeline() applies backpressure and tears down the upstream reader
         // when the client disconnects; the idle guard bounds the gap between
         // chunks after the headers have arrived.
-        await pipeline(
-          Readable.from(replay ?? guardUpstreamStream(result.upstream.body, {
-            idleMs: config.streamIdleTimeoutMs,
-            deadlineAt: result.deadlineAt,
-            clientSignal: clientGone.signal
-          })),
-          res
-        );
+        const source = replay ?? guardUpstreamStream(result.upstream.body, {
+          idleMs: config.streamIdleTimeoutMs,
+          deadlineAt: result.deadlineAt,
+          clientSignal: clientGone.signal
+        });
+        await pipeline(Readable.from(passthroughTap ? tapBytes(source, passthroughTap) : source), res);
       } else {
         res.end();
       }
@@ -1095,7 +1116,15 @@ async function proxy(req, res, protocol, pathname) {
 
     // Only now is the response actually delivered: commit health/sticky and
     // file the request as a success.
-    settleAttempt?.(true, result.upstream.status, null);
+    if (passthroughTap?.usage) {
+      usage = {
+        ...usage,
+        tokens: usage.tokens ?? totalOf(passthroughTap.usage),
+        inputTokens: passthroughTap.usage.inputTokens,
+        outputTokens: passthroughTap.usage.outputTokens
+      };
+    }
+    settleAttempt?.(true, result.upstream.status, null, usage);
     commit(true, { status: result.upstream.status });
     record("success", streamed ? { streamOutcome: "completed" } : {});
   } catch (error) {

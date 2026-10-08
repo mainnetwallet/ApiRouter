@@ -51,6 +51,8 @@ const pad = (value) => String(value).padStart(6, "0");
  * (`attemptId`, `attemptSeq`, `callIndex`) is added by the log, never by the
  * caller's position in an array.
  */
+const tokenCount = (value) => (Number.isFinite(value) && value >= 0 ? Math.round(value) : null);
+
 function plainAttempt(attempt, index) {
   return {
     index: index + 1,
@@ -71,7 +73,10 @@ function plainAttempt(attempt, index) {
     startedAt: Number.isFinite(attempt?.startedAt) ? attempt.startedAt : null,
     completedAt: Number.isFinite(attempt?.completedAt) ? attempt.completedAt : null,
     latencyMs: Number.isFinite(attempt?.latencyMs) ? attempt.latencyMs : null,
-    errorMessage: sanitizeMessage(attempt?.errorMessage)
+    errorMessage: sanitizeMessage(attempt?.errorMessage),
+    // What the provider itself reported for this call; null when it reported nothing.
+    inputTokens: tokenCount(attempt?.inputTokens),
+    outputTokens: tokenCount(attempt?.outputTokens)
   };
 }
 
@@ -218,7 +223,9 @@ export class RequestLog {
           startedAt: row.startedAt,
           completedAt: row.completedAt ?? (row.startedAt !== null && row.latencyMs !== null ? row.startedAt + row.latencyMs : null),
           latencyMs: row.latencyMs,
-          errorMessage: row.errorMessage
+          errorMessage: row.errorMessage,
+          inputTokens: row.inputTokens,
+          outputTokens: row.outputTokens
         });
       } else if (event && event.state === ATTEMPT_STATES.CALLING) {
         event = this.finishAttempt(row.attemptId, row);
@@ -233,6 +240,8 @@ export class RequestLog {
         row.completedAt = event.completedAt;
         row.latencyMs = event.latencyMs;
         row.errorMessage = event.errorMessage;
+        row.inputTokens = event.inputTokens ?? row.inputTokens;
+        row.outputTokens = event.outputTokens ?? row.outputTokens;
       } else {
         row.attemptSeq = null;
         row.callIndex = calls;
@@ -387,7 +396,9 @@ export class RequestLog {
       status: Number.isInteger(result.status) ? result.status : null,
       completedAt,
       latencyMs,
-      errorMessage: sanitizeMessage(result.errorMessage)
+      errorMessage: sanitizeMessage(result.errorMessage),
+      inputTokens: ok ? tokenCount(result.inputTokens) : null,
+      outputTokens: ok ? tokenCount(result.outputTokens) : null
     });
 
     const pending = this.pendingEntries.get(current.requestSeq);
@@ -487,6 +498,8 @@ export class RequestLog {
       totalMs: Number.isFinite(entry.totalMs) ? entry.totalMs : null,
       bytes: Number.isFinite(entry.bytes) ? entry.bytes : null,
       tokens: Number.isFinite(entry.tokens) ? entry.tokens : null,
+      inputTokens: tokenCount(entry.inputTokens),
+      outputTokens: tokenCount(entry.outputTokens),
       finishReason: sanitizeMessage(entry.finishReason, { maxLength: 60 }),
       errorType: entry.errorType ?? null,
       errorMessage: sanitizeMessage(entry.errorMessage),
@@ -589,6 +602,21 @@ export class RequestLog {
       total: this.entries.size,
       nextCursor
     };
+  }
+
+  /**
+   * Forget every FINISHED request and its attempt events, but keep requests that
+   * are still running (and their attempts), so a Clear pressed mid-request does
+   * not orphan a call that is about to be recorded. Returns how many finished
+   * requests were removed.
+   */
+  clearFinished() {
+    const removed = this.entries.size;
+    this.entries.clear();
+    for (const [attemptId, event] of this.attemptEvents) {
+      if (!this.pendingEntries.has(event.requestSeq)) this.attemptEvents.delete(attemptId);
+    }
+    return removed;
   }
 
   clear() {

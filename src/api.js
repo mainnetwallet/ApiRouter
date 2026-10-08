@@ -555,6 +555,12 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       });
     }
 
+    // Clear the request/attempt log (Live Logs "Clear"). Running requests stay.
+    if (pathname === "/api/requests" && req.method === "DELETE") {
+      const cleared = requestLog.clearFinished();
+      return sendJson(req, res, 200, { ok: true, cleared });
+    }
+
     // One event per real upstream attempt, oldest first. A request's attempts
     // share its `requestId`; no two attempts ever share an `attemptId`.
     if (pathname === "/api/attempts" && req.method === "GET") {
