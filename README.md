@@ -25,6 +25,7 @@ ApiRouter gives OpenAI-compatible and native AI clients one local endpoint while
 ```bash
 git clone https://github.com/mainnetwallet/ApiRouter.git
 cd ApiRouter
+git pull origin main
 npm install
 ```
 
