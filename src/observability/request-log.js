@@ -547,6 +547,22 @@ export class RequestLog {
     };
   }
 
+  /**
+   * Forget everything that has finished, for the Live Logs "Clear" button.
+   * Requests and attempts still running are kept, so they can finish normally.
+   * The counters are never reset, so cleared sequence numbers are not reused.
+   * Announces `cleared` so every open Live Logs view empties too.
+   */
+  clearCompleted() {
+    const cleared = this.entries.size;
+    this.entries.clear();
+    for (const [attemptId, event] of this.attemptEvents) {
+      if (event.state !== ATTEMPT_STATES.CALLING) this.attemptEvents.delete(attemptId);
+    }
+    this.#emit("cleared", { cleared, sequence: this.sequence });
+    return cleared;
+  }
+
   clear() {
     this.entries.clear();
     this.pendingEntries.clear();

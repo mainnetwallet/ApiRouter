@@ -498,6 +498,13 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       });
     }
 
+    // Clear the request log (Live Logs "Clear"). Finished requests and attempts
+    // are removed for good, so a page refresh cannot bring them back.
+    if (pathname === "/api/requests" && req.method === "DELETE") {
+      const cleared = requestLog.clearCompleted();
+      return sendJson(req, res, 200, { ok: true, cleared });
+    }
+
     // One event per real upstream attempt, oldest first. A request's attempts
     // share its `requestId`; no two attempts ever share an `attemptId`.
     if (pathname === "/api/attempts" && req.method === "GET") {

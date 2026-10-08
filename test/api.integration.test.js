@@ -211,6 +211,21 @@ test("a proxied request appears in /api/requests with its real target", async (t
   assert.ok(upstream.apiRequests.length === 1);
 });
 
+test("DELETE /api/requests clears the log for good, so a refresh cannot bring it back", async (t) => {
+  const { router } = await withRig(t);
+  await router.request("/v1/chat/completions", postJson({ model: "model-a", messages: [] }));
+  assert.equal((await getJson(router, "/api/requests")).body.total, 1);
+
+  const cleared = await router.request("/api/requests", { method: "DELETE" });
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(await cleared.json(), { ok: true, cleared: 1 });
+
+  const { body } = await getJson(router, "/api/requests");
+  assert.equal(body.total, 0);
+  assert.equal(body.entries.length, 0);
+  assert.equal(body.attempts.length, 0);
+});
+
 test("the fallback chain is recorded from real attempts", async (t) => {
   let n = 0;
   const { router } = await withRig(t, {

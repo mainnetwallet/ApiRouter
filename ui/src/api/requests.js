@@ -14,3 +14,8 @@ export function getRequests(query = {}, { signal } = {}) {
 export function getRequest(id, { signal } = {}) {
   return apiRequest(`/api/requests/${encodeURIComponent(id)}`, { signal });
 }
+
+/** Clear the gateway's request log (finished calls only); survives a refresh. */
+export function clearRequests({ signal } = {}) {
+  return apiRequest("/api/requests", { method: "DELETE", signal, retries: 0 });
+}

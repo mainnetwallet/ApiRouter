@@ -11,7 +11,7 @@ import { LiveLogList, formatRowsAsText } from "../components/domain/LiveLogList.
 import { CopyButton } from "../components/ui/CopyButton.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
-import { getRequests } from "../api/requests.js";
+import { clearRequests, getRequests } from "../api/requests.js";
 import { openRequestStream } from "../api/liveStream.js";
 import { MAX_ROWS, filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows } from "../lib/liveLogs.js";
 import { providerLabel } from "../lib/format.js";
@@ -97,7 +97,11 @@ export default function LiveLogs() {
       onState: setStreamState,
       onEvent: (event) => {
         setLastEventAt(Date.now());
-        if (event.event === "snapshot") {
+        if (event.event === "cleared") {
+          // Another tab (or this one) cleared the log: empty this view as well.
+          floor.current = Math.max(floor.current, maxSeq.current, event.data?.sequence ?? 0);
+          setRows([]);
+        } else if (event.event === "snapshot") {
           applyPayload(event.data);
         } else if (event.event === "attempt" || event.event === "pending" || event.event === "entry") {
           const { rows: fresh, maxSeq: next } = ingestEvent(event, {
@@ -150,8 +154,10 @@ export default function LiveLogs() {
 
   const clear = () => {
     // Everything seen so far is cleared; only calls that start later come back.
+    // The gateway forgets them too, so a refresh or a reconnect cannot restore them.
     floor.current = maxSeq.current;
     setRows([]);
+    clearRequests().catch(() => { /* the view is already clear; the next snapshot honours the floor */ });
   };
 
   const copyText = useCallback(() => formatRowsAsText(visible), [visible]);
