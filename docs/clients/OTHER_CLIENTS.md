@@ -5,7 +5,7 @@
 Use:
 
 ```text
-http://localhost:9999/v1
+http://localhost:8788/v1
 ```
 
 This pattern can work with clients that support a custom OpenAI-compatible provider, including:
@@ -29,7 +29,7 @@ directly, and a Gemini provider through the router's translation bridge.
 Clients using the Anthropic Messages protocol should use:
 
 ```text
-http://localhost:9999
+http://localhost:8788
 ```
 
 ## Gemini-compatible
@@ -37,7 +37,7 @@ http://localhost:9999
 Clients using the Gemini `generateContent` protocol should use:
 
 ```text
-http://localhost:9999
+http://localhost:8788
 ```
 
 ### Tool choice through the bridge
@@ -71,8 +71,7 @@ choice unset rather than assert something the request cannot support.
 
 ## Fallback
 
-Requests follow the configured order within each group of targets; health only
-decides eligibility, so a cooling target is skipped but never reorders the list. An exact match for the
+Requests are health-ranked within each group of targets. An exact match for the
 requested model is tried first, and only once those targets have failed or are
 cooling down does the request widen to the remaining compatible targets. A
 retryable failure moves the request to the next reachable target.

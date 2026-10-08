@@ -1,6 +1,5 @@
 import "dotenv/config";
 import http from "node:http";
-import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -13,24 +12,19 @@ import {
 } from "./capabilities.js";
 import {
   describeHealth,
+  rankTargets,
   healthRegistry,
   startHealthMonitor,
   refreshAllHealth
 } from "./health.js";
 import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
-import { fetchUpstream, isRedirectStatus } from "./upstream-fetch.js";
-import { guardUpstreamStream, readBoundedBody, bufferUpTo, isUpstreamFault, MAX_ERROR_BODY_BYTES } from "./upstream-body.js";
-import { ClientAbortError, RouteSession, SessionStore, withFallback } from "./router.js";
-import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream, parseGeminiPath } from "./adapters.js";
+import { RouteSession, SessionStore, withFallback } from "./router.js";
+import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
-import { usageFrom, totalOf, createUsageTap, tapBytes, tapEvents } from "./usage.js";
-import { createStreamDebug, redactForLog } from "./stream-debug.js";
 import { createStaticHandler } from "./static-files.js";
-import { createDevUiProxy, isReservedWhenDecoded } from "./dev-proxy.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, routeOrderByPool } from "./routing-plan.js";
-import { ManualSelection } from "./manual-selection.js";
 import { selectPool } from "./vision.js";
 import {
   bridgeProtocol,
@@ -46,8 +40,6 @@ import {
   convertCodexJson,
   streamToResponses,
   customToolNames,
-  codexToolDefs,
-  describeCodexTools,
   estimateResponsesInputTokens
 } from "./codex-bridge.js";
 import {
@@ -67,7 +59,6 @@ import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage, registerConfiguredSecrets } from "./observability/sanitize.js";
 import { validateRequestShape } from "./request-validation.js";
-import { INVALID_TOOL_ARGUMENTS } from "./bridge-errors.js";
 
 let config;
 try { config = loadConfig(); }
@@ -88,10 +79,6 @@ const textTargets = buildTargets(config.providers);
 const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
 // Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
 const targets = [...textTargets, ...visionTargets];
-
-// Operator-chosen model order (panel page "Model Manual Order"). Empty by default, in which
-// case routing is exactly what it was before.
-const manualSelection = new ManualSelection();
 // Which pools each configured model id belongs to. Static for the process
 // lifetime (it comes from the environment), so it is built once.
 const modelCapabilities = modelPoolIndex(config);
@@ -107,13 +94,6 @@ const HEALTH_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const staticFiles = createStaticHandler({
   root: fileURLToPath(new URL("../ui/dist/", import.meta.url))
 });
-
-/**
- * Development only. `npm run dev` sets MULTIAI_DEV_UI_ORIGIN to the private
- * Vite dev server so this gateway stays the one browser-facing origin. Unset
- * (as with `npm start`), this is null and `ui/dist` is served as before.
- */
-const devUi = createDevUiProxy(process.env.MULTIAI_DEV_UI_ORIGIN);
 
 /**
  * Largest JSON response that will be buffered to read token usage. Anything
@@ -147,22 +127,6 @@ function toTimeoutError(message) {
 }
 
 /**
- * Post-header body bounds (idle gap, absolute deadline, buffered size) live in
- * src/upstream-body.js. `fetch` resolves on headers, so the attempt timer only
- * bounds time-to-first-response; everything after is bounded there.
- */
-export { guardUpstreamStream };
-
-/**
- * Buffer a whole upstream body under the idle bound, the attempt's absolute
- * deadline and a byte ceiling. Failures carry the `streamCause` tag.
- */
-export async function readUpstreamBody(webStream, { idleMs = 0, deadlineAt = null, clientSignal = null, maxBytes = config.maxUpstreamBodyBytes } = {}) {
-  const { body } = await readBoundedBody(webStream, { idleMs, deadlineAt, clientSignal, maxBytes });
-  return body;
-}
-
-/**
  * Health probes are provider-aware (see src/health-checks.js) and capped well
  * below the request timeout so a single slow provider cannot stall a cycle.
  */
@@ -187,37 +151,11 @@ function json(res, status, body, extraHeaders = {}) {
   res.end(payload);
 }
 
-/** Is this request arriving over the loopback interface? */
-function isLoopback(req) {
-  const address = String(req.socket?.remoteAddress || "");
-  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
-}
-
-/**
- * With no `MULTIAI_ROUTER_API_KEYS`, the gateway is open for local trusted use
- * (the documented default), but a caller reaching it from another host must not
- * get the proxy or the admin/config surface for free. Loopback callers keep
- * full access, so local development and the panel are unaffected; anything
- * else is refused until an operator configures keys.
- */
 function authorized(req) {
-  if (config.routerApiKeys.length === 0) return isLoopback(req);
+  if (config.routerApiKeys.length === 0) return true;
   const value = String(req.headers.authorization || "");
   const token = value.startsWith("Bearer ") ? value.slice(7).trim() : "";
-  if (!token) return false;
-
-  // Compare every configured key without early exit. Buffer length is checked
-  // before timingSafeEqual so malformed/mismatched lengths cannot throw.
-  // This avoids ordinary string equality as the final credential check.
-  const tokenBytes = Buffer.from(token, "utf8");
-  let matched = false;
-  for (const configured of config.routerApiKeys) {
-    const keyBytes = Buffer.from(configured, "utf8");
-    if (keyBytes.length === tokenBytes.length && timingSafeEqual(keyBytes, tokenBytes)) {
-      matched = true;
-    }
-  }
-  return matched;
+  return Boolean(token && config.routerApiKeys.includes(token));
 }
 
 // Clients such as Claude Code, Codex and the OpenAI SDKs never send
@@ -255,7 +193,6 @@ function publicFailure(error) {
     model: item.target?.model,
     keyIndex: item.target?.keyIndex,
     status: item.status,
-    errorType: item.errorType ?? null,
     message: sanitizeMessage(item.message)
   }));
 }
@@ -269,13 +206,13 @@ function extractUsage(parsed) {
   if (!parsed || typeof parsed !== "object") return { tokens: null, finishReason: null };
 
   const usage = parsed.usage ?? parsed.usageMetadata ?? null;
-  // The provider's own total when it gives one, else input + output (cache included).
-  const split = usageFrom(parsed);
   const tokens = Number.isFinite(usage?.total_tokens)
     ? usage.total_tokens
     : Number.isFinite(usage?.totalTokens)
       ? usage.totalTokens
-      : totalOf(split);
+      : Number.isFinite(usage?.input_tokens) || Number.isFinite(usage?.output_tokens)
+        ? (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0)
+        : null;
 
   const candidate =
     parsed.choices?.[0]?.finish_reason ??
@@ -285,9 +222,7 @@ function extractUsage(parsed) {
 
   return {
     tokens,
-    finishReason: typeof candidate === "string" ? candidate : null,
-    inputTokens: split?.inputTokens ?? null,
-    outputTokens: split?.outputTokens ?? null
+    finishReason: typeof candidate === "string" ? candidate : null
   };
 }
 
@@ -301,20 +236,8 @@ function convertedTokens(converted) {
   return input + output || null;
 }
 
-// TEMPORARY ingress diagnostics (enable with MULTIAI_DEBUG_INGRESS=1). They log
-// method, path, peer, user-agent and the client's own request-id header, and
-// nothing else: never a body, an Authorization header or a key.
-const DEBUG_INGRESS = process.env.MULTIAI_DEBUG_INGRESS === "1";
-const debugLog = (line) => { if (DEBUG_INGRESS) console.log(line); };
-
 /** Records a routed request. Never allowed to break the request it describes. */
 function recordRequest(fields) {
-  if (DEBUG_INGRESS) {
-    // `open=false` means this lifecycle was already retired (or never begun):
-    // the log is about to file a SECOND row, under a freshly minted request id.
-    const open = Number.isInteger(fields?.pendingSeq) ? requestLog.requestIdOf(fields.pendingSeq) : null;
-    debugLog(`[RECORD] pendingSeq=${fields?.pendingSeq ?? "-"} open=${open ? "true" : "false"} requestId=${open || "-"} outcome=${fields?.outcome ?? "-"} http=${fields?.httpStatus ?? "-"}`);
-  }
   try {
     return requestLog.record(fields);
   } catch {
@@ -347,12 +270,6 @@ function progressRequest(startSeq, update) {
   try { requestLog.progress(startSeq, update); } catch { /* observability only */ }
 }
 
-/** The log-minted id for this one request, or null when the log is unavailable. */
-function requestIdOf(startSeq) {
-  if (startSeq === null || startSeq === undefined) return null;
-  try { return requestLog.requestIdOf(startSeq); } catch { return null; }
-}
-
 /**
  * Optional pin headers. Returns `{ provider, keyIndex }`, or `{ error }` for a
  * malformed key index so a typo is reported rather than ignored.
@@ -383,62 +300,12 @@ pinnedHealth.isAvailable = () => true;
 const lastRealAttempt = (list) => [...list].reverse().find((item) => !item.skipped);
 
 async function proxy(req, res, protocol, pathname) {
-  debugLog(`[PROXY_START] requestId=- ${req.method} ${req.url}`);
-  try {
-    return await proxyRequest(req, res, protocol, pathname);
-  } finally {
-    debugLog(`[PROXY_END] requestId=${res.getHeader("x-multi-ai-request-id") || "-"}`);
-  }
-}
-
-async function proxyRequest(req, res, protocol, pathname) {
   const receivedAt = Date.now();
   const attempts = [];
   let liveSeq = null;
-  // ONE incoming HTTP request is ONE top-level request, so it gets exactly ONE
-  // terminal record. Every terminal below (success, failure, abort, the outer
-  // catch) files through this, because a throw AFTER a terminal has already
-  // recorded (e.g. writeHead rejecting a header value) lands in the outer catch,
-  // and a second `record()` on a retired lifecycle mints a brand-new requestId:
-  // a phantom second request for one HTTP call and one upstream call. The first
-  // verdict stands; a refused second one is reported loudly, never dropped
-  // silently. `lifecycleRequestId` is the id begin() minted (the one echoed to
-  // the client), so the row keeps it even if the pending entry was pruned.
-  let lifecycleRequestId = null;
-  let terminalRecorded = false;
-  const recordTerminal = (fields) => {
-    if (terminalRecorded) {
-      console.warn(
-        `[router] second terminal record refused for ${lifecycleRequestId ?? "-"} ` +
-        `(${fields?.outcome ?? "-"} http=${fields?.httpStatus ?? "-"}): ${sanitizeMessage(fields?.errorMessage) ?? ""}`.trimEnd()
-      );
-      return null;
-    }
-    terminalRecorded = true;
-    return recordRequest(lifecycleRequestId ? { ...fields, requestId: lifecycleRequestId } : fields);
-  };
-  // Set by the invoke callback for every 200: a 200 only carried the headers,
-  // so the attempt is not settled as a success until the body has been consumed
-  // and delivered (or has failed). Streamed and non-streamed attempts settle
-  // through the same once-only finisher; see the terminals below.
-  let settleAttempt = null;
-
-  // One abort signal per request, driven by the client connection. It stops the
-  // fallback walk before another target is invoked and cancels the in-flight
-  // upstream call, so a client that walked away cannot spend more provider quota
-  // and a mid-stream disconnect is not recorded as a provider failure.
-  const clientGone = new AbortController();
-  const onClientGone = () => { if (!res.writableEnded) clientGone.abort(); };
-  req.on("aborted", onClientGone);
-  res.on("close", onClientGone);
-  res.once("close", () => {
-    req.off("aborted", onClientGone);
-    res.off("close", onClientGone);
-  });
-  const clientAborted = () => clientGone.signal.aborted;
 
   if (!authorized(req)) {
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       receivedAt,
       protocol,
@@ -452,19 +319,19 @@ async function proxyRequest(req, res, protocol, pathname) {
   }
 
   let body;
-  try { body = await readJsonBody(req, { maxBytes: config.maxBodyBytes }); }
+  try { body = await readJsonBody(req); }
   catch (error) {
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       receivedAt,
       protocol,
       httpStatus: error.status || 400,
       outcome: "failed",
-      errorType: error.errorType || "invalid_request_error",
+      errorType: "invalid_request_error",
       errorMessage: sanitizeMessage(error.message),
       attempts
     });
-    return json(res, error.status || 400, { error: { message: clientMessage(error.message), type: error.errorType || "invalid_request_error" } });
+    return json(res, error.status || 400, { error: { message: clientMessage(error.message), type: "invalid_request_error" } });
   }
 
   // Basic request-shape check, before the pool, session or any target is
@@ -472,7 +339,7 @@ async function proxyRequest(req, res, protocol, pathname) {
   // never reach routing, an upstream or the fallback walk.
   const shapeError = validateRequestShape(protocol, body);
   if (shapeError) {
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       receivedAt,
       protocol,
@@ -485,10 +352,9 @@ async function proxyRequest(req, res, protocol, pathname) {
     return json(res, 400, { error: { message: shapeError, type: "invalid_request_error" } });
   }
 
-  // One parser decides the model, the method and whether this is a stream, so
-  // the pathname can never be read three different ways in three places.
-  const geminiPath = protocol === "gemini" ? parseGeminiPath(pathname) : null;
-  const geminiPathModel = geminiPath?.model ?? "";
+  const geminiPathModel = protocol === "gemini"
+    ? pathname.match(/^\/v1beta\/models\/([^:]+):(?:stream)?[Gg]enerateContent$/)?.[1] || ""
+    : "";
   const requestedModel = typeof body.model === "string" ? body.model : geminiPathModel;
 
   // A Gemini client selects streaming with the method name rather than a body
@@ -528,17 +394,9 @@ async function proxyRequest(req, res, protocol, pathname) {
 
   liveSeq = beginRequest({ id: sessionInfo.id, receivedAt, protocol, pool, requestedModel });
 
-  // Name the two identities apart for the caller: `x-multi-ai-request-id`
-  // identifies this one request (and the log row it becomes), while
-  // `x-multi-ai-session-id` identifies the sticky session it belongs to and is
-  // shared by every request from the same client.
-  const requestId = requestIdOf(liveSeq);
-  lifecycleRequestId = requestId;
-  if (requestId) res.setHeader("x-multi-ai-request-id", requestId);
-
   const pin = readPin(req);
   if (pin.error) {
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: "invalid_request_error", errorMessage: pin.error, attempts
@@ -551,7 +409,7 @@ async function proxyRequest(req, res, protocol, pathname) {
   // model is not a vision model" when both are true.
   if (pool === VISION_POOL && poolTargets.length === 0) {
     const message = "No vision provider is configured";
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
       outcome: "failed", errorType: "no_vision_route", errorMessage: message, attempts
@@ -567,7 +425,7 @@ async function proxyRequest(req, res, protocol, pathname) {
   const capability = validateModelForPool(modelCapabilities, requestedModel, pool);
   if (capability) {
     const message = capabilityErrorMessage(capability);
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: capability.type, errorMessage: message, attempts
@@ -586,7 +444,7 @@ async function proxyRequest(req, res, protocol, pathname) {
   if (pinned.pinned && pinned.targets.length === 0) {
     const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;
     const message = `No configured target matches the pinned selection (${sanitizeMessage(where)})`;
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 404,
       outcome: "failed", errorType: "no_route", errorMessage: message, attempts
@@ -595,36 +453,27 @@ async function proxyRequest(req, res, protocol, pathname) {
   }
 
   const selection = selectTargetsForProtocol(pinned.targets, protocol, requestedModel);
-  // `sessionId` scopes the Gemini thought-signature store: a signature captured
-  // for this session is only echoed back inside the same session (see
-  // anthropic-bridge.js). The default session keeps the historical behaviour.
-  if (bridgeKind === "codex" && DEBUG_INGRESS) {
-    const d = describeCodexTools(body);
-    console.log(`[CODEX_TOOLS] sent=${JSON.stringify(d.sent)} forwarded=${JSON.stringify(d.forwarded)} dropped=${JSON.stringify(d.dropped)}`);
-  }
   const bridgeCtx = bridgeKind === "codex"
-    ? { customTools: customToolNames(body), tools: codexToolDefs(body), inputTokens: estimateResponsesInputTokens(body), sessionId: sessionInfo.id }
+    ? { customTools: customToolNames(body), inputTokens: estimateResponsesInputTokens(body) }
     : bridgeKind === "chat"
-      ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true, sessionId: sessionInfo.id }
-      : { sessionId: sessionInfo.id };
-  // Manual order -> Sticky (valid TTL) -> Priority -> Provider -> Key -> Models -> next Key ->
+      ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true }
+      : null;
+  // Sticky (valid TTL) -> Priority -> Provider -> Key -> Models -> next Key ->
   // next Provider, built from this request's own pool only. A pinned request is strict and never
   // gets a priority phase.
   const routePlan = buildRoutePlan({
     targets: selection.selected,
     requestedModel,
     priority: pinned.pinned ? [] : (config.priority?.[pool] ?? []),
-    // The operator's manual order leads everything; a pin is strict and ignores it.
-    manual: pinned.pinned ? [] : manualSelection.get(pool),
     // Sticky is a first phase, only while its TTL is valid; a pin is strict.
-    stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId(Date.now(), { notBefore: manualSelection.changedAt(pool) })
+    stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
   });
 
   if (selection.compatible.length === 0) {
     const noRouteMessage = pool === VISION_POOL
       ? "No configured vision target supports this client protocol"
       : "No configured provider targets support this client protocol";
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id,
       receivedAt,
@@ -637,17 +486,11 @@ async function proxyRequest(req, res, protocol, pathname) {
       errorMessage: noRouteMessage,
       attempts
     });
-    return json(res, 503, { error: { message: noRouteMessage, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, 503, { error: { message: noRouteMessage, type: "no_route" } });
   }
 
   try {
-    // `deferCommit` hands the health/sticky decision back to this function: a
-    // 200 that only carried headers is not a success, so the walk must not mark
-    // the target healthy (or make it sticky) until the body has been delivered.
-    // `shouldStop` lets a client disconnect end the walk before another target
-    // is invoked. The returned `commit` finalises the health/sticky outcome
-    // exactly once, at the moment the real result is known.
-    const { value: result, commit } = await withFallback(
+    const result = await withFallback(
       selection.selected,
       async (target, { phase } = {}) => {
         const upstreamProtocol = bridged
@@ -657,12 +500,12 @@ async function proxyRequest(req, res, protocol, pathname) {
         const request = !translated
           ? buildUpstreamRequest(target, protocol, body, req.headers, { stream: wantsStream })
           : bridgeKind === "codex"
-            ? buildCodexRequest(target, upstreamProtocol, body, req.headers, { sessionId: sessionInfo.id })
+            ? buildCodexRequest(target, upstreamProtocol, body, req.headers)
             : bridgeKind === "chat"
-              ? buildChatRequest(target, upstreamProtocol, body, req.headers, { sessionId: sessionInfo.id })
+              ? buildChatRequest(target, upstreamProtocol, body, req.headers)
               : bridgeKind === "gemini"
-                ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream, sessionId: sessionInfo.id })
-                : buildBridgeRequest(target, upstreamProtocol, body, req.headers, { sessionId: sessionInfo.id });
+                ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream })
+                : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
         const controller = new AbortController();
         // fetch() resolves once response headers arrive, so for streaming
         // requests this is a time-to-first-response limit: a hung provider
@@ -671,18 +514,7 @@ async function proxyRequest(req, res, protocol, pathname) {
           ? Math.min(config.timeoutMs, config.connectTimeoutMs)
           : config.timeoutMs;
         const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
-        // The client's connection is a second abort source. Merging it into the
-        // attempt signal cancels the in-flight upstream call on a disconnect,
-        // instead of only noticing between steps that nobody is listening.
-        const signal = AbortSignal.any([controller.signal, clientGone.signal]);
         const attemptStartedAt = Date.now();
-        let bodyBuf = null;
-        // Absolute deadlines, anchored at the attempt's start. A non-streamed
-        // attempt owns REQUEST_TIMEOUT_MS end to end (headers and body). A
-        // stream may legitimately outlive that, so it has its own much larger
-        // ceiling (STREAM_TOTAL_TIMEOUT_MS, 0 = none) on top of the idle gap.
-        const attemptDeadlineAt = attemptStartedAt + config.timeoutMs;
-        const streamDeadlineAt = config.streamTotalTimeoutMs > 0 ? attemptStartedAt + config.streamTotalTimeoutMs : null;
         // Every invoke is a new attempt with its own id, even when the very same
         // provider/model/key was called a moment ago (or by an earlier request).
         const attemptId = startAttemptEvent(liveSeq, {
@@ -694,15 +526,11 @@ async function proxyRequest(req, res, protocol, pathname) {
           startedAt: attemptStartedAt
         });
 
-        debugLog(`[ATTEMPT_START] attemptId=${attemptId ?? "-"} phase=${phase ?? "-"} provider=${target.provider} model=${target.model} key=${target.keyIndex} protocol=${upstreamProtocol} translated=${translated} stream=${wantsStream}`);
-
         // Records one real upstream attempt, in the order `withFallback` makes
         // them. This is the true fallback chain, observed rather than
         // reconstructed from the final error.
         let recorded = false;
-        const attempt = (ok, status, errorMessage, usage = null) => {
-          // An attempt settles exactly once: the first verdict is the real one.
-          if (recorded) return;
+        const attempt = (ok, status, errorMessage) => {
           recorded = true;
           const completedAt = Date.now();
           attempts.push({
@@ -719,55 +547,24 @@ async function proxyRequest(req, res, protocol, pathname) {
             startedAt: attemptStartedAt,
             completedAt,
             latencyMs: completedAt - attemptStartedAt,
-            errorMessage: sanitizeMessage(errorMessage),
-            // Only what the provider reported; set on the attempt that answered.
-            inputTokens: usage?.inputTokens ?? null,
-            outputTokens: usage?.outputTokens ?? null
+            errorMessage: sanitizeMessage(errorMessage)
           });
           finishAttemptEvent(attemptId, {
             ok,
             status,
             completedAt,
             latencyMs: completedAt - attemptStartedAt,
-            errorMessage,
-            inputTokens: usage?.inputTokens ?? null,
-            outputTokens: usage?.outputTokens ?? null
+            errorMessage
           });
           progressRequest(liveSeq, { attempts, inflight: null });
-          debugLog(`[ATTEMPT_END] attemptId=${attemptId ?? "-"} provider=${target.provider} model=${target.model} ok=${ok} status=${Number.isInteger(status) ? status : "-"} latency=${completedAt - attemptStartedAt}ms reason=${redactForLog(errorMessage ?? "", 160) || "-"}`);
         };
 
         try {
-          // fetchUpstream never follows a redirect: the target's credential
-          // must not be replayed to a host the operator did not configure.
-          const upstream = await fetchUpstream(request.url, { ...request.options, signal });
-          // Headers are in: the connect/TTFB timer has done its job. What bounds
-          // the body from here is the idle gap and the absolute deadline, not
-          // this timer, so the three limits stay independent.
-          clearTimeout(timer);
+          const upstream = await fetch(request.url, { ...request.options, signal: controller.signal });
           if (!upstream.ok) {
-            // Only the head of an error body is ever surfaced, so it is read
-            // under a hard byte cap and the rest is cancelled. A failure to
-            // read it must not hide the status the provider already sent; only
-            // a client that left ends the attempt.
-            let text = "";
-            try {
-              ({ body: bodyBuf } = await readBoundedBody(upstream.body, {
-                maxBytes: MAX_ERROR_BODY_BYTES,
-                overflow: "truncate",
-                idleMs: config.streamIdleTimeoutMs,
-                deadlineAt: attemptStartedAt + config.timeoutMs,
-                clientSignal: clientGone.signal
-              }));
-              text = bodyBuf.toString("utf8");
-            } catch (readError) {
-              if (clientAborted()) throw readError;
-            }
+            const text = await upstream.text();
             const error = new Error(text.slice(0, 2000) || ("Upstream HTTP " + upstream.status));
             error.status = upstream.status;
-            // A redirect the gateway refused to follow means this configured
-            // base URL is not usable; another target may still answer.
-            if (isRedirectStatus(upstream.status)) error.retryable = true;
             // An upstream 413 means this provider/tier cannot take a request of
             // this size (e.g. a small tokens-per-minute cap). Another provider
             // may well accept it, so fall back instead of failing the request.
@@ -787,26 +584,12 @@ async function proxyRequest(req, res, protocol, pathname) {
             attempt(false, upstream.status, error.message);
             throw error;
           }
-          // A 200 so far only carried the headers. Hand the finisher back and
-          // let the terminal settle the attempt once the body is consumed: a
-          // body that truncates, stalls or cannot be parsed must be a FAILED
-          // attempt, not an accepted one. The terminal records the success, so
-          // the log still ends a chain of failures with a real terminal success.
-          settleAttempt = attempt;
-          return {
-            upstream, target, upstreamProtocol, translated,
-            deadlineAt: wantsStream ? streamDeadlineAt : attemptDeadlineAt
-          };
+          // The successful attempt is recorded too — otherwise the log would
+          // show a chain of failures with no terminal success.
+          attempt(true, upstream.status, null);
+          return { upstream, target, upstreamProtocol, translated };
         } catch (error) {
           if (isAbortError(error)) {
-            // A client disconnect is not a provider fault: stop the walk without
-            // cooling the target, and never convert it into a timeout (which
-            // would have handed the request to the next provider).
-            if (clientAborted()) {
-              const aborted = new ClientAbortError();
-              attempt(false, null, aborted.message);
-              throw aborted;
-            }
             const timeout = toTimeoutError("Upstream request timed out");
             attempt(false, timeout.status, timeout.message);
             throw timeout;
@@ -829,11 +612,6 @@ async function proxyRequest(req, res, protocol, pathname) {
       pinned.pinned ? pinnedHealth : healthRegistry,
       {
         plan: routePlan.steps,
-        // The caller (this function) owns the health/sticky decision, because
-        // only it knows whether the response body actually completed.
-        deferCommit: true,
-        // The client is gone: stop before invoking another target.
-        shouldStop: clientAborted,
         // A skipped target never reaches the network, but it is still shown
         // in the timeline so the walk is explained, not guessed at.
         onSkip: (target, { phase, reason }) => {
@@ -866,10 +644,19 @@ async function proxyRequest(req, res, protocol, pathname) {
         "x-multi-ai-key-index": String(result.target.keyIndex),
         "x-multi-ai-session-id": sessionId
       };
-      // Every terminal outcome is recorded through one shape, so a failure
-      // after the headers can never be filed as a success. `streamOutcome` is
-      // only set for a streamed request.
-      const record = (outcome, extra = {}) => recordTerminal({
+      let converted = null;
+      if (!wantsStream) {
+        const upstreamJson = await result.upstream.json();
+        converted = bridgeKind === "codex"
+          ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
+          : bridgeKind === "chat"
+            ? convertChatJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
+            : bridgeKind === "gemini"
+              ? chatJsonToGemini(upstreamJson)
+              : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel);
+      }
+
+      recordRequest({
         pendingSeq: liveSeq,
         id: sessionId,
         receivedAt,
@@ -885,203 +672,61 @@ async function proxyRequest(req, res, protocol, pathname) {
         httpStatus: 200,
         latencyMs: Date.now() - receivedAt,
         totalMs: Date.now() - receivedAt,
-        outcome,
-        ...extra
+        tokens: converted ? convertedTokens(converted) : null,
+        finishReason: converted?.stop_reason ?? converted?.incomplete_details?.reason ?? converted?.choices?.[0]?.finish_reason ?? converted?.status ?? null,
+        outcome: "success"
       });
 
-      if (!wantsStream) {
-        let converted;
-        let upstreamUsage = null;
-        try {
-          const upstreamJson = JSON.parse(new TextDecoder().decode(await readUpstreamBody(result.upstream.body, {
-            idleMs: config.streamIdleTimeoutMs,
-            deadlineAt: result.deadlineAt,
-            clientSignal: clientGone.signal
-          })));
-          upstreamUsage = usageFrom(upstreamJson);
-          converted = bridgeKind === "codex"
-            ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
-            : bridgeKind === "chat"
-              ? convertChatJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
-              : bridgeKind === "gemini"
-                ? chatJsonToGemini(upstreamJson)
-                : convertJsonResponse(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx);
-        } catch (error) {
-          // A provider that answered 200 but whose tool arguments cannot be
-          // represented in the client's protocol is a translation-shape
-          // mismatch, not provider ill health. Answer 4xx with the typed code
-          // and leave health untouched — never a silent `{}` and never a
-          // cooldown for a healthy target.
-          if (error?.errorType === INVALID_TOOL_ARGUMENTS) {
-            settleAttempt?.(false, clientAborted() ? null : (error.status || 400), clientAborted() ? "Client disconnected" : sanitizeMessage(error.message));
-            commit(false, { status: error.status || 400, skipCooldown: true, reason: sanitizeMessage(error.message) });
-            // The log carries what the client was actually answered, not the
-            // upstream's 200: a failed row filed as 200 is invisible to the
-            // status filter and lands in the "http 200" failure bucket.
-            record("failed", {
-              httpStatus: clientAborted() ? 499 : (error.status || 400),
-              errorType: error.errorType,
-              errorMessage: sanitizeMessage(error.message) || "Tool call arguments could not be translated"
-            });
-            if (clientAborted()) { res.destroy(); return undefined; }
-            const message = clientMessage(error.message) || "Tool call arguments could not be translated";
-            return json(res, error.status || 400, { error: { message, type: error.errorType } }, meta);
-          }
-          // A 200 that could not be read or translated is not a success: cool
-          // the target instead of recording it healthy. A client that left is
-          // not the provider's fault, but a provider fault (timeout, size) that
-          // happened first still is.
-          const bodyAborted = clientAborted() && error?.streamCause !== "upstream" && !isUpstreamFault(error);
-          settleAttempt?.(
-            false,
-            bodyAborted ? null : 502,
-            bodyAborted ? "Client disconnected" : (sanitizeMessage(error?.message) || "Upstream response could not be read")
-          );
-          commit(false, clientAborted() ? { clientAborted: true } : { status: 502 });
-          record("failed", {
-            httpStatus: clientAborted() ? 499 : 502,
-            errorType: clientAborted() ? "client_aborted" : "upstream_error",
-            errorMessage: sanitizeMessage(error?.message) || "Upstream response could not be read"
-          });
-          if (clientAborted()) { res.destroy(); return undefined; }
-          const message = clientMessage(error?.message) || "Upstream response could not be read";
-          return json(res, 502, { error: { message, type: "upstream_error" } }, meta);
-        }
-        settleAttempt?.(true, result.upstream.status, null, upstreamUsage);
-        commit(true, { status: result.upstream.status });
-        record("success", {
-          tokens: convertedTokens(converted) ?? totalOf(upstreamUsage),
-          inputTokens: upstreamUsage?.inputTokens ?? null,
-          outputTokens: upstreamUsage?.outputTokens ?? null,
-          finishReason: converted?.stop_reason ?? converted?.incomplete_details?.reason ?? converted?.choices?.[0]?.finish_reason ?? converted?.status ?? null
-        });
-        return json(res, 200, converted, meta);
-      }
+      if (converted) return json(res, 200, converted, meta);
 
-      // Streaming: the outcome is unknowable until the client stream ends, so
-      // nothing is committed (health/sticky) or logged as a success yet.
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...meta });
-      let streamOutcome = "truncated";
-      let streamError = null;
-      const usageTap = createUsageTap();
-      const streamDebug = createStreamDebug({
-        enabled: DEBUG_INGRESS, log: debugLog, target: result.target,
-        status: result.upstream.status, protocol: result.upstreamProtocol
-      });
       try {
-        const upstreamEvents = tapEvents(sseData(streamDebug.upstream(guardUpstreamStream(result.upstream.body, {
-          idleMs: config.streamIdleTimeoutMs,
-          deadlineAt: result.deadlineAt,
-          clientSignal: clientGone.signal
-        })), { maxEventBytes: config.maxSseEventBytes }), usageTap);
-        const bridgedEvents = bridgeKind === "codex"
+        const upstreamEvents = sseData(result.upstream.body);
+        const events = bridgeKind === "codex"
           ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
           : bridgeKind === "chat"
             ? streamToChat(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
             : bridgeKind === "gemini"
               ? streamToGemini(upstreamEvents)
-              : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx);
-        await pipeline(Readable.from(streamDebug.client(bridgedEvents)), res);
-        streamOutcome = "completed";
-      } catch (error) {
-        streamError = error;
-        // An upstream fault is this provider's failure, so the target is
-        // cooled. A client that left is not the provider's fault.
-        streamOutcome = (error?.streamCause === "upstream" || isUpstreamFault(error) || !clientAborted())
-          ? "truncated"
-          : "aborted";
+              : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel);
+        await pipeline(Readable.from(events), res);
+      } catch {
+        res.destroy();
       }
-
-      streamDebug.end(streamOutcome, streamError);
-      if (streamOutcome === "completed") {
-        const streamUsage = usageTap.usage;
-        settleAttempt?.(true, result.upstream.status, null, streamUsage);
-        commit(true, { status: result.upstream.status });
-        record("success", {
-          streamOutcome,
-          tokens: totalOf(streamUsage),
-          inputTokens: streamUsage?.inputTokens ?? null,
-          outputTokens: streamUsage?.outputTokens ?? null
-        });
-      } else if (streamOutcome === "aborted") {
-        settleAttempt?.(false, null, "Client disconnected");
-        commit(false, { clientAborted: true });
-        record("failed", { streamOutcome, errorType: "client_aborted", errorMessage: "Client disconnected" });
-      } else {
-        settleAttempt?.(
-          false,
-          result.upstream.status,
-          sanitizeMessage(streamError?.message) || "Upstream stream ended before completion"
-        );
-        // A translated stream that died because the provider's tool arguments
-        // cannot be represented in the client's protocol is a translation-shape
-        // mismatch, not provider ill health: the request still fails (headers are
-        // already on the wire) but the target is not cooled.
-        const shapeMismatch = streamError?.errorType === INVALID_TOOL_ARGUMENTS;
-        commit(false, shapeMismatch
-          ? { status: result.upstream.status ?? 200, skipCooldown: true, reason: sanitizeMessage(streamError?.message) }
-          : { status: 502, reason: sanitizeMessage(streamError?.message) });
-        record("failed", {
-          streamOutcome,
-          errorType: shapeMismatch ? INVALID_TOOL_ARGUMENTS : "upstream_stream_error",
-          errorMessage: sanitizeMessage(streamError?.message) || "Upstream stream ended before completion"
-        });
-      }
-      if (streamOutcome !== "completed") res.destroy();
       return undefined;
     }
 
     const contentType = result.upstream.headers.get("content-type") || "application/json";
-    // Content-Length is only a hint that lets an obviously large body skip
-    // inspection; it is never the limit. A missing, wrong or chunked length is
-    // held to the same byte ceiling, enforced on the bytes actually read.
-    const lengthHeader = result.upstream.headers.get("content-length");
-    const declaredLength = lengthHeader === null ? Number.NaN : Number(lengthHeader);
-    let usage = { tokens: null, finishReason: null, inputTokens: null, outputTokens: null };
-    // A streamed (SSE) body is watched for the usage the provider reports; its bytes are not touched.
-    const passthroughTap = contentType.includes("text/event-stream") ? createUsageTap() : null;
+    const declaredLength = Number(result.upstream.headers.get("content-length"));
+    let usage = { tokens: null, finishReason: null };
     let buffered = null;
-    // When inspection read past the ceiling, the bytes already consumed plus
-    // the rest of the body, still streamed (with backpressure) to the client.
-    let replay = null;
-    let bodyReadError = null;
 
-    // Only small JSON bodies are inspected for usage. The bytes forwarded to
-    // the client are unchanged either way.
+    // Only small, explicitly-sized JSON bodies are inspected for usage. The
+    // bytes forwarded to the client are unchanged either way.
     if (
       result.upstream.body &&
       contentType.includes("application/json") &&
-      !(Number.isFinite(declaredLength) && declaredLength > MAX_INSPECT_BYTES)
+      Number.isFinite(declaredLength) &&
+      declaredLength <= MAX_INSPECT_BYTES
     ) {
       try {
-        const inspected = await bufferUpTo(result.upstream.body, {
-          maxBytes: MAX_INSPECT_BYTES,
-          idleMs: config.streamIdleTimeoutMs,
-          deadlineAt: result.deadlineAt,
-          clientSignal: clientGone.signal
-        });
-        if (inspected.buffered) {
-          // The body is consumed now, so it must be forwarded from this buffer even
-          // when it is not valid JSON; only the usage lookup may fail.
-          buffered = inspected.buffered;
-          try { usage = extractUsage(JSON.parse(buffered.toString("utf8"))); } catch { /* usage stays unreported */ }
-        } else {
-          replay = inspected.replay;
-        }
-      } catch (error) {
-        // The body died after the headers said 200. Nothing has reached the
-        // client yet, so this is still answerable and the target must be cooled.
-        bodyReadError = error;
+        const raw = Buffer.from(await result.upstream.arrayBuffer());
+        // The body is consumed now, so it must be forwarded from this buffer even
+        // when it is not valid JSON; only the usage lookup may fail.
+        buffered = raw;
+        try { usage = extractUsage(JSON.parse(raw.toString("utf8"))); } catch { /* usage stays unreported */ }
+      } catch {
+        buffered = null;
       }
     }
 
-    const streamed = !buffered && Boolean(result.upstream.body);
     const latencyMs = Date.now() - receivedAt;
 
-    // One shape for both terminal outcomes, so a post-header failure can never
-    // be filed as a success. `latencyMs` is time-to-upstream-response, the
+    // Recorded before the body is written: a client that reads the request log
+    // immediately after this call would otherwise race the write and see a
+    // stale list. `latencyMs` is time-to-upstream-response, which is the
     // figure an operator acts on; stream duration is not included.
-    const record = (outcome, extra = {}) => recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       id: sessionId,
       receivedAt,
@@ -1089,7 +734,7 @@ async function proxyRequest(req, res, protocol, pathname) {
       pool,
       requestedModel,
       autoRouted: !selection.modelMatched,
-      streamed,
+      streamed: !buffered && Boolean(result.upstream.body),
       attempts,
       finalProvider: result.target.provider,
       finalModel: result.target.model,
@@ -1098,35 +743,9 @@ async function proxyRequest(req, res, protocol, pathname) {
       latencyMs,
       totalMs: Date.now() - receivedAt,
       tokens: usage.tokens,
-      inputTokens: usage.inputTokens ?? null,
-      outputTokens: usage.outputTokens ?? null,
       finishReason: usage.finishReason,
-      outcome,
-      ...extra
+      outcome: "success"
     });
-
-    if (bodyReadError) {
-      const aborted = clientAborted();
-      settleAttempt?.(
-        false,
-        aborted ? null : 502,
-        aborted ? "Client disconnected" : (sanitizeMessage(bodyReadError?.message) || "Upstream response could not be read")
-      );
-      commit(false, aborted ? { clientAborted: true } : { status: 502 });
-      record("failed", {
-        httpStatus: aborted ? 499 : 502,
-        errorType: aborted ? "client_aborted" : "upstream_error",
-        errorMessage: sanitizeMessage(bodyReadError?.message) || "Upstream response could not be read"
-      });
-      if (aborted) { res.destroy(); return undefined; }
-      const message = clientMessage(bodyReadError?.message) || "Upstream response could not be read";
-      return json(res, 502, { error: { message, type: "upstream_error" } }, {
-        "x-multi-ai-provider": result.target.provider,
-        "x-multi-ai-model": result.target.model,
-        "x-multi-ai-key-index": String(result.target.keyIndex),
-        "x-multi-ai-session-id": sessionId
-      });
-    }
 
     res.writeHead(result.upstream.status, {
       "content-type": contentType,
@@ -1137,101 +756,23 @@ async function proxyRequest(req, res, protocol, pathname) {
       "x-multi-ai-session-id": sessionId
     });
 
-    let passDebug = null;
-    try {
-      if (buffered) {
-        res.end(buffered);
-      } else if (result.upstream.body) {
+    if (buffered) {
+      res.end(buffered);
+    } else if (result.upstream.body) {
+      try {
         // pipeline() applies backpressure and tears down the upstream reader
-        // when the client disconnects; the idle guard bounds the gap between
-        // chunks after the headers have arrived.
-        const source = replay ?? guardUpstreamStream(result.upstream.body, {
-          idleMs: config.streamIdleTimeoutMs,
-          deadlineAt: result.deadlineAt,
-          clientSignal: clientGone.signal
-        });
-        passDebug = createStreamDebug({
-          enabled: DEBUG_INGRESS && streamed, log: debugLog, target: result.target,
-          status: result.upstream.status, protocol: result.upstreamProtocol
-        });
-        await pipeline(Readable.from(passDebug.passthrough(passthroughTap ? tapBytes(source, passthroughTap) : source)), res);
-        passDebug.end("completed");
-      } else {
-        res.end();
+        // when the client disconnects.
+        await pipeline(Readable.fromWeb(result.upstream.body), res);
+      } catch {
+        // Headers are already on the wire, so the failure cannot be reported
+        // as a JSON error response. Drop the connection instead.
+        res.destroy();
       }
-    } catch (error) {
-      // Headers are already on the wire, so the failure cannot be reported as a
-      // JSON error response. Cool the target (unless the client left) and drop
-      // the connection instead.
-      const aborted = error?.streamCause !== "upstream" && !isUpstreamFault(error) && clientAborted();
-      passDebug?.end(aborted ? "aborted" : "truncated", error);
-      settleAttempt?.(
-        false,
-        result.upstream.status,
-        sanitizeMessage(error?.message) || "Upstream stream ended before completion"
-      );
-      commit(false, aborted ? { clientAborted: true } : { status: 502, reason: sanitizeMessage(error?.message) });
-      record("failed", {
-        streamOutcome: aborted ? "aborted" : "truncated",
-        errorType: aborted ? "client_aborted" : "upstream_stream_error",
-        errorMessage: sanitizeMessage(error?.message) || "Upstream stream ended before completion"
-      });
-      res.destroy();
-      return undefined;
+    } else {
+      res.end();
     }
-
-    // Only now is the response actually delivered: commit health/sticky and
-    // file the request as a success.
-    if (passthroughTap?.usage) {
-      usage = {
-        ...usage,
-        tokens: usage.tokens ?? totalOf(passthroughTap.usage),
-        inputTokens: passthroughTap.usage.inputTokens,
-        outputTokens: passthroughTap.usage.outputTokens
-      };
-    }
-    settleAttempt?.(true, result.upstream.status, null, usage);
-    commit(true, { status: result.upstream.status });
-    record("success", streamed ? { streamOutcome: "completed" } : {});
   } catch (error) {
-    // The client walked away. Nothing can be sent, and the provider was not at
-    // fault (no target was cooled), so this is recorded as a client abort
-    // rather than an upstream failure.
-    // Safety net: a 200 attempt whose terminal never ran (an unexpected throw
-    // after the headers) must not be left looking like it is still in flight.
-    // A no-op once the attempt has settled.
-    settleAttempt?.(
-      false,
-      null,
-      (error?.clientAborted === true || error instanceof ClientAbortError)
-        ? "Client disconnected"
-        : (sanitizeMessage(error?.message) || "Upstream response could not be read")
-    );
-    if (error?.clientAborted === true || error instanceof ClientAbortError) {
-      recordTerminal({
-        pendingSeq: liveSeq,
-        id: sessionInfo.id,
-        receivedAt,
-        protocol,
-        pool,
-        requestedModel,
-        autoRouted: !selection.modelMatched,
-        attempts,
-        finalProvider: lastRealAttempt(attempts)?.provider ?? null,
-        finalModel: lastRealAttempt(attempts)?.model ?? null,
-        finalKeyIndex: lastRealAttempt(attempts)?.keyIndex ?? null,
-        httpStatus: 499,
-        latencyMs: Date.now() - receivedAt,
-        totalMs: Date.now() - receivedAt,
-        errorType: "client_aborted",
-        errorMessage: "Client disconnected",
-        outcome: "failed"
-      });
-      if (res.headersSent || res.writableEnded) res.destroy();
-      else json(res, 499, { error: { message: "Client disconnected", type: "client_aborted" } });
-      return undefined;
-    }
-    recordTerminal({
+    recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id,
       receivedAt,
@@ -1252,11 +793,7 @@ async function proxyRequest(req, res, protocol, pathname) {
     });
     // `error.message` can be raw upstream text (an all-400 walk and non-retryable
     // statuses surface it), so it is scrubbed like every other outbound message.
-    // A routing walk that failed for one machine-readable reason (every target
-    // rejected the request the same way, e.g. `unsupported_image_source`) keeps
-    // that reason in the response; anything else stays a generic upstream error.
-    const errorType = error?.errorType || "upstream_error";
-    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: errorType, failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 }
 
@@ -1266,7 +803,6 @@ const handleApi = createApi({
   health: healthRegistry,
   requestLog,
   monitor,
-  manualSelection,
   refreshHealth: () => refreshAllHealth(targets, trackedCheckTargetHealth)
 });
 
@@ -1304,16 +840,6 @@ function respondUnexpected(res, error) {
 }
 
 async function handleRequest(req, res) {
-  if (DEBUG_INGRESS) {
-    const incomingId = req.headers["x-request-id"] || req.headers["x-client-request-id"] || "-";
-    console.log(
-      `[INCOMING] ${new Date().toISOString()} ` +
-      `${req.method} ${req.url} ` +
-      `remote=${req.socket.remoteAddress || "-"} ` +
-      `ua=${req.headers["user-agent"] || "-"} ` +
-      `x-request-id=${incomingId}`
-    );
-  }
   // "//v1/models" (base URL with trailing slash + "/v1/...") must not parse as a host.
   // The request target is client-controlled and `new URL` throws on a malformed
   // one (e.g. an absolute-form target with a bad host), so it is parsed guardedly.
@@ -1328,18 +854,8 @@ async function handleRequest(req, res) {
 
   if (req.method === "GET" && pathname === "/health") {
     // Deterministic route order (priority, then Provider -> Key -> Models), not a
-    // health-score sort. `rankedTargets` holds only what routing would consider
-    // right now; `coolingTargets` keeps the targets in cooldown, with the
-    // position they will occupy once eligible, so the panel can still show them
-    // instead of having them silently disappear.
-    const row = (target, rank) => ({ rank, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols });
-    const fullOrder = routeOrderByPool(targets, config.priority, () => true, manualSelection.all());
-    const ranked = [];
-    const coolingTargets = [];
-    fullOrder.forEach((target, index) => {
-      if (healthRegistry.isAvailable(target)) ranked.push(row(target, ranked.length + 1));
-      else coolingTargets.push({ ...row(target, index + 1), cooldownUntil: healthRegistry.get(healthRegistry.key(target))?.cooldownUntil ?? null });
-    });
+    // health-score sort; cooling targets are excluded exactly as routing skips them.
+    const ranked = routeOrderByPool(targets, config.priority, (target) => healthRegistry.isAvailable(target)).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
     const health = describeHealth(targets);
     const inPool = (pool) => health.filter((entry) => entry.pool === pool);
     return json(res, 200, {
@@ -1356,21 +872,17 @@ async function handleRequest(req, res) {
         vision: { targets: visionTargets.length, health: inPool("vision") }
       },
       rankedTargets: ranked,
-      coolingTargets,
       retryableStatus: [...config.retryableStatus]
     });
   }
 
   if (req.method === "GET" && pathname === "/v1/models") {
-    // One entry per unique model id (clients choke on duplicates), in the same
-    // deterministic order routing and /health use. A health-score sort here made
-    // the catalogue a client discovers reshuffle as providers hiccuped, which a
-    // model list must never do; cooling targets stay listed.
+    // One entry per unique model id (clients choke on duplicates), in ranked order.
     // Carries both OpenAI fields (object) and Anthropic fields (type, display_name,
     // created_at, has_more...) so Claude Desktop / Claude Code discovery accepts it.
     const seen = new Set();
     const data = [];
-    for (const target of routeOrderByPool(targets, config.priority, () => true, manualSelection.all())) {
+    for (const target of rankTargets(targets)) {
       if (seen.has(target.model)) continue;
       seen.add(target.model);
       data.push({ type: "model", id: target.model, display_name: target.model, created_at: "2026-01-01T00:00:00Z", object: "model", provider: target.provider });
@@ -1391,7 +903,7 @@ async function handleRequest(req, res) {
   if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
     if (!authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
     try {
-      const body = await readJsonBody(req, { maxBytes: config.maxBodyBytes });
+      const body = await readJsonBody(req);
       const shapeError = validateRequestShape("anthropic", body);
       if (shapeError) return json(res, 400, { error: { message: shapeError, type: "invalid_request_error" } });
       return json(res, 200, { input_tokens: estimateInputTokens(body) });
@@ -1406,11 +918,6 @@ async function handleRequest(req, res) {
   // Static panel assets, then the SPA shell for client-side routes.
   if (req.method === "GET" || req.method === "HEAD") {
     if (!isReserved(pathname)) {
-      if (devUi) {
-        // An encoded gateway prefix (/api%2fconfig) is not a panel route; keep it away from Vite.
-        if (isReservedWhenDecoded(pathname, isReserved)) return json(res, 404, { error: { message: "Not found", type: "not_found" } });
-        return devUi.handle(req, res);
-      }
       if (await staticFiles.serve(req, res, pathname)) return undefined;
 
       // Extensionless paths are client-side routes, so they get the shell.
@@ -1430,51 +937,21 @@ const server = http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => respondUnexpected(res, error));
 });
 
-// Vite HMR rides a WebSocket upgrade. Registered only in development, so the
-// production server's upgrade behaviour is untouched.
-if (devUi) {
-  server.on("upgrade", (req, socket, head) => {
-    let pathname = "";
-    try {
-      pathname = new URL(String(req.url).replace(/^\/{2,}/, "/"), "http://localhost").pathname.replace(/\/{2,}/g, "/");
-    } catch {
-      socket.destroy();
-      return;
-    }
-    if (isReserved(pathname) || isReservedWhenDecoded(pathname, isReserved)) {
-      socket.destroy();
-      return;
-    }
-    devUi.upgrade(req, socket, head);
-  });
-}
-
 const stopHealthMonitor = startHealthMonitor(targets, trackedCheckTargetHealth, HEALTH_CHECK_INTERVAL_MS);
 process.once("SIGINT", () => {
   monitor.stop();
   stopHealthMonitor();
   handleApi.closeStreams();
-  devUi?.close();
   server.close(() => process.exit(0));
 });
 process.once("SIGTERM", () => {
   monitor.stop();
   stopHealthMonitor();
   handleApi.closeStreams();
-  devUi?.close();
   server.close(() => process.exit(0));
 });
 
-// With no API keys configured the gateway only answers loopback callers (see
-// `authorized`), so binding beyond loopback is worth saying out loud.
-if (config.routerApiKeys.length === 0 && config.host !== "127.0.0.1" && config.host !== "::1" && config.host !== "localhost") {
-  console.warn(
-    "[router] MULTIAI_ROUTER_API_KEYS is not set: requests from other hosts will be refused. " +
-    "Set MULTIAI_ROUTER_API_KEYS (and optionally HOST=127.0.0.1) before exposing this gateway."
-  );
-}
-
-server.listen({ port: config.port, host: config.host || undefined }, () => {
+server.listen(config.port, () => {
   console.log("MultiAI Router listening on http://localhost:" + config.port);
   console.log("Control Panel UI: http://localhost:" + config.port + "/");
 });

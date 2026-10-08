@@ -13,7 +13,7 @@ npm start
 Gateway:
 
 ```text
-http://localhost:9999/v1
+http://localhost:8788/v1
 ```
 
 ## Provider
@@ -33,7 +33,7 @@ The same pattern can be used for another configured OpenAI-compatible provider.
 In Qwen Code, configure a custom OpenAI-compatible provider/base URL:
 
 ```text
-Base URL: http://localhost:9999/v1
+Base URL: http://localhost:8788/v1
 API key: YOUR_LOCAL_ROUTER_KEY
 Model: a model configured in MultiAI Router
 ```

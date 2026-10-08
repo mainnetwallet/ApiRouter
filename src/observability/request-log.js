@@ -19,13 +19,6 @@ export const ATTEMPT_STATES = Object.freeze({
   FAILED: "failed"
 });
 
-/**
- * Terminal state of a streamed response body. Kept separate from `outcome`:
- * a request can fail (upstream died mid-stream) or end by client abort, and
- * either way the operator needs to see that the body never completed.
- */
-export const STREAM_OUTCOMES = Object.freeze(["completed", "truncated", "aborted"]);
-
 /** The routing pool a request was served from. Anything unrecognised is text. */
 export const POOLS = Object.freeze({
   TEXT: "text",
@@ -43,7 +36,7 @@ const normalizePool = (value) => (value === POOLS.VISION ? POOLS.VISION : POOLS.
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING = 200;
 
-const PHASES = ["manual", "sticky", "priority", "fallback"];
+const PHASES = ["sticky", "priority", "fallback"];
 const pad = (value) => String(value).padStart(6, "0");
 
 /**
@@ -51,13 +44,11 @@ const pad = (value) => String(value).padStart(6, "0");
  * (`attemptId`, `attemptSeq`, `callIndex`) is added by the log, never by the
  * caller's position in an array.
  */
-const tokenCount = (value) => (Number.isFinite(value) && value >= 0 ? Math.round(value) : null);
-
 function plainAttempt(attempt, index) {
   return {
     index: index + 1,
     attemptId: typeof attempt?.attemptId === "string" && attempt.attemptId ? attempt.attemptId : null,
-    // "manual" | "sticky" | "priority" | "fallback" | null (older callers); and whether this row was
+    // "sticky" | "priority" | "fallback" | null (older callers); and whether this row was
     // skipped without a network call (cooldown / already attempted).
     phase: PHASES.includes(attempt?.phase) ? attempt.phase : null,
     skipped: attempt?.skipped === true,
@@ -73,10 +64,7 @@ function plainAttempt(attempt, index) {
     startedAt: Number.isFinite(attempt?.startedAt) ? attempt.startedAt : null,
     completedAt: Number.isFinite(attempt?.completedAt) ? attempt.completedAt : null,
     latencyMs: Number.isFinite(attempt?.latencyMs) ? attempt.latencyMs : null,
-    errorMessage: sanitizeMessage(attempt?.errorMessage),
-    // What the provider itself reported for this call; null when it reported nothing.
-    inputTokens: tokenCount(attempt?.inputTokens),
-    outputTokens: tokenCount(attempt?.outputTokens)
+    errorMessage: sanitizeMessage(attempt?.errorMessage)
   };
 }
 
@@ -223,9 +211,7 @@ export class RequestLog {
           startedAt: row.startedAt,
           completedAt: row.completedAt ?? (row.startedAt !== null && row.latencyMs !== null ? row.startedAt + row.latencyMs : null),
           latencyMs: row.latencyMs,
-          errorMessage: row.errorMessage,
-          inputTokens: row.inputTokens,
-          outputTokens: row.outputTokens
+          errorMessage: row.errorMessage
         });
       } else if (event && event.state === ATTEMPT_STATES.CALLING) {
         event = this.finishAttempt(row.attemptId, row);
@@ -240,8 +226,6 @@ export class RequestLog {
         row.completedAt = event.completedAt;
         row.latencyMs = event.latencyMs;
         row.errorMessage = event.errorMessage;
-        row.inputTokens = event.inputTokens ?? row.inputTokens;
-        row.outputTokens = event.outputTokens ?? row.outputTokens;
       } else {
         row.attemptSeq = null;
         row.callIndex = calls;
@@ -279,15 +263,6 @@ export class RequestLog {
     this.#prunePending();
     this.#emit("pending", this.pendingEntries.get(startSeq));
     return startSeq;
-  }
-
-  /**
-   * The request id minted for a pending request. Lets the HTTP layer echo the
-   * id back to the client so a log row can be correlated with the call that
-   * produced it — distinct from the sticky session id the client sent.
-   */
-  requestIdOf(startSeq) {
-    return this.pendingEntries.get(startSeq)?.requestId ?? null;
   }
 
   /**
@@ -396,9 +371,7 @@ export class RequestLog {
       status: Number.isInteger(result.status) ? result.status : null,
       completedAt,
       latencyMs,
-      errorMessage: sanitizeMessage(result.errorMessage),
-      inputTokens: ok ? tokenCount(result.inputTokens) : null,
-      outputTokens: ok ? tokenCount(result.outputTokens) : null
+      errorMessage: sanitizeMessage(result.errorMessage)
     });
 
     const pending = this.pendingEntries.get(current.requestSeq);
@@ -498,14 +471,10 @@ export class RequestLog {
       totalMs: Number.isFinite(entry.totalMs) ? entry.totalMs : null,
       bytes: Number.isFinite(entry.bytes) ? entry.bytes : null,
       tokens: Number.isFinite(entry.tokens) ? entry.tokens : null,
-      inputTokens: tokenCount(entry.inputTokens),
-      outputTokens: tokenCount(entry.outputTokens),
       finishReason: sanitizeMessage(entry.finishReason, { maxLength: 60 }),
       errorType: entry.errorType ?? null,
       errorMessage: sanitizeMessage(entry.errorMessage),
-      outcome: entry.outcome === OUTCOMES.FAILED ? OUTCOMES.FAILED : OUTCOMES.SUCCESS,
-      // "completed" | "truncated" | "aborted", or null when not streamed.
-      streamOutcome: STREAM_OUTCOMES.includes(entry.streamOutcome) ? entry.streamOutcome : null
+      outcome: entry.outcome === OUTCOMES.FAILED ? OUTCOMES.FAILED : OUTCOMES.SUCCESS
     };
 
     this.entries.set(this.#keyOf(stored), stored);
@@ -527,37 +496,14 @@ export class RequestLog {
     return this.entries.get(key) ?? null;
   }
 
-  /**
-   * Look an entry up by the request id the log minted for it — the value
-   * echoed to the client as `x-multi-ai-request-id`. This names exactly one
-   * call, so it is what `/api/requests/<id>` resolves.
-   */
-  findByRequestId(id) {
-    const wanted = String(id ?? "");
-    if (!wanted) return null;
-    for (const entry of this.entries.values()) {
-      if (entry.requestId === wanted) return entry;
-    }
-    return null;
-  }
-
-  /**
-   * Look an entry up by the client's sticky session id. A session names many
-   * requests, so it is looked up explicitly (`GET /api/requests?session=<id>`)
-   * and never through the single-request endpoint.
-   */
-  findBySession(id) {
+  /** Look an entry up by its client-visible request id. */
+  findById(id) {
     const wanted = String(id ?? "");
     if (!wanted) return null;
     for (const entry of this.entries.values()) {
       if (entry.id === wanted) return entry;
     }
     return null;
-  }
-
-  /** Older alias. Resolves a request id, never a session id. */
-  findById(id) {
-    return this.findByRequestId(id);
   }
 
   /**
@@ -567,7 +513,7 @@ export class RequestLog {
    * `nextCursor` never sees a shifting window: new requests arriving
    * mid-pagination have higher sequence numbers and cannot reorder the page.
    */
-  list({ limit = 50, cursor = null, status = null, provider = null, protocol = null, outcome = null, pool = null, session = null } = {}) {
+  list({ limit = 50, cursor = null, status = null, provider = null, protocol = null, outcome = null, pool = null } = {}) {
     const size = Math.max(1, Math.min(Number(limit) || 50, this.maxEntries));
 
     // `Number(null)` is 0, which would match every sequence number and return
@@ -581,9 +527,6 @@ export class RequestLog {
       if (outcome && entry.outcome !== outcome) return false;
       if (protocol && entry.protocol !== protocol) return false;
       if (provider && entry.finalProvider !== provider) return false;
-      // The sticky session id is a different identifier from the request id,
-      // so looking a session up is an explicit filter, not a fallback lookup.
-      if (session && entry.id !== String(session)) return false;
       // "text"/"vision" are the only pools; any other value is ignored rather
       // than treated as an empty filter, so a typo cannot silently hide rows.
       if ((pool === POOLS.TEXT || pool === POOLS.VISION) && entry.pool !== pool) return false;
@@ -602,21 +545,6 @@ export class RequestLog {
       total: this.entries.size,
       nextCursor
     };
-  }
-
-  /**
-   * Forget every FINISHED request and its attempt events, but keep requests that
-   * are still running (and their attempts), so a Clear pressed mid-request does
-   * not orphan a call that is about to be recorded. Returns how many finished
-   * requests were removed.
-   */
-  clearFinished() {
-    const removed = this.entries.size;
-    this.entries.clear();
-    for (const [attemptId, event] of this.attemptEvents) {
-      if (!this.pendingEntries.has(event.requestSeq)) this.attemptEvents.delete(attemptId);
-    }
-    return removed;
   }
 
   clear() {

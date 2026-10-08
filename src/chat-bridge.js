@@ -1,8 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
-import { markStreamFailure, parseToolArguments } from "./bridge-errors.js";
-import { splitInlineDataUrl, unsupportedContent, unsupportedImageSource } from "./image-source.js";
-import { geminiModelsUrl } from "./upstream-url.js";
 
 /**
  * OpenAI chat-completions bridge.
@@ -56,6 +53,10 @@ function newId(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
 }
 
+function safeParse(text) {
+  try { return JSON.parse(text); } catch { return {}; }
+}
+
 function chatMessages(body) {
   return (Array.isArray(body?.messages) ? body.messages : []).filter(
     (message) => message && typeof message === "object"
@@ -70,10 +71,6 @@ function textOfContent(content) {
     .map((part) => {
       if (typeof part === "string") return part;
       if (part?.type === "image_url") return "[image]";
-      // Gemini generateContent translation does not carry these parts; a text
-      // extraction must refuse them instead of returning "" and dropping them.
-      if (part?.type === "input_audio") throw unsupportedContent("an OpenAI Chat input_audio part");
-      if (part?.type === "file") throw unsupportedContent("an OpenAI Chat file part");
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");
@@ -84,15 +81,14 @@ function imageUrlOf(part) {
   return typeof url === "string" ? url : url?.url || "";
 }
 
-/** Does a chat content value contain an image part? */
-function contentHasImage(content) {
-  if (!Array.isArray(content)) return false;
-  return content.some((part) => part?.type === "image_url" || part?.type === "input_image");
-}
-
 function argsString(args) {
   if (typeof args === "string") return args || "{}";
   return JSON.stringify(args ?? {});
+}
+
+function argsObject(args) {
+  if (typeof args === "string") return safeParse(args);
+  return args && typeof args === "object" ? args : {};
 }
 
 function positiveInt(value) {
@@ -125,7 +121,7 @@ function stopSequences(body) {
 
 // ---------------------------------------------------------- request -> Gemini
 
-export function toGeminiFromChat(body, { sessionId = "" } = {}) {
+export function toGeminiFromChat(body) {
   // Gemini's functionResponse must name the function; the chat protocol only
   // carries the call id, so map it from the assistant turns.
   const callNames = new Map();
@@ -159,10 +155,10 @@ export function toGeminiFromChat(body, { sessionId = "" } = {}) {
       if (text) parts.push({ text });
       for (const call of message.tool_calls || []) {
         if (!call || typeof call.function?.name !== "string" || !call.function.name) continue;
-        const part = { functionCall: { name: call.function.name, args: parseToolArguments(call.function.arguments) } };
+        const part = { functionCall: { name: call.function.name, args: argsObject(call.function.arguments) } };
         // Echo the thoughtSignature a previous Gemini response returned with
         // this call, when the client sent the same tool-call id back.
-        const signature = signatureFor(call.id, sessionId);
+        const signature = signatureFor(call.id);
         if (signature) part.thoughtSignature = signature;
         parts.push(part);
       }
@@ -172,12 +168,6 @@ export function toGeminiFromChat(body, { sessionId = "" } = {}) {
 
     if (role === "tool" || role === "function") {
       const text = textOfContent(message.content);
-      // A tool result carrying an image cannot be expressed as Gemini
-      // functionResponse text, so it is refused rather than flattened to
-      // "[image]" and answered 200.
-      if (contentHasImage(message.content)) {
-        throw unsupportedImageSource("an image inside a tool result");
-      }
       push("user", [{
         functionResponse: {
           name: callNames.get(message.tool_call_id) || (typeof message.name === "string" && message.name) || "tool",
@@ -191,15 +181,9 @@ export function toGeminiFromChat(body, { sessionId = "" } = {}) {
     const parts = [];
     if (Array.isArray(message.content)) {
       for (const part of message.content) {
-        if (part?.type === "image_url" || part?.type === "input_image") {
-          const data = splitInlineDataUrl(imageUrlOf(part));
-          if (!data) {
-            // A remote URL has no generateContent equivalent and the gateway
-            // will not fetch it, so the request is refused explicitly instead
-            // of being answered 200 with the image silently removed.
-            throw unsupportedImageSource("an image URL that is not a base64 data URL");
-          }
-          parts.push({ inlineData: data });
+        if (part?.type === "image_url") {
+          const data = /^data:([^;,]+);base64,(.+)$/s.exec(imageUrlOf(part));
+          if (data) parts.push({ inlineData: { mimeType: data[1], data: data[2] } });
         } else {
           const text = textOfContent([part]);
           if (text) parts.push({ text });
@@ -253,8 +237,13 @@ export function toGeminiFromChat(body, { sessionId = "" } = {}) {
   return payload;
 }
 
+function joinUrl(baseUrl, suffix) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  return base + "/" + String(suffix || "").replace(/^\/+/, "");
+}
+
 /** Builds the upstream fetch request for a translated (non-chat) target. */
-export function buildChatRequest(target, upstreamProtocol, body, incomingHeaders = {}, { sessionId = "" } = {}) {
+export function buildChatRequest(target, upstreamProtocol, body, incomingHeaders = {}) {
   const headers = { "content-type": "application/json" };
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
@@ -263,8 +252,9 @@ export function buildChatRequest(target, upstreamProtocol, body, incomingHeaders
   if (upstreamProtocol === "gemini") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
-    const url = geminiModelsUrl(base, target.model, { stream });
-    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromChat(body, { sessionId })) } };
+    const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
+    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
+    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromChat(body)) } };
   }
   throw new Error("Unsupported Chat bridge protocol: " + upstreamProtocol);
 }
@@ -297,7 +287,7 @@ export function geminiJsonToChat(json, model, ctx = {}) {
       text += part.text;
     } else if (part.functionCall) {
       const id = newId("call");
-      rememberSignature(id, part.thoughtSignature, ctx.sessionId);
+      rememberSignature(id, part.thoughtSignature);
       toolCalls.push({
         id,
         type: "function",
@@ -339,10 +329,8 @@ const chunk = (id, created, model, choices, extra = {}) =>
 /**
  * Converts a Gemini SSE stream into `chat.completion.chunk` SSE, ending with
  * `data: [DONE]` (the terminator OpenAI-compatible clients wait for). `events`
- * is an async iterable of raw `data:` strings. An upstream failure after the
- * headers were sent still emits the error event followed by [DONE], then
- * re-throws so the caller can file the request as a failed (truncated) stream
- * instead of a success.
+ * is an async iterable of raw `data:` strings. Never throws: an upstream
+ * failure after headers were sent becomes an error event followed by [DONE].
  */
 export async function* streamToChat(upstreamProtocol, events, model, ctx = {}) {
   if (upstreamProtocol !== "gemini") throw new Error("Unsupported Chat bridge protocol: " + upstreamProtocol);
@@ -376,7 +364,7 @@ export async function* streamToChat(upstreamProtocol, events, model, ctx = {}) {
           const index = nextToolIndex++;
           sawTool = true;
           const callId = newId("call");
-          rememberSignature(callId, part.thoughtSignature, ctx.sessionId);
+          rememberSignature(callId, part.thoughtSignature);
           yield emit([{
             index: 0,
             delta: { tool_calls: [{ index, id: callId, type: "function", function: { name: part.functionCall.name, arguments: "" } }] },
@@ -392,14 +380,11 @@ export async function* streamToChat(upstreamProtocol, events, model, ctx = {}) {
       if (parsed.usageMetadata?.candidatesTokenCount) outputTokens = parsed.usageMetadata.candidatesTokenCount;
     }
   } catch (error) {
-    // Give the client the protocol's error event and terminator, then surface
-    // the failure: `pipeline()` must reject so the request is recorded as
-    // truncated, the target is not marked healthy, and no sticky is saved.
     yield "data: " + JSON.stringify({
       error: { message: String(error?.message || "Upstream stream failed").slice(0, 500), type: "upstream_error" }
     }) + "\n\n";
     yield "data: [DONE]\n\n";
-    throw markStreamFailure(error);
+    return;
   }
 
   yield emit([{ index: 0, delta: {}, finish_reason: sawTool ? "tool_calls" : finish || "stop" }]);

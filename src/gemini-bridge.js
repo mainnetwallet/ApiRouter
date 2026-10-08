@@ -1,11 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { unsupportedImageSource } from "./image-source.js";
-import { openAiChatUrl } from "./upstream-url.js";
 import { cleanSchemaForGemini } from "./anthropic-bridge.js";
-import { INVALID_TOOL_ARGUMENTS, markStreamFailure, parseToolArguments } from "./bridge-errors.js";
 
 function id(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
+}
+
+/** Tool arguments arrive as a JSON string. A malformed one must not crash. */
+function parseArgs(value) {
+  if (typeof value !== "string") return value && typeof value === "object" ? value : {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function textParts(parts = []) {
@@ -13,13 +21,11 @@ function textParts(parts = []) {
 }
 
 function inlineToChat(part) {
-  const data = part?.inlineData ?? part?.inline_data;
+  const data = part?.inlineData;
   if (!data?.data) return null;
   return {
     type: "image_url",
-    image_url: {
-      url: "data:" + (data.mimeType || data.mime_type || "application/octet-stream") + ";base64," + data.data
-    }
+    image_url: { url: "data:" + (data.mimeType || "application/octet-stream") + ";base64," + data.data }
   };
 }
 
@@ -75,23 +81,12 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
         // is an object. A bare string is not a valid OpenAI content part.
         parts.push({ type: "text", text: part.text });
       }
-      if (part?.inlineData || part?.inline_data) {
+      if (part?.inlineData) {
         const image = inlineToChat(part);
-        // An inlineData with no bytes cannot be replayed, so it is refused
-        // rather than silently dropped from the translated request.
-        if (!image) throw unsupportedImageSource("a Gemini inlineData part with no data");
-        parts.push(image);
-      }
-      if (part?.fileData || part?.file_data) {
-        // fileData references a URI only Gemini can resolve; the gateway will
-        // not fetch it, so the request is refused explicitly.
-        throw unsupportedImageSource("a Gemini fileData (fileUri) reference");
+        if (image) parts.push(image);
       }
       if (part?.functionCall) {
-        // Gemini's classic functionCall has no id, so pair it with the answer by
-        // the function name (the same fallback functionResponse uses). A random
-        // id here would never match the tool_call_id the response carries.
-        const callId = part.functionCall.id || part.functionCall.name || id("call");
+        const callId = part.functionCall.id || id("call");
         toolCalls.push({
           id: callId,
           type: "function",
@@ -124,13 +119,9 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
     // message there would separate the tool result from the assistant turn it
     // answers, which OpenAI-compatible providers reject outright.
     if (parts.length > 0) {
-      // Tool results must sit immediately after the assistant message that
-      // requested them, so they are appended before any trailing user text.
-      messages.push(...toolResults);
       messages.push({ role, content: hasImage ? parts : text.join("") });
-    } else {
-      messages.push(...toolResults);
     }
+    messages.push(...toolResults);
   }
 
   const tools = [];
@@ -221,6 +212,11 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
   return out;
 }
 
+function joinUrl(base, suffix) {
+  const root = String(base || "").replace(/\/+$/, "");
+  return root + "/" + String(suffix || "").replace(/^\/+/, "");
+}
+
 /** Builds the upstream fetch request for a translated (chat-compatible) target. */
 export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { stream = false } = {}) {
   const headers = {
@@ -231,8 +227,9 @@ export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { s
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
 
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
+  const path = base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions";
   return {
-    url: openAiChatUrl(base),
+    url: joinUrl(base, path),
     options: {
       method: "POST",
       headers,
@@ -242,11 +239,9 @@ export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { s
 }
 
 function finishReason(reason, hasToolCalls) {
-  // A truncated response is truncated whether or not it also emitted tool calls.
-  if (reason === "length") return "MAX_TOKENS";
-  if (reason === "content_filter" || reason === "safety") return "SAFETY";
-  if (reason === "recitation") return "RECITATION";
   if (hasToolCalls) return "STOP";
+  if (reason === "length") return "MAX_TOKENS";
+  if (reason === "content_filter") return "SAFETY";
   return "STOP";
 }
 
@@ -269,7 +264,7 @@ export function chatJsonToGemini(json) {
       functionCall: {
         id: call.id,
         name: fn.name,
-        args: parseToolArguments(fn.arguments)
+        args: parseArgs(fn.arguments)
       }
     });
   }
@@ -317,11 +312,9 @@ export async function* streamToGemini(events) {
       const call = pending.get(key);
       return {
         functionCall: {
-          // Same id fallback as the non-streaming path, so a client that echoes
-          // the call back keeps a stable pairing.
-          id: call.id || call.name || "tool",
+          id: call.id ?? undefined,
           name: call.name || "tool",
-          args: parseToolArguments(call.arguments)
+          args: parseArgs(call.arguments)
         }
       };
     });
@@ -330,74 +323,58 @@ export async function* streamToGemini(events) {
     return parts;
   };
 
-  try {
-    for await (const data of events) {
-      if (data === "[DONE]") break;
-      let parsed;
-      try { parsed = JSON.parse(data); } catch { continue; }
-      if (parsed?.error) {
-        // The client keeps Gemini's error envelope, but an explicit provider
-        // error inside a 200 body is a FAILED stream, not a success: the throw
-        // (marked as an upstream failure, never a client abort) makes
-        // `pipeline()` reject so the server records a truncated request, cools
-        // the target and saves no sticky.
-        yield sseData(parsed);
-        const message = typeof parsed.error === "string" ? parsed.error : parsed.error?.message;
-        throw markStreamFailure(new Error(message || "Upstream stream reported an error"));
-      }
+  for await (const data of events) {
+    if (data === "[DONE]") break;
+    let parsed;
+    try { parsed = JSON.parse(data); } catch { continue; }
+    if (parsed?.error) {
+      yield sseData(parsed);
+      continue;
+    }
 
-      const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
-      for (const choice of choices) {
-        const delta = choice?.delta || {};
-        const parts = [];
-        if (typeof delta.content === "string" && delta.content) parts.push({ text: delta.content });
+    const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
+    for (const choice of choices) {
+      const delta = choice?.delta || {};
+      const parts = [];
+      if (typeof delta.content === "string" && delta.content) parts.push({ text: delta.content });
 
-        const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
-        for (const call of fragments) {
-          const key = call.index ?? call.id ?? order.length;
-          let entry = pending.get(key);
-          if (!entry) {
-            entry = { id: null, name: "", arguments: "" };
-            pending.set(key, entry);
-            order.push(key);
-          }
-          if (call.id) entry.id = call.id;
-          if (call.function?.name) entry.name += call.function.name;
-          if (typeof call.function?.arguments === "string") entry.arguments += call.function.arguments;
+      const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+      for (const call of fragments) {
+        const key = call.index ?? call.id ?? order.length;
+        let entry = pending.get(key);
+        if (!entry) {
+          entry = { id: null, name: "", arguments: "" };
+          pending.set(key, entry);
+          order.push(key);
         }
-
-        const finishing = Boolean(choice?.finish_reason);
-        if (finishing) parts.push(...drainCalls());
-
-        if (!parts.length && !finishing) continue;
-        const candidate = { content: { role: "model", parts }, index: 0 };
-        // `finishReason` is a terminal signal, so it may only appear on the
-        // chunk that actually carries one: announcing `STOP` on an intermediate
-        // chunk tells the client the answer is already over.
-        if (finishing) candidate.finishReason = finishReason(choice.finish_reason, parts.some((part) => part.functionCall));
-        yield sseData({ candidates: [candidate] });
+        if (call.id) entry.id = call.id;
+        if (call.function?.name) entry.name += call.function.name;
+        if (typeof call.function?.arguments === "string") entry.arguments += call.function.arguments;
       }
-    }
 
-    // A stream cut off before any finish reason still owes the client its calls,
-    // but no finish reason is invented for it: Gemini leaves `finishReason`
-    // unset until the model actually stopped, and the client stops at the end
-    // of the stream.
-    const remaining = drainCalls();
-    if (remaining.length) {
-      yield sseData({ candidates: [{ content: { role: "model", parts: remaining }, index: 0 }] });
-    }
-  } catch (error) {
-    if (error?.errorType === INVALID_TOOL_ARGUMENTS) {
-      // Gemini's own mid-stream error envelope (the same shape a native Gemini
-      // upstream sends), then the stream fails: never a silent `{}` and never a
-      // recorded success. Marked as a stream failure so the truncated request is
-      // classified as a truncation rather than a client abort.
+      const finishing = Boolean(choice?.finish_reason);
+      if (finishing) parts.push(...drainCalls());
+
+      if (!parts.length && !finishing) continue;
       yield sseData({
-        error: { code: 400, status: "INVALID_ARGUMENT", message: String(error.message || "invalid_tool_arguments").slice(0, 500) }
+        candidates: [{
+          content: { role: "model", parts },
+          finishReason: finishReason(choice.finish_reason, parts.some((part) => part.functionCall)),
+          index: 0
+        }]
       });
-      throw markStreamFailure(error);
     }
-    throw error;
+  }
+
+  // A stream cut off before any finish reason still owes the client its calls.
+  const remaining = drainCalls();
+  if (remaining.length) {
+    yield sseData({
+      candidates: [{
+        content: { role: "model", parts: remaining },
+        finishReason: "STOP",
+        index: 0
+      }]
+    });
   }
 }

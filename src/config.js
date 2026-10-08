@@ -1,37 +1,7 @@
 import { providerProtocols } from "./adapters.js";
 import { readPriority } from "./routing-plan.js";
-import { buildTargetId } from "./health.js";
 
 const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529];
-
-/**
- * Parse `RETRY_STATUS_CODES`. Unlike a free-form list, every entry has to be a
- * real HTTP status code: a typo used to be filtered out silently, so
- * `RETRY_STATUS_CODES=abc` quietly retried nothing while looking configured.
- * An unset or empty variable keeps the default set.
- */
-function readStatusCodes(env, name, fallback) {
-  const raw = env[name];
-  if (raw === undefined || raw === null || String(raw).trim() === "") return new Set(fallback);
-  const entries = String(raw).split(",").map((value) => value.trim()).filter((value) => value !== "");
-  if (entries.length === 0) {
-    throw new Error(`Invalid ${name}: expected a comma-separated list of HTTP status codes (100-599), got "${String(raw).slice(0, 40)}"`);
-  }
-  const codes = entries.map((entry) => {
-    const value = Number(entry);
-    if (!Number.isInteger(value) || value < 100 || value > 599) {
-      throw new Error(`Invalid ${name}: "${entry.slice(0, 20)}" is not an HTTP status code (100-599)`);
-    }
-    return value;
-  });
-  return new Set(codes);
-}
-
-/** Default request-body ceiling: large enough for real payloads, bounded. */
-export const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024;
-export const DEFAULT_MAX_UPSTREAM_BODY_BYTES = 32 * 1024 * 1024;
-export const DEFAULT_STREAM_TOTAL_TIMEOUT_MS = 30 * 60 * 1000;
-export const DEFAULT_MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 /**
  * The single source of truth for which providers exist. Every other list —
  * `providers/catalog.js`, the `/health` payload, the env-var audit — hangs off
@@ -104,7 +74,7 @@ export function buildTargets(providers, pool = "text") {
         const baseUrl = Array.isArray(provider.baseUrls) ? provider.baseUrls[keyIndex] : provider.baseUrl;
         if (!baseUrl) continue;
         targets.push({
-          ...(pool === VISION_POOL ? { id: buildTargetId({ provider: providerId, model, keyIndex, pool: VISION_POOL }), pool: VISION_POOL } : {}),
+          ...(pool === VISION_POOL ? { id: `vision:${providerId}:${model}:key-${keyIndex}`, pool: VISION_POOL } : {}),
           provider: providerId,
           model,
           baseUrl,
@@ -142,46 +112,18 @@ export function readProviders(env, { vision = false } = {}) {
 export function loadConfig(env = process.env) {
   const providers = readProviders(env);
   const visionProviders = readProviders(env, { vision: true });
+  const retryableValues = split(env.RETRY_STATUS_CODES || DEFAULT_RETRY_STATUS_CODES.join(","))
+    .map(Number).filter((v) => Number.isInteger(v) && v >= 100 && v <= 599);
   return {
     routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
-    port: readNumber(env, "PORT", 9999, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
-    // Bind address. Unset keeps the historical behaviour (all interfaces);
-    // `HOST=127.0.0.1` keeps an unauthenticated gateway on loopback.
-    host: String(env.HOST || "").trim(),
+    port: readNumber(env, "PORT", 8788, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
     timeoutMs: readNumber(env, "REQUEST_TIMEOUT_MS", 120000, { min: 1, expected: "a positive integer" }),
     // 0 is meaningful here: server.js then uses the full request timeout for streams.
     connectTimeoutMs: readNumber(env, "STREAM_CONNECT_TIMEOUT_MS", 30000, { min: 0, expected: "a non-negative integer (0 disables the separate connect timeout)" }),
-    // After the headers arrive, a stream is bounded by the gap between chunks,
-    // not by the total duration: a provider that answers 200 and then stalls
-    // must not hold the client (and the walk) open forever. 0 disables it.
-    streamIdleTimeoutMs: readNumber(env, "STREAM_IDLE_TIMEOUT_MS", 120000, { min: 0, expected: "a non-negative integer (0 disables the idle timeout)" }),
-    // Absolute ceiling on one streamed attempt, measured from the moment the
-    // attempt started. Non-streamed attempts are bounded by REQUEST_TIMEOUT_MS
-    // end to end; a stream may legitimately run far longer than that, so it has
-    // its own, much larger bound that stops a provider drip-feeding bytes
-    // forever. 0 disables it.
-    streamTotalTimeoutMs: readNumber(env, "STREAM_TOTAL_TIMEOUT_MS", DEFAULT_STREAM_TOTAL_TIMEOUT_MS, { min: 0, expected: "a non-negative integer (0 disables the absolute stream deadline)" }),
-    // Most bytes of one upstream response the gateway will hold in memory
-    // (translated non-stream bodies and usage inspection). Enforced while
-    // reading, never from Content-Length. 0 disables it.
-    maxUpstreamBodyBytes: readNumber(env, "MAX_UPSTREAM_BODY_BYTES", DEFAULT_MAX_UPSTREAM_BODY_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
-    // Most bytes of ONE incomplete SSE event (since the last event delimiter)
-    // held in memory while a stream is translated. Enforced as chunks arrive;
-    // exceeding it cancels the upstream stream and cools the provider. 0 disables it.
-    maxSseEventBytes: readNumber(env, "MAX_SSE_EVENT_BYTES", DEFAULT_MAX_SSE_EVENT_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
-    retryableStatus: readStatusCodes(env, "RETRY_STATUS_CODES", DEFAULT_RETRY_STATUS_CODES),
-    // Request-body ceiling. The gateway forwards bodies to providers, so it
-    // cannot size them itself; it only guards its own memory. `0` disables the
-    // guard, and MAX_REQUEST_BODY_MB stays ignored for backwards compatibility
-    // (see .env.example).
-    maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", DEFAULT_MAX_BODY_BYTES, { min: 0, expected: "a non-negative integer (0 disables the limit)" }),
-    // Sticky target lifetime after a success: 20 minutes. Unlike older
-    // numeric settings, this must not silently fall back when configured:
-    // a typo or zero would change routing semantics in a surprising way.
-    stickyTtlMs: readNumber(env, "STICKY_TTL_MS", 20 * 60 * 1000, {
-      min: 1,
-      expected: "a positive integer"
-    }),
+    retryableStatus: new Set(retryableValues),
+    // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
+    // exists so tests can use a short real-clock TTL).
+    stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 20 * 60 * 1000,
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,

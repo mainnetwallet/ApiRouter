@@ -5,7 +5,7 @@ OpenCode can use the router as an OpenAI-compatible provider.
 ## Gateway
 
 ```text
-http://localhost:9999/v1
+http://localhost:8788/v1
 ```
 
 ## Configure
@@ -22,7 +22,7 @@ Example:
       "package": "@opencode/ai/providers/openai-compatible",
       "name": "MultiAI Router",
       "settings": {
-        "baseURL": "http://localhost:9999/v1",
+        "baseURL": "http://localhost:8788/v1",
         "apiKey": "{env:MULTIAI_ROUTER_API_KEY}"
       },
       "models": {
@@ -49,8 +49,7 @@ POST /v1/chat/completions
 
 ## Fallback
 
-Targets are tried in their configured order (sticky, then priority, then the
-normal fallback list), so a request moves to the next available target on a
+Targets are health-ranked, so a request moves to the next available target on a
 retryable failure. A chat-completions provider is called directly; a Gemini
 provider is reached through the router's translation bridge, so a Gemini-only
 setup still works.

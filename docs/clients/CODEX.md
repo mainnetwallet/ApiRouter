@@ -11,7 +11,7 @@ npm start
 Gateway:
 
 ```text
-http://localhost:9999/v1
+http://localhost:8788/v1
 ```
 
 ## Configure provider
@@ -49,48 +49,23 @@ Edit:
 notepad $HOME\.codex\config.toml
 ```
 
-### Without gateway authentication
-
-If `MULTIAI_ROUTER_API_KEYS=` is empty in the router `.env`, **do not configure `env_key` in Codex**. Without `env_key`, Codex does not require an API key for this provider.
+Example:
 
 ```toml
 model_provider = "multi_ai_router"
-model = "Router"
 
 [model_providers.multi_ai_router]
 name = "MultiAI Router"
-base_url = "http://localhost:9999/v1"
-wire_api = "responses"
-```
-
-### With gateway authentication
-
-If `MULTIAI_ROUTER_API_KEYS` contains one or more keys, configure Codex with the matching environment variable:
-
-```toml
-model_provider = "multi_ai_router"
-model = "Router"
-
-[model_providers.multi_ai_router]
-name = "MultiAI Router"
-base_url = "http://localhost:9999/v1"
+base_url = "http://localhost:8788/v1"
 env_key = "MULTIAI_ROUTER_API_KEY"
 wire_api = "responses"
 ```
 
-Then set the same key in the environment:
+Then, if gateway authentication is enabled:
 
 ```powershell
 $env:MULTIAI_ROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
 ```
-
-For a persistent Windows environment variable:
-
-```powershell
-setx MULTIAI_ROUTER_API_KEY "YOUR_LOCAL_ROUTER_KEY"
-```
-
-After using `setx`, open a new terminal before starting Codex.
 
 Start:
 

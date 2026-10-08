@@ -2,7 +2,7 @@ import { bridgeProtocol, selectBridgeTargets } from "../anthropic-bridge.js";
 import { codexProtocol, selectCodexTargets } from "../codex-bridge.js";
 import { chatProtocol, selectChatTargets } from "../chat-bridge.js";
 import { geminiProtocol, selectGeminiTargets } from "../gemini-bridge.js";
-import { buildTargetId, targetId } from "../health.js";
+import { targetId } from "../health.js";
 
 export function selectRouteTargets(targets, protocol, requestedModel) {
   const all = Array.isArray(targets) ? targets : [];
@@ -60,12 +60,7 @@ export function pinTargets(targets, pin = {}, requestedModel = "") {
   if (pin?.customModel === true && model && narrowed.length === 0 && providerTargets.length > 0) {
     const byKey = new Map();
     for (const target of providerTargets) {
-      if (byKey.has(target.keyIndex)) continue;
-      const copy = { ...target, model };
-      // A target with an explicit id (the vision pool) would otherwise keep the
-      // ORIGINAL model's id and share its health record.
-      if (target.id) copy.id = buildTargetId({ provider: target.provider, model, keyIndex: target.keyIndex, pool: target.pool });
-      byKey.set(target.keyIndex, copy);
+      if (!byKey.has(target.keyIndex)) byKey.set(target.keyIndex, { ...target, model });
     }
     return { pinned: true, targets: [...byKey.values()], provider, keyIndex, model, custom: true };
   }

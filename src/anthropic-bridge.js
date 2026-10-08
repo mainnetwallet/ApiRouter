@@ -1,8 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { unsupportedContent, unsupportedImageSource } from "./image-source.js";
-import { geminiModelsUrl, openAiChatUrl } from "./upstream-url.js";
-import { parseToolArguments } from "./bridge-errors.js";
-import { sseEventTooLarge } from "./upstream-body.js";
 
 /**
  * Anthropic Messages bridge.
@@ -51,13 +47,7 @@ function blocksOf(content) {
 
 function textOfBlocks(content) {
   return blocksOf(content)
-    .map((b) => {
-      // A text-only extraction must never silently discard an image: the
-      // caller has to preserve it (as inlineData / image_url) or refuse it.
-      if (b?.type === "image") throw unsupportedImageSource("an image inside a tool result");
-      if (b?.type === "document") throw unsupportedContent("an Anthropic document block");
-      return b?.type === "text" ? b.text ?? "" : "";
-    })
+    .map((b) => (b?.type === "text" ? b.text ?? "" : b?.type === "image" ? "[image]" : ""))
     .join("\n");
 }
 
@@ -65,6 +55,10 @@ function systemText(system) {
   if (!system) return "";
   if (typeof system === "string") return system;
   return textOfBlocks(system);
+}
+
+function safeParse(text) {
+  try { return JSON.parse(text); } catch { return {}; }
 }
 
 /** Gemini rejects most JSON-Schema extras; keep only what it understands. */
@@ -147,9 +141,6 @@ export function toOpenAIChatRequest(body, model) {
         content: b.is_error ? "Error: " + content : content
       });
     }
-    // A document block has no OpenAI chat-completions equivalent here; it must
-    // be refused, not filtered out of the translated request.
-    if (blocks.some((b) => b?.type === "document")) throw unsupportedContent("an Anthropic document block");
     const rest = blocks.filter((b) => b.type === "text" || b.type === "image");
     if (rest.length === 0) continue;
     const hasImage = rest.some((b) => b.type === "image");
@@ -158,21 +149,12 @@ export function toOpenAIChatRequest(body, model) {
     } else {
       messages.push({
         role: "user",
-        content: rest.map((b) => {
-          if (b.type === "image" && b.source?.type === "base64") {
-            if (!b.source.data) throw unsupportedImageSource("an Anthropic base64 image with no data");
-            return {
-              type: "image_url",
-              image_url: { url: `data:${b.source.media_type || "application/octet-stream"};base64,${b.source.data}` }
-            };
-          }
-          // OpenAI-compatible targets accept a remote image URL as-is.
-          if (b.type === "image" && b.source?.url) {
-            return { type: "image_url", image_url: { url: b.source.url } };
-          }
-          if (b.type === "image") throw unsupportedImageSource("an image file reference");
-          return { type: "text", text: b.text ?? "" };
-        })
+        content: rest.map((b) =>
+          b.type === "image" && b.source?.type === "base64"
+            ? { type: "image_url", image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } }
+            : b.type === "image" && b.source?.url
+              ? { type: "image_url", image_url: { url: b.source.url } }
+              : { type: "text", text: b.text ?? "" })
       });
     }
   }
@@ -205,31 +187,21 @@ export function toOpenAIChatRequest(body, model) {
 
 // ------------------------------------------------------ request -> Gemini
 
-// Gemini 3 needs the thoughtSignature echoed back with a functionCall. None of
-// the other client protocols has a field for it, so it is kept keyed by the
-// tool-call id *and* the request session: two unrelated sessions reusing the
-// same id (clients pick `call_1`, `toolu_1`, ... freely) must never exchange
-// signatures. Requests without an explicit X-Multi-AI-Session-ID share the
-// documented default session, exactly like sticky routing.
-//
-// Eviction is explicit: the store is a hard-bounded FIFO (oldest entry leaves
-// first) and it is volatile, so a restart starts empty. A missing signature
-// omits the field rather than emitting an empty one; Gemini then rejects the
-// request deterministically through the normal upstream-error path.
+// Gemini 3 needs the thoughtSignature echoed back with a functionCall. The
+// Anthropic protocol has no field for it, so keep it keyed by tool id.
 const signatures = new Map();
 const MAX_SIGNATURES = 2000;
-const signatureKey = (id, sessionId) => (sessionId ? `${sessionId}\u0000${String(id)}` : String(id));
-export function rememberSignature(id, signature, sessionId = "") {
+export function rememberSignature(id, signature) {
   if (!signature) return;
-  signatures.set(signatureKey(id, sessionId), signature);
+  signatures.set(id, signature);
   while (signatures.size > MAX_SIGNATURES) signatures.delete(signatures.keys().next().value);
 }
 
-export function signatureFor(id, sessionId = "") {
-  return signatures.get(signatureKey(id, sessionId));
+export function signatureFor(id) {
+  return signatures.get(id);
 }
 
-export function toGeminiRequest(body, { sessionId = "" } = {}) {
+export function toGeminiRequest(body) {
   const toolNames = new Map();
   for (const msg of body.messages || []) {
     for (const b of blocksOf(msg.content)) if (b.type === "tool_use") toolNames.set(b.id, b.name);
@@ -250,25 +222,10 @@ export function toGeminiRequest(body, { sessionId = "" } = {}) {
       if (b.type === "text") {
         if (b.text) parts.push({ text: b.text });
       } else if (b.type === "image" && b.source?.type === "base64") {
-        if (!b.source.data) throw unsupportedImageSource("an Anthropic base64 image with no data");
-        parts.push({
-          inlineData: {
-            mimeType: b.source.media_type || b.source.mime_type || "application/octet-stream",
-            data: b.source.data
-          }
-        });
-      } else if (b.type === "image") {
-        // An Anthropic `url` or `file` source (or a malformed block) is not
-        // expressible as Gemini inlineData, and fetching it is an SSRF surface.
-        throw unsupportedImageSource(
-          b.source?.url ? "an image URL (the gateway never fetches it)" : "an image file reference"
-        );
-      } else if (b.type === "document") {
-        // Not expressible by this Gemini translation; refuse rather than drop.
-        throw unsupportedContent("an Anthropic document block");
+        parts.push({ inlineData: { mimeType: b.source.media_type, data: b.source.data } });
       } else if (b.type === "tool_use") {
         const part = { functionCall: { name: b.name, args: b.input ?? {} } };
-        const sig = signatureFor(b.id, sessionId);
+        const sig = signatures.get(b.id);
         if (sig) part.thoughtSignature = sig;
         parts.push(part);
       } else if (b.type === "tool_result") {
@@ -312,8 +269,13 @@ export function toGeminiRequest(body, { sessionId = "" } = {}) {
   return payload;
 }
 
+function joinUrl(baseUrl, suffix) {
+  const base = String(baseUrl || "").replace(/\/+$/, "");
+  return base + "/" + String(suffix || "").replace(/^\/+/, "");
+}
+
 /** Builds the upstream fetch request for a translated (non-Anthropic) target. */
-export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeaders = {}, { sessionId = "" } = {}) {
+export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeaders = {}) {
   const headers = { "content-type": "application/json" };
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
@@ -322,14 +284,15 @@ export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeade
   if (upstreamProtocol === "openai-chat") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers.authorization = "Bearer " + target.apiKey;
-    const url = openAiChatUrl(base);
+    const url = joinUrl(base, base.endsWith("/v1") ? "chat/completions" : "v1/chat/completions");
     return { url, options: { method: "POST", headers, body: JSON.stringify(toOpenAIChatRequest(body, target.model)) } };
   }
   if (upstreamProtocol === "gemini") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
-    const url = geminiModelsUrl(base, target.model, { stream });
-    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiRequest(body, { sessionId })) } };
+    const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
+    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
+    return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiRequest(body)) } };
   }
   throw new Error("Unsupported bridge protocol: " + upstreamProtocol);
 }
@@ -352,7 +315,7 @@ export function openAIJsonToAnthropic(json, model) {
       type: "tool_use",
       id: call.id || newId("toolu"),
       name: call.function?.name || "tool",
-      input: parseToolArguments(call.function?.arguments)
+      input: safeParse(call.function?.arguments || "{}")
     });
   }
   if (content.length === 0) content.push({ type: "text", text: "" });
@@ -372,7 +335,7 @@ export function openAIJsonToAnthropic(json, model) {
   };
 }
 
-export function geminiJsonToAnthropic(json, model, { sessionId = "" } = {}) {
+export function geminiJsonToAnthropic(json, model) {
   const candidate = json?.candidates?.[0] ?? {};
   const content = [];
   for (const part of candidate.content?.parts || []) {
@@ -383,7 +346,7 @@ export function geminiJsonToAnthropic(json, model, { sessionId = "" } = {}) {
       else content.push({ type: "text", text: part.text });
     } else if (part.functionCall) {
       const id = newId("toolu");
-      rememberSignature(id, part.thoughtSignature, sessionId);
+      rememberSignature(id, part.thoughtSignature);
       content.push({ type: "tool_use", id, name: part.functionCall.name, input: part.functionCall.args ?? {} });
     }
   }
@@ -404,117 +367,28 @@ export function geminiJsonToAnthropic(json, model, { sessionId = "" } = {}) {
   };
 }
 
-export function convertJsonResponse(upstreamProtocol, json, model, options = {}) {
-  return upstreamProtocol === "gemini" ? geminiJsonToAnthropic(json, model, options) : openAIJsonToAnthropic(json, model);
+export function convertJsonResponse(upstreamProtocol, json, model) {
+  return upstreamProtocol === "gemini" ? geminiJsonToAnthropic(json, model) : openAIJsonToAnthropic(json, model);
 }
 
 // -------------------------------------------------------- streaming
 
-const LF = 0x0a;
-const CR = 0x0d;
-/** Longest event delimiter (`\r\n\r\n`) in bytes. */
-const MAX_DELIMITER_BYTES = 4;
-
-const dataOf = (raw) => raw.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
-
-/**
- * Byte-level equivalent of `/\r?\n\r?\n/`: the leftmost event delimiter at or
- * after `from`, as `{ start, end }`, or null. LF and CR never occur inside a
- * multi-byte UTF-8 sequence, so this is safe on undecoded bytes.
- */
-function findDelimiter(buf, from) {
-  let i = buf.indexOf(LF, from);
-  while (i !== -1) {
-    let end = -1;
-    if (buf[i + 1] === LF) end = i + 2;
-    else if (buf[i + 1] === CR && buf[i + 2] === LF) end = i + 3;
-    if (end !== -1) return { start: i > 0 && buf[i - 1] === CR ? i - 1 : i, end };
-    i = buf.indexOf(LF, i + 1);
-  }
-  return null;
-}
-
-/** Bytes at the end of `buf` that could still grow into a delimiter (they are not event content yet). */
-function delimiterPrefixBytes(buf) {
-  const n = buf.length;
-  const at = (back) => buf[n - back];
-  // Longest first: CR LF CR, LF CR, CR LF, then a lone CR or LF.
-  if (n >= 3 && at(3) === CR && at(2) === LF && at(1) === CR) return 3;
-  if (n >= 2 && at(2) === LF && at(1) === CR) return 2;
-  if (n >= 2 && at(2) === CR && at(1) === LF) return 2;
-  if (n >= 1 && (at(1) === CR || at(1) === LF)) return 1;
-  return 0;
-}
-
-/**
- * Yields the `data:` payload of each SSE event from a web ReadableStream.
- *
- * `maxEventBytes` is a hard bound, in UTF-8 bytes, on ONE incomplete event: the
- * bytes received since the last event delimiter. The work happens on raw bytes,
- * and an incoming chunk is consumed in windows that never let the retained
- * buffer exceed `maxEventBytes` of event content (plus at most 3 trailing bytes
- * that may still turn out to be the delimiter). An oversized chunk is therefore
- * never appended or decoded whole, and a complete event larger than the limit is
- * rejected even when its delimiter arrives in the same chunk. Only complete
- * events are decoded, so a multi-byte character split across chunks is simply
- * not decoded until the rest of it has arrived.
- *
- * Exceeding the limit throws UPSTREAM_SSE_EVENT_TOO_LARGE (an upstream fault);
- * leaving the generator cancels the upstream stream. 0 / unset disables the
- * bound and keeps the original unbounded text path.
- */
-export async function* sseData(webStream, { maxEventBytes = 0 } = {}) {
+/** Yields the `data:` payload of each SSE event from a web ReadableStream. */
+export async function* sseData(webStream) {
   const decoder = new TextDecoder();
-  const limited = Number.isFinite(maxEventBytes) && maxEventBytes > 0;
-
-  if (!limited) {
-    let buffer = "";
-    for await (const chunk of webStream) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let idx;
-      while ((idx = buffer.search(/\r?\n\r?\n/)) !== -1) {
-        const raw = buffer.slice(0, idx);
-        buffer = buffer.slice(idx).replace(/^\r?\n\r?\n/, "");
-        const data = dataOf(raw);
-        if (data) yield data;
-      }
-    }
-    const tail = dataOf(buffer);
-    if (tail) yield tail;
-    return;
-  }
-
-  // Bytes of the current incomplete event (always a private copy, never a view
-  // into an upstream chunk, so a big chunk is not kept alive by its tail).
-  let pending = Buffer.alloc(0);
+  let buffer = "";
   for await (const chunk of webStream) {
-    const incoming = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-    let offset = 0;
-    while (offset < incoming.length) {
-      // Largest window that keeps pending <= maxEventBytes + a whole delimiter.
-      const room = maxEventBytes + MAX_DELIMITER_BYTES - pending.length;
-      const window = incoming.subarray(offset, offset + room);
-      offset += window.length;
-      const scanFrom = Math.max(0, pending.length - (MAX_DELIMITER_BYTES - 1));
-      let work = pending.length === 0 ? window : Buffer.concat([pending, window]);
-
-      let pos = 0;
-      let found;
-      while ((found = findDelimiter(work, Math.max(pos, scanFrom))) !== null) {
-        if (found.start - pos > maxEventBytes) throw sseEventTooLarge(maxEventBytes);
-        const data = dataOf(decoder.decode(work.subarray(pos, found.end), { stream: true }));
-        pos = found.end;
-        if (data) yield data;
-      }
-      const rest = work.subarray(pos);
-      if (rest.length - delimiterPrefixBytes(rest) > maxEventBytes) throw sseEventTooLarge(maxEventBytes);
-      pending = Buffer.from(rest);
+    buffer += decoder.decode(chunk, { stream: true });
+    let idx;
+    while ((idx = buffer.search(/\r?\n\r?\n/)) !== -1) {
+      const raw = buffer.slice(0, idx);
+      buffer = buffer.slice(idx).replace(/^\r?\n\r?\n/, "");
+      const data = raw.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
+      if (data) yield data;
     }
   }
-  if (pending.length > 0) {
-    const tail = dataOf(decoder.decode(pending, { stream: true }));
-    if (tail) yield tail;
-  }
+  const tail = buffer.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trimStart()).join("\n");
+  if (tail) yield tail;
 }
 
 const sse = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -523,7 +397,7 @@ const sse = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n
  * Converts an upstream stream (OpenAI-chat or Gemini SSE) into Anthropic SSE.
  * `events` is an async iterable of raw `data:` strings.
  */
-export async function* streamToAnthropic(upstreamProtocol, events, model, { sessionId = "" } = {}) {
+export async function* streamToAnthropic(upstreamProtocol, events, model) {
   yield sse("message_start", {
     type: "message_start",
     message: {
@@ -572,7 +446,7 @@ export async function* streamToAnthropic(upstreamProtocol, events, model, { sess
           yield* closeText();
           const index = nextIndex++;
           const id = newId("toolu");
-          rememberSignature(id, part.thoughtSignature, sessionId);
+          rememberSignature(id, part.thoughtSignature);
           sawTool = true;
           yield sse("content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id, name: part.functionCall.name, input: {} } });
           yield sse("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(part.functionCall.args ?? {}) } });

@@ -56,7 +56,6 @@ export const MAX_ROWS = 50;
 
 const isNum = (value) => typeof value === "number" && Number.isFinite(value);
 const optInt = (value) => (Number.isInteger(value) ? value : null);
-const optCount = (value) => (Number.isInteger(value) && value >= 0 ? value : null);
 const optText = (value, maxLength = 300) => {
   const text = sanitizeText(value, { maxLength });
   return text ? text : null;
@@ -128,10 +127,6 @@ export function buildAttemptRow(attempt, ctx = {}) {
     keyIndex: optInt(attempt.keyIndex),
     status: calling ? null : optInt(attempt.status),
     durationMs: calling ? null : (isNum(attempt.latencyMs) ? attempt.latencyMs : null),
-    // Token counts exactly as the provider reported them for this call; only a
-    // call that answered has any, and null means the provider reported none.
-    inputTokens: state === STATE.SUCCESS ? optCount(attempt.inputTokens) : null,
-    outputTokens: state === STATE.SUCCESS ? optCount(attempt.outputTokens) : null,
     reason: failed ? describeAttempt({ ...attempt, ok: false }).label : null,
     detail: failed ? optText(attempt.errorMessage) : null
   };
@@ -170,8 +165,6 @@ export function buildRequestRow(entry) {
     keyIndex: optInt(entry.finalKeyIndex),
     status: pending ? null : optInt(entry.httpStatus),
     durationMs: pending ? null : total,
-    inputTokens: null,
-    outputTokens: null,
     reason: state === STATE.FAILED ? (optText(entry.errorMessage) ?? optText(entry.errorType, 60)) : null,
     detail: null
   };

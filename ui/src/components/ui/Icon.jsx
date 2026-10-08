@@ -57,9 +57,7 @@ const PATHS = {
   gauge: ["M12 21a9 9 0 100-18 9 9 0 000 18z", "M12 12l4-4"],
   shield: ["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"],
   globe: ["M12 21a9 9 0 100-18 9 9 0 000 18z", "M3 12h18", "M12 3a14 14 0 010 18 14 14 0 010-18z"],
-  undo: ["M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8", "M3 3v5h5"],
-  plus: ["M12 5v14", "M5 12h14"],
-  arrowUp: ["M12 19V5", "M5 12l7-7 7 7"]
+  undo: ["M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8", "M3 3v5h5"]
 };
 
 export function Icon({ name, size = 16, className, title, ...rest }) {

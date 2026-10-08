@@ -67,7 +67,7 @@ client asked for as long as any configured target offers it.
 
 Only when no exact match exists, or the exact-match targets have all failed or
 are cooling down, does the router widen to the remaining compatible targets for
-the protocol. Those fallbacks keep the configured order, and a retryable failure moves
+the protocol. Those fallbacks are health-ranked, and a retryable failure moves
 the request to the next available target; for a bridged client protocol the
 request may then be served by a different provider than the one its model name
 suggested.

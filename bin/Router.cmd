@@ -1,11 +1,15 @@
 @echo off
-rem Router: thin Windows launcher (PowerShell and CMD).
-rem It only checks that Node.js exists and hands over to the canonical startup
-rem logic in scripts\router.mjs, the same file bin/Router uses on Linux/macOS.
-where node >nul 2>nul
-if errorlevel 1 (
-  echo Router: Node.js was not found on PATH. Install Node.js 20 or newer from https://nodejs.org 1>&2
-  exit /b 127
+setlocal
+cd /d "%~dp0.."
+if not exist "node_modules" (
+  echo Installing dependencies...
+  call npm install
+  if errorlevel 1 exit /b 1
 )
-node "%~dp0..\scripts\router.mjs" %*
-exit /b %errorlevel%
+if not exist "ui\dist\index.html" (
+  echo Building Control Panel...
+  call npm run ui:build
+  if errorlevel 1 exit /b 1
+)
+start "" "http://localhost:8788"
+call npm start

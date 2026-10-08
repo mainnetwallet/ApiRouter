@@ -48,7 +48,7 @@ export function summarizeHealth(healthEntries = []) {
     ...counts,
     // Targets the router can currently route to. `describe()` derives `cooldown`
     // from `cooldownUntil` at read time, so "not cooling down" is exactly the
-    // predicate `isAvailable` uses — the two can never disagree.
+    // predicate `rankTargets`/`isAvailable` uses — the two can never disagree.
     available: counts.total - counts.cooldown,
     // Averaged only over targets that actually reported a latency. Dividing by
     // `total` would let an unprobed target read as an instant one.

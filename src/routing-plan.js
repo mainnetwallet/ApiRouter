@@ -3,10 +3,6 @@ import { targetId } from "./health.js";
 /**
  * Priority + key-scoped fallback planning.
  *
- * MANUAL phase    the operator's own list from the panel (src/manual-selection.js),
- *                  exactly in the saved order. When it is empty the phase does not exist
- *                  and routing is unchanged; when every entry fails, the phases below follow.
- *
  * The plan is the ordered list of concrete targets a request may try. It is
  * built once per request from the pool the request already belongs to, so a
  * text request can only ever contain text targets and a vision request only
@@ -38,7 +34,7 @@ import { targetId } from "./health.js";
  * record, which keeps the skip visible in the request timeline.
  */
 
-export const PHASES = Object.freeze({ MANUAL: "manual", STICKY: "sticky", PRIORITY: "priority", FALLBACK: "fallback" });
+export const PHASES = Object.freeze({ STICKY: "sticky", PRIORITY: "priority", FALLBACK: "fallback" });
 
 /**
  * Parses "gemini/G1,groq/GR2". The model keeps everything after the FIRST "/",
@@ -161,7 +157,7 @@ export function resolvePriorityTargets(targets, priority = []) {
  * Its later appearance in the priority/normal phases is skipped by the walker
  * as already attempted; the normal list itself is never reordered.
  */
-export function buildRoutePlan({ targets = [], requestedModel = "", priority = [], manual = [], stickyTargetId = null } = {}) {
+export function buildRoutePlan({ targets = [], requestedModel = "", priority = [], stickyTargetId = null } = {}) {
   const all = Array.isArray(targets) ? targets : [];
   const named = typeof requestedModel === "string" ? requestedModel : "";
   // An explicit model the pool actually serves is the client's choice: neither
@@ -169,11 +165,6 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
   // (A model nobody here serves is auto-routed and keeps the full plan.)
   const modelConfigured = Boolean(named) && all.some((target) => target.model === named);
   const priorityEntries = resolvePriorityTargets(all, priority)
-    .filter(({ target }) => !modelConfigured || target.model === named);
-  // The operator's manual order leads everything else. It resolves exactly like a
-  // priority list (every key of an entry, in key order, before the next entry),
-  // and an explicit client model still wins over it.
-  const manualEntries = resolvePriorityTargets(all, manual)
     .filter(({ target }) => !modelConfigured || target.model === named);
   const normal = buildHierarchicalOrder(all, requestedModel);
 
@@ -209,10 +200,6 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
   const priorityPhase = priorityEntries.filter(({ group }) => groupOrder.indexOf(group) >= resumeAt);
 
   const steps = [
-    // Manual entries come first. A sticky or priority target that is also in the
-    // manual list is skipped later by the walker as already attempted, so the
-    // saved order is never reshuffled by a previous success.
-    ...manualEntries.map(({ target, group }) => ({ target, phase: PHASES.MANUAL, group })),
     ...(sticky ? [{ target: sticky, phase: PHASES.STICKY }] : []),
     // Labelled for what they are in the timeline: the other keys of a configured
     // priority entry are priority attempts; for any other sticky model they are
@@ -226,12 +213,7 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
     ...priorityPhase.map(({ target, group }) => ({ target, phase: PHASES.PRIORITY, group })),
     ...normal.map((target) => ({ target, phase: PHASES.FALLBACK }))
   ];
-  return {
-    steps,
-    priorityCount: new Set(priorityEntries.map((entry) => entry.group)).size,
-    manualCount: new Set(manualEntries.map((entry) => entry.group)).size,
-    sticky
-  };
+  return { steps, priorityCount: new Set(priorityEntries.map((entry) => entry.group)).size, sticky };
 }
 
 /**
@@ -258,12 +240,12 @@ export function effectiveOrder(steps, isEligible = () => true) {
  * router would walk it for a request that names no model. Used by the health
  * endpoints so "ranked" is the real route order, not a health-score sort.
  */
-export function routeOrderByPool(targets, priorityByPool = {}, isEligible = () => true, manualByPool = {}) {
+export function routeOrderByPool(targets, priorityByPool = {}, isEligible = () => true) {
   const all = Array.isArray(targets) ? targets : [];
   const out = [];
   for (const pool of ["text", "vision"]) {
     const inPool = all.filter((target) => (target.pool ?? "text") === pool);
-    const { steps } = buildRoutePlan({ targets: inPool, priority: priorityByPool?.[pool] ?? [], manual: manualByPool?.[pool] ?? [] });
+    const { steps } = buildRoutePlan({ targets: inPool, priority: priorityByPool?.[pool] ?? [] });
     out.push(...effectiveOrder(steps, isEligible).map((step) => step.target));
   }
   return out;

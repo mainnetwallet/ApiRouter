@@ -29,28 +29,6 @@ function configuredHeaderNames(provider) {
     .sort();
 }
 
-/**
- * A provider's base URL, safe for the panel. Cloudflare's resolved URL embeds
- * the operator's account id, which is an internal identifier the UI never
- * needs: every occurrence is replaced with the `{account_id}` placeholder the
- * account id was substituted into. Everything else is shown unchanged, so the
- * panel can still report which endpoint a provider talks to.
- */
-function displayBaseUrl(provider) {
-  const base = String(provider?.baseUrl || "");
-  if (!base) return null;
-  const accounts = Array.isArray(provider?.accountIds) ? provider.accountIds : [];
-  let safe = base;
-  for (const account of accounts) {
-    const value = String(account || "").trim();
-    if (!value) continue;
-    for (const form of new Set([value, encodeURIComponent(value)])) {
-      safe = safe.split(form).join("{account_id}");
-    }
-  }
-  return safe;
-}
-
 function describeProvider(id, provider, targets, pool = "text", capabilities = null) {
   const providerTargets = targets.filter((target) => target.provider === id && (target.pool ?? "text") === pool);
   const configured = isProviderConfigured(provider);
@@ -84,9 +62,7 @@ function describeProvider(id, provider, targets, pool = "text", capabilities = n
     textModels: [...caps.textModels],
     visionModels: [...caps.visionModels],
 
-    // Redacted: a Cloudflare account id is an internal identifier and must not
-    // reach the panel (or any `/api/config` reader) in the resolved base URL.
-    baseUrl: displayBaseUrl(provider),
+    baseUrl: provider.baseUrl || null,
     models: [...provider.models],
     modelCount: provider.models.length,
 
@@ -124,9 +100,7 @@ export function describeConfig(config, targets = []) {
     },
     routing: {
       retryableStatus: [...config.retryableStatus].sort((a, b) => a - b),
-      // The plan is deterministic (sticky -> priority -> hierarchical fallback);
-      // health only removes cooling targets from eligibility, it never reorders.
-      strategy: "deterministic plan (sticky, then priority, then hierarchical fallback)",
+      strategy: "health-ranked with sticky session and automatic fallback",
       targetIdentity: "provider + model + keyIndex",
       exactModelPreferred: true,
       // The two pools are routed independently; a request never crosses over.

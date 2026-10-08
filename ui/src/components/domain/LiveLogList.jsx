@@ -1,7 +1,7 @@
 import { Fragment } from "react";
 import { STATE, STATE_TONE, isLive, shortRequestId } from "../../lib/liveLogs.js";
 import { sanitizeText } from "../../lib/sanitize.js";
-import { EMPTY, formatLatency, formatNumber, providerLabel } from "../../lib/format.js";
+import { EMPTY, formatLatency, providerLabel } from "../../lib/format.js";
 
 /** 24-hour local clock, `HH:MM:SS`; an explicit placeholder when unknown. */
 export function formatClock(ts) {
@@ -57,31 +57,6 @@ const STATE_HINT = Object.freeze({
   [STATE.FAILED]: "This model failed"
 });
 
-/** Input / output token tags of an attempt that answered. */
-function TokenTags({ row }) {
-  if (row.kind !== "attempt" || row.state !== STATE.SUCCESS) return null;
-  const reported = isNum(row.inputTokens) || isNum(row.outputTokens);
-  if (!reported) {
-    return (
-      <div className="livelog__tokens mono">
-        <span className="livelog__tokens-none dim" title="The provider did not report token usage for this call">
-          tokens not reported
-        </span>
-      </div>
-    );
-  }
-  return (
-    <div className="livelog__tokens mono" aria-label="Token usage">
-      <span className="livelog__token livelog__token--in" title="Input (prompt) tokens reported by the provider">
-        IN <b className="tabular">{formatNumber(row.inputTokens)}</b>
-      </span>
-      <span className="livelog__token livelog__token--out" title="Output (completion) tokens reported by the provider">
-        OUT <b className="tabular">{formatNumber(row.outputTokens)}</b>
-      </span>
-    </div>
-  );
-}
-
 /** One attempt's target, as its own box inside its card. */
 function TargetBox({ row, tone }) {
   const calling = row.state === STATE.CALLING;
@@ -108,7 +83,6 @@ function TargetBox({ row, tone }) {
           <span className="livelog__target mono" title={target}>{target}</span>
         </div>
         {why ? <div className="livelog__detail livelog__detail--failed mono" title={why}>{why}</div> : null}
-        <TokenTags row={row} />
       </div>
     </div>
   );
@@ -267,10 +241,6 @@ export function formatRowsAsText(rows) {
     const target = clean(describeTarget(row));
     if (target) lines.push(`  ${target}${figures && row.kind === "attempt" ? `  (${figures})` : ""}`);
     if (row.kind === "request" && figures) lines.push(`  ${figures}`);
-
-    if (row.kind === "attempt" && row.state === STATE.SUCCESS && (isNum(row.inputTokens) || isNum(row.outputTokens))) {
-      lines.push(`  tokens in ${isNum(row.inputTokens) ? row.inputTokens : "-"} · out ${isNum(row.outputTokens) ? row.outputTokens : "-"}`);
-    }
 
     const why = clean([row.reason, row.detail].filter(Boolean).join(" · "));
     if (why) lines.push(`  ${why}`);

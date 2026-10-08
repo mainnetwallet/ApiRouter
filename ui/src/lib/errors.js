@@ -82,18 +82,6 @@ export function isRetryableStatus(status) {
 }
 
 /**
- * A 409 says another cycle of the same kind is already running — the health
- * refresh returns one when a monitor cycle is in flight.
- *
- * The status is the reliable signal, not the category: an aborted request
- * shares the `client` category but is not a conflict, so checking the category
- * alone both missed the real 409 and mislabelled cancellations.
- */
-export function isAlreadyRunning(error) {
-  return Number(error?.status) === 409;
-}
-
-/**
  * A normalized transport error.
  *
  * `message` is always sanitized, so an error object is safe to render, log or

@@ -10,37 +10,7 @@ const DEFAULT_MAX_SESSIONS = 10000;
 // model rejects a key, every other model on that provider + key will too.
 const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 
-// Some providers report an exhausted balance / missing resource package as a
-// 429 (Z.ai answers business code 1113 that way), which is indistinguishable
-// from a per-model rate limit by status alone. Only bodies that clearly say the
-// account is out of balance count: a plain 429 stays a per-model failure.
-const ACCOUNT_LEVEL_MESSAGE = /"code"\s*:\s*"?1113"?|insufficient\s+balance|no\s+resource\s+package|insufficient[_\s]quota|exceeded\s+your\s+current\s+quota/i;
-
-/**
- * True when a failure describes the API key / account rather than one model:
- * every other model on the same provider + key will fail the same way.
- */
-export function isKeyLevelFailure(status, message = "") {
-  const code = Number(status);
-  if (KEY_LEVEL_STATUS_CODES.has(code)) return true;
-  return code === 429 && ACCOUNT_LEVEL_MESSAGE.test(String(message ?? ""));
-}
-
 const SIZE_LIMIT_COOLDOWN_MS = 60 * 1000;
-
-/**
- * The client went away before its response was delivered. Distinguishable from
- * a provider failure so the walk stops without cooling a healthy target, and so
- * `server.js` can answer 499 instead of 502.
- */
-export class ClientAbortError extends Error {
-  constructor(message = "Client disconnected") {
-    super(message);
-    this.name = "ClientAbortError";
-    this.status = 499;
-    this.clientAborted = true;
-  }
-}
 
 export function isRetryableStatus(status, retryableStatus = DEFAULT_RETRY_STATUS_CODES) {
   return retryableStatus.has(Number(status));
@@ -96,12 +66,9 @@ export class RouteSession {
    * timestamped) sticky is cleared and reported as absent, so the request
    * routes Priority -> Normal and the expired target is never used again.
    */
-  validTargetId(now = Date.now(), { notBefore = 0 } = {}) {
+  validTargetId(now = Date.now()) {
     if (!this.targetId) return null;
-    // `notBefore`: a sticky saved before the operator last changed the manual
-    // order is dropped, so a removed or cleared model is not revived by it.
-    const savedAt = this.expiresAt === null ? null : this.expiresAt - this.ttlMs;
-    if (this.expiresAt === null || !(now < this.expiresAt) || (notBefore > 0 && savedAt < notBefore)) {
+    if (this.expiresAt === null || !(now < this.expiresAt)) {
       this.targetId = null;
       this.expiresAt = null;
       return null;
@@ -150,10 +117,10 @@ export async function withFallback(
   retryableStatus = DEFAULT_RETRY_STATUS_CODES,
   session = new RouteSession(),
   health = new HealthRegistry(),
-  { groups = null, plan: steps = null, onSkip = null, deferCommit = false, shouldStop = null } = {}
+  { groups = null, plan: steps = null, onSkip = null } = {}
 ) {
   if (Array.isArray(steps)) {
-    return walkPlan(steps, invoke, retryableStatus, session, health, onSkip, { deferCommit, shouldStop });
+    return walkPlan(steps, invoke, retryableStatus, session, health, onSkip);
   }
 
   const plan = (Array.isArray(groups) && groups.length > 0 ? groups : [targets])
@@ -201,7 +168,6 @@ export async function withFallback(
         failures.push({
           target,
           status,
-          errorType: error?.errorType ?? null,
           message: error?.message || String(error)
         });
 
@@ -222,7 +188,7 @@ export async function withFallback(
         // Quota/auth failures hit the whole key. Cool the sibling models on the
         // same provider + key down too, so this request (and the next ones)
         // skip them instead of burning time on a guaranteed failure or a hang.
-        if (isKeyLevelFailure(status, error?.message)) {
+        if (KEY_LEVEL_STATUS_CODES.has(status)) {
           const reason = `${status} on ${target.model} applies to the whole key`;
           for (const sibling of plan.flat()) {
             if (sibling === target) continue;
@@ -250,13 +216,6 @@ export async function withFallback(
     : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;
   err.failures = failures;
-  // When every target rejected the request the same way, keep the machine
-  // readable reason (e.g. unsupported_image_source) instead of flattening it
-  // into a generic upstream error.
-  if (allBadRequest) {
-    const types = new Set(failures.map((failure) => failure.errorType).filter(Boolean));
-    if (types.size === 1) err.errorType = [...types][0];
-  }
   throw err;
 }
 
@@ -278,15 +237,7 @@ export async function withFallback(
  * walker never reorders anything itself, and the record is per session, never
  * global.
  */
-async function walkPlan(
-  steps,
-  invoke,
-  retryableStatus,
-  session,
-  health,
-  onSkip,
-  { deferCommit = false, shouldStop = null } = {}
-) {
+async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip) {
   if (steps.length === 0) {
     const err = new Error("No fully configured routing targets available");
     err.status = 503;
@@ -305,26 +256,9 @@ async function walkPlan(
     if (typeof onSkip === "function") onSkip(step.target, { phase: step.phase, reason });
   };
 
-  const stopRequested = () => typeof shouldStop === "function" && shouldStop() === true;
-
-  /** 401/402/403 (and balance-exhausted 429s) describe the key, not the model: cool its sibling models too. */
-  const coolKeySiblings = (target, status) => {
-    const reason = `${status} on ${target.model} applies to the whole key`;
-    for (const sibling of allTargets) {
-      if (sibling.provider !== target.provider || sibling.keyIndex !== target.keyIndex) continue;
-      if ((sibling.pool ?? "text") !== (target.pool ?? "text")) continue;
-      if (health.key(sibling) === health.key(target)) continue;
-      health.markFailure(sibling, status, { reason });
-    }
-  };
-
   for (const step of steps) {
     const target = step.target;
     const id = health.key(target);
-
-    // The client is gone: stop before invoking another target. Checked before
-    // every step, so a disconnect during a fallback cannot spend more quota.
-    if (stopRequested()) throw new ClientAbortError();
 
     if (attempted.has(id)) {
       skip(step, "already_attempted");
@@ -344,47 +278,29 @@ async function walkPlan(
     attempted.add(id);
     const startedAt = Date.now();
 
-    let committed = false;
-    /**
-     * Finalise this step's health/sticky decision exactly once. With
-     * `deferCommit` the caller owns the moment the outcome is actually known —
-     * a 200 that only carried headers is NOT a success — and calls this once
-     * the body has been delivered or has failed. A client abort is never
-     * charged to the provider.
-     *
-     * `skipCooldown` mirrors the walk's own `error.skipCooldown` rule: a
-     * translation-shape mismatch (e.g. a provider response whose tool arguments
-     * the client's protocol cannot represent) is not provider ill health, so
-     * the target is left untouched instead of being cooled.
-     */
-    const commit = (ok, { status = 200, reason = null, clientAborted = false, skipCooldown = false, message = "" } = {}) => {
-      if (committed) return;
-      committed = true;
-      if (ok) {
-        health.markSuccess(target, { latencyMs: Date.now() - startedAt, status });
-        session.saveSuccess(target, health);
-        return;
-      }
-      if (clientAborted) return;
-      if (skipCooldown) return;
-      const code = Number(status) || 0;
-      health.markFailure(target, code, code === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : { reason });
-      if (isKeyLevelFailure(code, message)) coolKeySiblings(target, code);
-    };
-
     try {
       const result = await invoke(target, { phase: step.phase });
-      if (deferCommit) return { value: result, target, phase: step.phase, commit };
-      commit(true, { status: result?.upstream?.status ?? 200 });
+      health.markSuccess(target, { latencyMs: Date.now() - startedAt });
+      session.saveSuccess(target, health);
       return result;
     } catch (error) {
       const status = Number(error?.status || 0);
-      failures.push({ target, status, errorType: error?.errorType ?? null, message: error?.message || String(error) });
+      failures.push({ target, status, message: error?.message || String(error) });
 
       if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) throw error;
       if (error?.skipCooldown) continue;
 
-      commit(false, { status, message: error?.message });
+      health.markFailure(target, status, status === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : {});
+
+      if (KEY_LEVEL_STATUS_CODES.has(status)) {
+        const reason = `${status} on ${target.model} applies to the whole key`;
+        for (const sibling of allTargets) {
+          if (sibling.provider !== target.provider || sibling.keyIndex !== target.keyIndex) continue;
+          if ((sibling.pool ?? "text") !== (target.pool ?? "text")) continue;
+          if (health.key(sibling) === id) continue;
+          health.markFailure(sibling, status, { reason });
+        }
+      }
     }
   }
 
@@ -399,9 +315,5 @@ async function walkPlan(
   const err = new Error(allBadRequest ? failures[failures.length - 1].message : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;
   err.failures = failures;
-  if (allBadRequest) {
-    const types = new Set(failures.map((failure) => failure.errorType).filter(Boolean));
-    if (types.size === 1) err.errorType = [...types][0];
-  }
   throw err;
 }

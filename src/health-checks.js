@@ -2,10 +2,17 @@
  * Provider-aware health probing.
  */
 
-import { geminiModelsProbeUrl, openAiModelsProbeUrl, trimBaseUrl } from "./upstream-url.js";
-import { fetchUpstream } from "./upstream-fetch.js";
-
 export const PROBE_TIMEOUT_MS = 10000;
+const GEMINI_API_VERSION = "v1beta";
+const OPENAI_API_VERSION = "v1";
+const VERSION_SUFFIX = /\/v\d+(?:alpha|beta)?\d*$/i;
+const trimBase = (baseUrl) => String(baseUrl || "").replace(/\/+$/, "");
+
+function versionedBase(baseUrl, version) {
+  const base = trimBase(baseUrl);
+  if (!base) return "";
+  return VERSION_SUFFIX.test(base) ? base : base + "/" + version;
+}
 
 function applyConfiguredClientHeaders(headers, target) {
   if (target?.provider !== "agentrouter") return;
@@ -17,13 +24,13 @@ function applyConfiguredClientHeaders(headers, target) {
 
 export function healthProbePlan(target) {
   const protocols = Array.isArray(target?.protocols) ? target.protocols : [];
-  const base = trimBaseUrl(target?.baseUrl);
+  const base = trimBase(target?.baseUrl);
   if (!base || !target?.apiKey) return null;
 
   if (protocols.includes("gemini")) {
     return {
       provider: "gemini",
-      url: geminiModelsProbeUrl(base),
+      url: versionedBase(base, GEMINI_API_VERSION) + "/models",
       headers: { accept: "application/json", "x-goog-api-key": target.apiKey }
     };
   }
@@ -44,7 +51,7 @@ export function healthProbePlan(target) {
     applyConfiguredClientHeaders(headers, target);
     return {
       provider: target.provider === "agentrouter" ? "agentrouter-openai" : "openai-compatible",
-      url: openAiModelsProbeUrl(base),
+      url: versionedBase(base, OPENAI_API_VERSION) + "/models",
       headers
     };
   }
@@ -76,9 +83,7 @@ export async function probeTargetHealth(target, options = {}) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = Date.now();
   try {
-    // fetchUpstream refuses to follow a redirect, so a probe can never replay
-    // the key to a host the operator did not configure.
-    const upstream = await fetchUpstream(plan.url, { method: "GET", headers: plan.headers, signal: controller.signal }, fetchImpl);
+    const upstream = await fetchImpl(plan.url, { method: "GET", headers: plan.headers, signal: controller.signal });
     const latencyMs = Date.now() - startedAt;
     try { await upstream.body?.cancel(); } catch {}
     return { ...classifyProbeStatus(upstream.status), status: upstream.status, latencyMs };

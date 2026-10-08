@@ -81,8 +81,6 @@ function clearProviderEnv() {
     for (const name of ["API_KEYS", "MODELS", "BASE_URL", "ACCOUNT_IDS"]) env[`${id}_VISION_${name}`] = "";
   }
   env.MULTIAI_ROUTER_API_KEYS = "";
-  // Development-only UI proxy must never leak in from the developer's shell.
-  env.MULTIAI_DEV_UI_ORIGIN = "";
   env.RETRY_STATUS_CODES = "";
   return env;
 }

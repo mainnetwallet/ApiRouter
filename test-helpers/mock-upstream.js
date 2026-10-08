@@ -7,18 +7,6 @@ import net from "node:net";
  * `script` is a function (request, index) => response descriptor:
  *   { status, headers, body }        - body: string | Buffer | object
  *   { status, stream: [chunk, ...] } - chunked/SSE response
- *   { status, stream, truncateAfter: n } - write n chunks, then destroy the
- *                                      socket (a stream that dies mid-body)
- *   { status, stream, stallAfter: n }    - write n chunks, then stop writing
- *                                      and never end (an idle, hung stream)
- *   { status, headers, partialBody, stallBody: true }
- *                                    - send the headers and `partialBody`, then
- *                                      go silent without ending the response
- *                                      (a NON-streamed 200 whose body stalls)
- *   { status, headers, partialBody, truncateBody: true }
- *                                    - send the headers and `partialBody`, then
- *                                      destroy the socket (a NON-streamed 200
- *                                      whose body ends before content-length)
  *   { hang: true }                   - never responds (timeout tests)
  *
  * `options.health` scripts the health-probe (GET) response, which defaults to
@@ -87,30 +75,11 @@ export async function startMockUpstream(script, options = {}) {
         const writeNext = () => {
           if (stopped) return;
           if (i >= descriptor.stream.length) return res.end();
-          // A stream that dies after `truncateAfter` chunks: the client sees a
-          // 200 and a body that ends before the framing completes.
-          if (descriptor.truncateAfter !== undefined && i >= descriptor.truncateAfter) return res.destroy();
-          // A stream that goes silent after `stallAfter` chunks and holds the
-          // connection open (post-header inactivity).
-          if (descriptor.stallAfter !== undefined && i >= descriptor.stallAfter) return;
           res.write(descriptor.stream[i]);
           i += 1;
           setTimeout(writeNext, descriptor.delayMs || 0);
         };
         return writeNext();
-      }
-
-      if (descriptor.truncateBody) {
-        res.writeHead(status, headers);
-        res.write(descriptor.partialBody ?? "");
-        setTimeout(() => res.destroy(), 20); // let the prefix and headers flush first
-        return;
-      }
-
-      if (descriptor.stallBody) {
-        res.writeHead(status, headers);
-        res.write(descriptor.partialBody ?? "");
-        return; // headers + a prefix are out; the rest never arrives
       }
 
       const body = typeof descriptor.body === "string" || Buffer.isBuffer(descriptor.body)
