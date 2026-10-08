@@ -22,17 +22,17 @@ async function checkPort(port) {
 }
 
 function openBrowser(url) {
-  const command = process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
+  const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
   setTimeout(() => {
-    spawn(command, [url], { stdio: "ignore" }).on("error", () => {});
+    const args = process.platform === "win32" ? ["/c", "start", url] : [url];
+    spawn(command, args, { stdio: "ignore" }).on("error", () => {});
   }, 2000);
 }
 
 async function main() {
   process.chdir(REPO_ROOT);
   const isProd = process.argv.includes("--prod") || process.argv.includes("-p");
-  
-  // Port checks
+
   const backendInUse = await checkPort(BACKEND_PORT);
   if (backendInUse) {
     console.error(`[ApiRouter] Error: Port ${BACKEND_PORT} is already in use.`);
@@ -46,11 +46,12 @@ async function main() {
     }
   }
 
-  // Dependencies
+  // Dependencies: use npm executable directly (works cross-platform)
   if (!fs.existsSync("node_modules")) {
     console.log("[ApiRouter] Installing dependencies...");
     await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [path.join("node_modules", "npm", "bin", "npm-cli.js"), "install"], { stdio: "inherit" });
+      const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+      const child = spawn(npmCmd, ["install"], { stdio: "inherit", shell: false });
       child.on("exit", (code) => code === 0 ? resolve() : reject(new Error("npm install failed")));
     });
   }
@@ -61,7 +62,6 @@ async function main() {
   console.log(`[ApiRouter] Launching in ${isProd ? "Production" : "Development"} mode...`);
   openBrowser(url);
 
-  // Directly spawn the launcher script with node
   const child = spawn(process.execPath, [scriptPath], {
     stdio: "inherit"
   });
@@ -70,14 +70,14 @@ async function main() {
     process.exit(code ?? 0);
   });
 
-  ["SIGINT", "SIGTERM"].forEach(sig => {
+  ["SIGINT", "SIGTERM"].forEach((sig) => {
     process.on(sig, () => {
       child.kill(sig);
     });
   });
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error("[ApiRouter] Fatal error:", err);
   process.exit(1);
 });

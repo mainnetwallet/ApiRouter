@@ -39,3 +39,13 @@ test("router.mjs detects port conflict on 8788", async () => {
   }
 });
 
+
+
+test('Router uses direct process.execPath without shell:true', () => {
+  const content = fs.readFileSync('scripts/router.mjs', 'utf8');
+  assert.strictEqual(content.includes('shell: true'), false);
+  assert.strictEqual(content.includes('npm run'), false);
+  assert.strictEqual(content.includes('process.execPath'), true);
+  assert.strictEqual(content.includes('npmCmd'), true);
+});
+
