@@ -1,18 +1,26 @@
 # OpenCode + ApiRouter
 
-OpenCode can use the router as an OpenAI-compatible provider.
+## Install OpenCode
 
-## Gateway
-
-```text
-http://localhost:8788/v1
+```powershell
+npm install -g opencode-ai
 ```
 
-## Configure
+## OpenCode config
 
-Use OpenCode's custom OpenAI-compatible provider configuration.
+### Windows
 
-Example:
+```powershell
+notepad opencode.json
+```
+
+### Linux / macOS / Termux
+
+```bash
+nano opencode.json
+```
+
+### With ApiRouter API key
 
 ```json
 {
@@ -26,8 +34,8 @@ Example:
         "apiKey": "{env:APIROUTER_API_KEY}"
       },
       "models": {
-        "your-model": {
-          "name": "Router Model"
+        "Router": {
+          "name": "Router"
         }
       }
     }
@@ -35,33 +43,42 @@ Example:
 }
 ```
 
-Set the gateway key when authentication is enabled:
+Windows:
 
 ```powershell
-$env:APIROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
+$env:APIROUTER_API_KEY="YOUR_APIROUTER_KEY"
 ```
 
-OpenCode uses:
+Linux / macOS / Termux:
 
-```text
-POST /v1/chat/completions
+```bash
+export APIROUTER_API_KEY="YOUR_APIROUTER_KEY"
 ```
 
-## Fallback
+### Without ApiRouter API key
 
-Targets are health-ranked, so a request moves to the next available target on a
-retryable failure. A chat-completions provider is called directly; a Gemini
-provider is reached through the router's translation bridge, so a Gemini-only
-setup still works.
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "apirouter": {
+      "package": "@opencode/ai/providers/openai-compatible",
+      "name": "ApiRouter",
+      "settings": {
+        "baseURL": "http://localhost:8788/v1"
+      },
+      "models": {
+        "Router": {
+          "name": "Router"
+        }
+      }
+    }
+  }
+}
+```
 
-Two limits apply to bridged (Gemini) targets:
+## Start OpenCode
 
-- tools are forwarded only when they are `type: "function"`; hosted/built-in
-  tools have no `generateContent` equivalent and are dropped;
-- remote image URLs are dropped; only base64 `data:` URLs are forwarded.
-
-## Security
-
-Keep provider keys inside the router.
-
-Reference: https://opencode.ai/docs/providers
+```powershell
+opencode
+```
