@@ -470,6 +470,8 @@ export class RequestLog {
       latencyMs: Number.isFinite(entry.latencyMs) ? entry.latencyMs : null,
       totalMs: Number.isFinite(entry.totalMs) ? entry.totalMs : null,
       bytes: Number.isFinite(entry.bytes) ? entry.bytes : null,
+      inputTokens: Number.isFinite(entry.inputTokens) ? entry.inputTokens : null,
+      outputTokens: Number.isFinite(entry.outputTokens) ? entry.outputTokens : null,
       tokens: Number.isFinite(entry.tokens) ? entry.tokens : null,
       finishReason: sanitizeMessage(entry.finishReason, { maxLength: 60 }),
       errorType: entry.errorType ?? null,
