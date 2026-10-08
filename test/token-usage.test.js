@@ -140,6 +140,112 @@ test("a malformed or oversized event is ignored and memory stays bounded", () =>
   assert.deepEqual(tap.usage, { inputTokens: 2, outputTokens: 3, tokens: 5 });
 });
 
+// --- bounded accumulation of one SSE event ---------------------------------
+
+/** Feed `parts` one by one, tracking the most the tap ever holds at once. */
+function feedTracking(tap, parts) {
+  let peak = 0;
+  for (const part of parts) {
+    tap.pushChunk(part);
+    peak = Math.max(peak, tap.retainedChars);
+  }
+  tap.end();
+  return Math.max(peak, tap.retainedChars);
+}
+
+test("an oversized multi-line SSE event is never accumulated past the limit", () => {
+  const limit = 256;
+  const lineLength = 40;
+  const tap = createSseUsageTap({ maxEventChars: limit });
+  // ~40 KB of one event, 40-char data lines, far beyond the 256-char limit.
+  const lines = Array.from({ length: 1000 }, () => `data: ${"x".repeat(lineLength)}\n`);
+  const peak = feedTracking(tap, [...lines, "\n"]);
+  assert.ok(peak <= limit + lineLength + 16, `held ${peak} chars for a ${limit}-char limit`);
+  assert.equal(tap.retainedChars, 0, "nothing is left over once the event ends");
+  assert.equal(tap.usage, null);
+});
+
+test("an oversized event is dropped whole: usage in its tail is not read out of context", () => {
+  const tap = createSseUsageTap({ maxEventChars: 128 });
+  const tail = JSON.stringify({ usage: { prompt_tokens: 9, completion_tokens: 9 } });
+  tap.pushChunk(`data: ${"x".repeat(100)}\ndata: ${"y".repeat(100)}\ndata: ${tail}\n\n`);
+  tap.end();
+  assert.equal(tap.usage, null, "a partial remainder of an oversized event must not be parsed");
+});
+
+test("an oversized unterminated line ends the whole event, and the next event is read normally", () => {
+  const limit = 128;
+  const tap = createSseUsageTap({ maxEventChars: limit });
+  const tail = JSON.stringify({ usage: { prompt_tokens: 7, completion_tokens: 7 } });
+  const parts = [`data: ${"a".repeat(50)}\n`, "data: "];
+  for (let i = 0; i < 200; i += 1) parts.push("b".repeat(97)); // one line of ~19 KB, no newline
+  parts.push(`\ndata: ${tail}\n\n`, sseEvent({ usage: { prompt_tokens: 2, completion_tokens: 3 } }));
+  const peak = feedTracking(tap, parts);
+  assert.ok(peak <= 2 * limit + 16 + 97, `held ${peak} chars for a ${limit}-char limit`);
+  assert.deepEqual(tap.usage, { inputTokens: 2, outputTokens: 3, tokens: 5 });
+});
+
+test("a usage event within the limit is parsed, one past the limit is ignored", () => {
+  const limit = 200;
+  const payload = (padding) => JSON.stringify({ usage: { prompt_tokens: 4, completion_tokens: 5 }, pad: "x".repeat(padding) });
+  const base = payload(0).length;
+
+  const exact = createSseUsageTap({ maxEventChars: limit });
+  const exactPayload = payload(limit - base);
+  assert.equal(exactPayload.length, limit);
+  exact.pushChunk(`data: ${exactPayload}\n\n`);
+  exact.end();
+  assert.deepEqual(exact.usage, { inputTokens: 4, outputTokens: 5, tokens: 9 });
+
+  const over = createSseUsageTap({ maxEventChars: limit });
+  over.pushChunk(`data: ${payload(limit - base + 1)}\n\n`);
+  over.end();
+  assert.equal(over.usage, null);
+
+  // The JSON may span several data: lines; they are rejoined with a newline.
+  const multiLine = createSseUsageTap({ maxEventChars: limit });
+  multiLine.pushChunk('data: {"usage":\ndata: {"prompt_tokens":6,"completion_tokens":8}}\n\n');
+  multiLine.end();
+  assert.deepEqual(multiLine.usage, { inputTokens: 6, outputTokens: 8, tokens: 14 });
+});
+
+test("an oversized event of multi-byte text, fed a byte at a time, stays bounded and the next usage is exact", () => {
+  const limit = 128;
+  const tap = createSseUsageTap({ maxEventChars: limit });
+  const big = Buffer.from(`data: ${"✓é".repeat(2000)}\n\n`);
+  const next = Buffer.from(sseEvent({ usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 }, note: "héllo ✓" }));
+  let peak = 0;
+  for (const byte of Buffer.concat([big, next])) {
+    tap.pushChunk(Buffer.from([byte]));
+    peak = Math.max(peak, tap.retainedChars);
+  }
+  tap.end();
+  assert.ok(peak <= 2 * limit + 16, `held ${peak} chars for a ${limit}-char limit`);
+  assert.deepEqual(tap.usage, { inputTokens: 11, outputTokens: 22, tokens: 33 });
+});
+
+test("an oversized event still passes through tapBytes byte for byte, with bounded memory", async () => {
+  const limit = 256;
+  const chunks = [
+    Buffer.from(sseEvent({ choices: [{ delta: { content: "hi" } }], usage: null })),
+    ...Array.from({ length: 400 }, () => Buffer.from(`data: ${"z".repeat(120)}\n`)),
+    Buffer.from("\n"),
+    Buffer.from(sseEvent({ choices: [], usage: { prompt_tokens: 20, completion_tokens: 30, total_tokens: 50 } })),
+    Buffer.from("data: [DONE]\n\n")
+  ];
+  const tap = createSseUsageTap({ maxEventChars: limit });
+  const out = [];
+  let peak = 0;
+  for await (const chunk of tapBytes(chunks, tap)) {
+    out.push(chunk);
+    peak = Math.max(peak, tap.retainedChars);
+  }
+  assert.equal(out.length, chunks.length);
+  out.forEach((chunk, index) => assert.equal(chunk, chunks[index], "the very same chunk object"));
+  assert.ok(peak <= 2 * limit + 16, `held ${peak} chars for a ${limit}-char limit`);
+  assert.deepEqual(tap.usage, { inputTokens: 20, outputTokens: 30, tokens: 50 });
+});
+
 test("tapBytes and tapEvents hand every chunk on, byte for byte", async () => {
   const chunks = chatStream({ prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 }).map((text) => Buffer.from(text));
   const tap = createSseUsageTap();

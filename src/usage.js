@@ -96,8 +96,11 @@ function reportedUsage(body) {
   return found;
 }
 
-/** An unterminated SSE line longer than this is dropped rather than buffered. */
-const MAX_LINE_CHARS = 1 << 20;
+/** Most characters of ONE SSE event's `data:` payload that are ever held while looking for usage. */
+const MAX_EVENT_CHARS = 1 << 20;
+
+/** Room for the `data:` field name, its optional space and a trailing CR around a payload of the limit. */
+const LINE_OVERHEAD_CHARS = 8;
 
 /**
  * Watches an SSE stream for usage WITHOUT touching it. Feed it the raw bytes
@@ -105,14 +108,28 @@ const MAX_LINE_CHARS = 1 << 20;
  * character) or already-split event payloads (`pushData`), call `end()` when the
  * stream is over, and read `usage`. A malformed or oversized event is ignored.
  *
- * Memory is bounded by one SSE line, never by the length of the response.
+ * Memory is bounded, never by the length of the response or of one event:
+ *   - the `data:` payload of the event being read is accumulated in ONE string
+ *     that never exceeds `maxEventChars` (no per-line array, no join copy);
+ *   - the unterminated line being read never exceeds `maxEventChars` plus a few
+ *     characters of field name;
+ *   - an event that would pass `maxEventChars` is dropped, its buffer is freed
+ *     at once, and the rest of that event (up to its blank line) is discarded as
+ *     it arrives, so a fragment of an oversized event is never parsed as a whole one.
+ * Usage events are a few hundred characters, far below the limit. The limit
+ * is counted in JS string characters (UTF-16 code units), not bytes.
+ *
+ * `maxLineChars` is accepted as the former name of `maxEventChars`.
  */
-export function createSseUsageTap({ maxLineChars = MAX_LINE_CHARS } = {}) {
+export function createSseUsageTap({ maxEventChars, maxLineChars } = {}) {
+  const limit = maxEventChars ?? maxLineChars ?? MAX_EVENT_CHARS;
+  const lineLimit = limit + LINE_OVERHEAD_CHARS;
   let merged = null;
-  let carry = "";
-  let skippingLine = false;
-  let dataLines = [];
-  let dataChars = 0;
+  let carry = "";            // the unterminated line so far
+  let skippingLine = false;  // an oversized line is being discarded up to its newline
+  let eventData = "";        // the `data:` payload of the current event, <= limit
+  let hasData = false;       // the current event has had a `data:` line
+  let eventOverflow = false; // the current event passed the limit: ignore it to its blank line
   const decoder = new TextDecoder();
 
   const pushData = (data) => {
@@ -121,19 +138,25 @@ export function createSseUsageTap({ maxLineChars = MAX_LINE_CHARS } = {}) {
     try { merged = mergeUsage(merged, reportedUsage(JSON.parse(data))); } catch { /* not JSON, or no usage */ }
   };
 
+  const dropEvent = () => {
+    eventData = "";
+    eventOverflow = true;
+  };
+
   const flushEvent = () => {
-    if (dataLines.length > 0) pushData(dataLines.join("\n"));
-    dataLines = [];
-    dataChars = 0;
+    if (hasData && !eventOverflow) pushData(eventData);
+    eventData = "";
+    hasData = false;
+    eventOverflow = false;
   };
 
   const handleLine = (line) => {
     if (line === "") return flushEvent();
-    if (!line.startsWith("data:")) return undefined;
+    if (eventOverflow || !line.startsWith("data:")) return undefined;
     const value = line.slice(5).replace(/^ /, "");
-    dataChars += value.length;
-    if (dataChars > maxLineChars) { dataLines = []; dataChars = 0; return undefined; }
-    dataLines.push(value);
+    if (eventData.length + (hasData ? 1 : 0) + value.length > limit) return dropEvent();
+    eventData = hasData ? `${eventData}\n${value}` : value;
+    hasData = true;
     return undefined;
   };
 
@@ -146,7 +169,12 @@ export function createSseUsageTap({ maxLineChars = MAX_LINE_CHARS } = {}) {
       if (skippingLine) skippingLine = false;
       else handleLine(line);
     }
-    if (carry.length > maxLineChars) { carry = ""; skippingLine = true; }
+    if (carry.length > lineLimit) {
+      // An oversized `data:` line poisons its whole event; any other field is irrelevant.
+      if (!skippingLine && carry.startsWith("data:")) dropEvent();
+      carry = "";
+      skippingLine = true;
+    }
   };
 
   return {
@@ -160,6 +188,8 @@ export function createSseUsageTap({ maxLineChars = MAX_LINE_CHARS } = {}) {
       carry = "";
       flushEvent();
     },
+    /** Characters currently held (the partial line plus the current event's payload). */
+    get retainedChars() { return carry.length + eventData.length; },
     get usage() { return merged ? normalizeUsage(merged) : null; }
   };
 }
