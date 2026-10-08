@@ -236,6 +236,8 @@ const COLUMN_ACCESSORS = {
   protocol: (row) => row.protocol ?? "",
   status: (row) => row.httpStatus,
   latency: (row) => row.latencyMs,
+  inputTokens: (row) => row.inputTokens,
+  outputTokens: (row) => row.outputTokens,
   tokens: (row) => row.tokens,
   fallbacks: (row) => row.fallbackCount
 };
@@ -312,16 +314,28 @@ const COLUMNS = [
     render: (row) => <span className="mono tabular">{formatLatency(row.latencyMs)}</span>
   },
   {
+    key: "inputTokens",
+    header: "Input",
+    align: "right",
+    sortable: true,
+    get: (row) => row.inputTokens,
+    render: (row) => <span className="mono tabular dim">{Number.isFinite(row.inputTokens) ? formatTokens(row.inputTokens) : EMPTY}</span>
+  },
+  {
+    key: "outputTokens",
+    header: "Output",
+    align: "right",
+    sortable: true,
+    get: (row) => row.outputTokens,
+    render: (row) => <span className="mono tabular dim">{Number.isFinite(row.outputTokens) ? formatTokens(row.outputTokens) : EMPTY}</span>
+  },
+  {
     key: "tokens",
-    header: "Tokens",
+    header: "Total",
     align: "right",
     sortable: true,
     get: (row) => row.tokens,
-    render: (row) => (
-      <span className="mono tabular dim" title={Number.isFinite(row.tokens) ? undefined : "Not reported by the provider"}>
-        {Number.isFinite(row.tokens) ? formatTokens(row.tokens) : EMPTY}
-      </span>
-    )
+    render: (row) => <span className="mono tabular dim">{Number.isFinite(row.tokens) ? formatTokens(row.tokens) : EMPTY}</span>
   },
   {
     key: "fallbacks",
