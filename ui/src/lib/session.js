@@ -8,8 +8,8 @@
  * (see `lib/mask.js`).
  */
 
-const TOKEN_KEY = "multiai.routerToken";
-const THEME_KEY = "multiai.theme";
+const TOKEN_KEY = "apirouter.routerToken";
+const THEME_KEY = "apirouter.theme";
 
 /** sessionStorage throws in some privacy modes; degrade rather than crash. */
 function safeSession() {

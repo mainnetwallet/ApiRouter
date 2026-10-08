@@ -30,7 +30,7 @@ export function AppShell({
       <div className="app">
         <div className="brand">
           <Icon name="route" className="brand__mark" size={22} />
-          <span className="brand__name">MultiAI Router</span>
+          <span className="brand__name">ApiRouter</span>
         </div>
 
         <Header

@@ -121,7 +121,7 @@ test("GET /api/models exposes a filterable catalogue", async (t) => {
 });
 
 test("GET /api/config reports safe values and never a secret", async (t) => {
-  const { router } = await withRig(t, { env: { MULTIAI_ROUTER_API_KEYS: ROUTER_KEY } });
+  const { router } = await withRig(t, { env: { APIROUTER_API_KEYS: ROUTER_KEY } });
 
   const { res, body } = await getJson(router, "/api/config", { authorization: `Bearer ${ROUTER_KEY}` });
 
@@ -139,7 +139,7 @@ test("GET /api/system reports runtime and monitor status", async (t) => {
 
   const { body } = await getJson(router, "/api/system");
 
-  assert.equal(body.service, "multi-ai-router");
+  assert.equal(body.service, "apirouter");
   assert.equal(body.status, "ok");
   assert.equal(body.runtime, "node");
   assert.equal(body.nodeVersion, process.version);
@@ -424,7 +424,7 @@ test("POST /api/health/refresh runs a cycle and returns fresh health", async (t)
 });
 
 test("the admin API requires the router key when one is configured", async (t) => {
-  const { router } = await withRig(t, { env: { MULTIAI_ROUTER_API_KEYS: ROUTER_KEY } });
+  const { router } = await withRig(t, { env: { APIROUTER_API_KEYS: ROUTER_KEY } });
 
   for (const path of READ_ENDPOINTS) {
     const unauthenticated = await router.request(path);

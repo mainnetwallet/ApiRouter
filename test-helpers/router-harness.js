@@ -80,7 +80,7 @@ function clearProviderEnv() {
     env[`${id}_BASE_URL`] = "";
     for (const name of ["API_KEYS", "MODELS", "BASE_URL", "ACCOUNT_IDS"]) env[`${id}_VISION_${name}`] = "";
   }
-  env.MULTIAI_ROUTER_API_KEYS = "";
+  env.APIROUTER_API_KEYS = "";
   env.RETRY_STATUS_CODES = "";
   return env;
 }

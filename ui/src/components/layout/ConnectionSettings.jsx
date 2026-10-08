@@ -49,7 +49,7 @@ export function ConnectionSettings({ open, onClose }) {
         <div className="notice notice--info">
           <Icon name="info" className="notice__icon" size={15} />
           <div>
-            Only needed when the gateway is configured with <code>MULTIAI_ROUTER_API_KEYS</code>.
+            Only needed when the gateway is configured with <code>APIROUTER_API_KEYS</code>.
             Provider API keys stay on the server and are never exposed here.
           </div>
         </div>

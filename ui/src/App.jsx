@@ -34,7 +34,7 @@ export default function App() {
   }, [path]);
 
   useEffect(() => {
-    document.title = route ? `${route.label} · MultiAI Router` : "MultiAI Router";
+    document.title = route ? `${route.label} · ApiRouter` : "ApiRouter";
   }, [route]);
 
   const Page = route?.element ?? NotFound;

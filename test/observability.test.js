@@ -282,7 +282,7 @@ const sampleConfig = () => loadConfig({
   GEMINI_MODELS: "gemini-x",
   GEMINI_BASE_URL: "https://gemini.test/",
   AGENTROUTER_ORIGINATOR: "codex_cli_rs",
-  MULTIAI_ROUTER_API_KEYS: "router-token",
+  APIROUTER_API_KEYS: "router-token",
   REQUEST_TIMEOUT_MS: "9000",
   PORT: "9999",
   RETRY_STATUS_CODES: "429,503"

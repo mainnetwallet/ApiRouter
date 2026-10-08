@@ -103,7 +103,7 @@ test("a malformed request target is a controlled 400 and the process survives", 
 });
 
 test("a malformed request target is rejected before authentication, without crashing, when client auth is on", async (t) => {
-  const { router, isAlive } = await boot(t, { MULTIAI_ROUTER_API_KEYS: "secret-router-key" });
+  const { router, isAlive } = await boot(t, { APIROUTER_API_KEYS: "secret-router-key" });
   const res = await rawGet(router.port, "http://[");              // no Authorization header at all
   assert.equal(res.status, 400);
   assert.equal(isAlive(), true);
@@ -137,7 +137,7 @@ test("malformed percent-encoding in a static path does not crash either", async 
 
 test("an unexpected server-side exception becomes a JSON 500, is logged without secrets, and the process survives", async (t) => {
   const preload = fileURLToPath(new URL("../test-helpers/fault-inject.mjs", import.meta.url));
-  const { router, isAlive } = await boot(t, { NODE_OPTIONS: `--import ${preload}`, MULTIAI_TEST_FAULT: "session-id" });
+  const { router, isAlive } = await boot(t, { NODE_OPTIONS: `--import ${preload}`, APIROUTER_TEST_FAULT: "session-id" });
 
   // No session header => the router looks up the shared default session => the injected fault throws inside request handling.
   const res = await router.request("/v1/chat/completions", postJson(validBody));

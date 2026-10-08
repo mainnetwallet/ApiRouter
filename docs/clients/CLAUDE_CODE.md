@@ -1,4 +1,4 @@
-# Claude Code + MultiAI Router
+# Claude Code + ApiRouter
 
 Use the router as Claude Code's Anthropic-compatible gateway.
 
@@ -59,7 +59,7 @@ claude
 
 No trailing path on the base URL; Claude Code calls `/v1/messages` itself.
 
-If `MULTIAI_ROUTER_API_KEYS` is empty, local gateway authentication is not required
+If `APIROUTER_API_KEYS` is empty, local gateway authentication is not required
 (any token value works). If it is set, `ANTHROPIC_AUTH_TOKEN` must match one key.
 
 Claude Code uses:

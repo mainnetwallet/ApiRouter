@@ -860,7 +860,7 @@ async function handleRequest(req, res) {
     const inPool = (pool) => health.filter((entry) => entry.pool === pool);
     return json(res, 200, {
       ok: true,
-      service: "multi-ai-router",
+      service: "apirouter",
       providers: PROVIDERS,
       configuredTargets: targets.length,
       configuredTextTargets: textTargets.length,
@@ -952,6 +952,6 @@ process.once("SIGTERM", () => {
 });
 
 server.listen(config.port, () => {
-  console.log("MultiAI Router listening on http://localhost:" + config.port);
+  console.log("ApiRouter listening on http://localhost:" + config.port);
   console.log("Control Panel UI: http://localhost:" + config.port + "/");
 });

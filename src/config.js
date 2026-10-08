@@ -115,7 +115,7 @@ export function loadConfig(env = process.env) {
   const retryableValues = split(env.RETRY_STATUS_CODES || DEFAULT_RETRY_STATUS_CODES.join(","))
     .map(Number).filter((v) => Number.isInteger(v) && v >= 100 && v <= 599);
   return {
-    routerApiKeys: split(env.MULTIAI_ROUTER_API_KEYS),
+    routerApiKeys: split(env.APIROUTER_API_KEYS),
     port: readNumber(env, "PORT", 8788, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
     timeoutMs: readNumber(env, "REQUEST_TIMEOUT_MS", 120000, { min: 1, expected: "a positive integer" }),
     // 0 is meaningful here: server.js then uses the full request timeout for streams.

@@ -8,7 +8,7 @@ import path from "node:path";
 import { createStaticHandler, resolveWithinRoot, placeholderPage } from "../src/static-files.js";
 
 async function makeRoot(t, files = {}) {
-  const root = await mkdtemp(path.join(tmpdir(), "multiai-static-"));
+  const root = await mkdtemp(path.join(tmpdir(), "apirouter-static-"));
   t.after(() => rm(root, { recursive: true, force: true }));
 
   for (const [relative, contents] of Object.entries(files)) {

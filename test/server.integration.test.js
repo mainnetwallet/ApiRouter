@@ -506,7 +506,7 @@ test("gateway authentication is enforced when configured", async (t) => {
       GROQ_API_KEYS: "k",
       GROQ_MODELS: "m",
       GROQ_BASE_URL: u.baseUrl,
-      MULTIAI_ROUTER_API_KEYS: "router-secret"
+      APIROUTER_API_KEYS: "router-secret"
     })
   );
 
@@ -703,7 +703,7 @@ test("the client's own authorization header is not forwarded upstream", async (t
       GROQ_API_KEYS: "provider-key",
       GROQ_MODELS: "m",
       GROQ_BASE_URL: u.baseUrl,
-      MULTIAI_ROUTER_API_KEYS: "router-secret"
+      APIROUTER_API_KEYS: "router-secret"
     })
   );
 

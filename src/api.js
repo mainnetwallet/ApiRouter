@@ -166,7 +166,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     return {
       ok: true,
       generatedAt: new Date(now).toISOString(),
-      service: "multi-ai-router",
+      service: "apirouter",
       summary: summarizeHealth(entries),
       poolSummary: {
         text: summarizeHealth(textEntries),

@@ -1,4 +1,4 @@
-# MultiAI Router
+# ApiRouter
 
 Multi-provider AI routing gateway with health-based fallback.
 
@@ -15,8 +15,8 @@ Multi-provider AI routing gateway with health-based fallback.
 ## Quick Start
 
 ```powershell
-git clone https://github.com/mainnetwallet/MultiAI-Router.git
-cd MultiAI-Router
+git clone https://github.com/mainnetwallet/ApiRouter.git
+cd ApiRouter
 npm install
 Copy-Item .env.example .env
 notepad .env
@@ -37,7 +37,7 @@ Open `http://localhost:8788` for the control panel.
 The clone, `npm install` and `.env` setup are one-time steps. Next time, just:
 
 ```powershell
-cd MultiAI-Router
+cd ApiRouter
 git pull origin main
 npm start
 ```
@@ -45,7 +45,7 @@ npm start
 After pulling updates (`git pull`), rebuild only what changed:
 
 ```powershell
-cd MultiAI-Router
+cd ApiRouter
 git pull origin main
 npm run ui:build    
 npm start
@@ -140,7 +140,7 @@ no configured target returns `404 no_route`.
 
 ### Control panel (read-only)
 
-Served under `/api`. Requires `MULTIAI_ROUTER_API_KEYS` when that is set; open
+Served under `/api`. Requires `APIROUTER_API_KEYS` when that is set; open
 otherwise. None of these can change routing, health or provider behaviour.
 
 | Method | Endpoint | Purpose |
@@ -232,7 +232,7 @@ key *count* per provider and the *names* of the environment variables to edit;
 it renders as `Configured` / `Not configured` and never as a value.
 
 The one secret the browser holds is the gateway's own client token
-(`MULTIAI_ROUTER_API_KEYS`), entered in the panel's connection dialog. It is
+(`APIROUTER_API_KEYS`), entered in the panel's connection dialog. It is
 stored in `sessionStorage` — never `localStorage`, never a URL, never a log —
 and shown masked, with no reveal or copy control.
 

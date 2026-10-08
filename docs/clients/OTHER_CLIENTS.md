@@ -19,7 +19,7 @@ This pattern can work with clients that support a custom OpenAI-compatible provi
 - custom Node.js/Python apps
 - cURL/API clients
 
-Set the custom base URL and use the MultiAI Router gateway key if authentication is enabled.
+Set the custom base URL and use the ApiRouter gateway key if authentication is enabled.
 
 Chat completions reach any provider configured with a chat-completions endpoint
 directly, and a Gemini provider through the router's translation bridge.

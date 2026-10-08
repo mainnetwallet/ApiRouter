@@ -159,7 +159,7 @@ export function describeEnvironment(config) {
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
       { name: "TEXT_PRIORITY_MODELS", configured: config.priority?.text?.length > 0, kind: "list" },
       { name: "VISION_PRIORITY_MODELS", configured: config.priority?.vision?.length > 0, kind: "list" },
-      { name: "MULTIAI_ROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
+      { name: "APIROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
     ],
     providers: providerVars,
     visionProviders: visionProviderVars

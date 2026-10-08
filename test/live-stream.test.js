@@ -155,7 +155,7 @@ test("a client that connects mid-call gets it in the snapshot", async (t) => {
 });
 
 test("the stream is behind the same client auth as the rest of /api", async (t) => {
-  const router = await startRouter({ MULTIAI_ROUTER_API_KEYS: "secret-client-key" });
+  const router = await startRouter({ APIROUTER_API_KEYS: "secret-client-key" });
   t.after(() => router.close());
 
   const denied = await router.request("/api/requests/stream");

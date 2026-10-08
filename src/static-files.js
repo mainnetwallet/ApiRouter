@@ -173,7 +173,7 @@ export function placeholderPage(indexFile = "index.html") {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MultiAI Router</title>
+<title>ApiRouter</title>
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; padding: 2.5rem 1.5rem; background: #0e1116; color: #d7dde5;
@@ -190,7 +190,7 @@ export function placeholderPage(indexFile = "index.html") {
 </head>
 <body>
 <main>
-  <h1>MultiAI Router — backend running</h1>
+  <h1>ApiRouter — backend running</h1>
   <p>The control panel has not been built yet, so there is no UI to serve.</p>
   <pre>npm install
 npm run ui:build</pre>

@@ -52,7 +52,7 @@ export function describeSystem({ config, targets = [], monitor = null, startedAt
     .map(([id]) => id);
 
   return {
-    service: "multi-ai-router",
+    service: "apirouter",
     status: "ok",
     address: `http://localhost:${config?.port ?? null}`,
     port: config?.port ?? null,

@@ -1,4 +1,4 @@
-# OpenCode + MultiAI Router
+# OpenCode + ApiRouter
 
 OpenCode can use the router as an OpenAI-compatible provider.
 
@@ -18,12 +18,12 @@ Example:
 {
   "$schema": "https://opencode.ai/config.json",
   "providers": {
-    "multi-ai-router": {
+    "apirouter": {
       "package": "@opencode/ai/providers/openai-compatible",
-      "name": "MultiAI Router",
+      "name": "ApiRouter",
       "settings": {
         "baseURL": "http://localhost:8788/v1",
-        "apiKey": "{env:MULTIAI_ROUTER_API_KEY}"
+        "apiKey": "{env:APIROUTER_API_KEY}"
       },
       "models": {
         "your-model": {
@@ -38,7 +38,7 @@ Example:
 Set the gateway key when authentication is enabled:
 
 ```powershell
-$env:MULTIAI_ROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
+$env:APIROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
 ```
 
 OpenCode uses:

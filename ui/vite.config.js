@@ -17,7 +17,7 @@ import react from "@vitejs/plugin-react";
  * calls. Production uses the same relative URLs, served from the same origin.
  */
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
-const ROUTER_ORIGIN = process.env.MULTIAI_ROUTER_ORIGIN || "http://localhost:8788";
+const ROUTER_ORIGIN = process.env.APIROUTER_ORIGIN || "http://localhost:8788";
 
 export default defineConfig({
   root: projectRoot,

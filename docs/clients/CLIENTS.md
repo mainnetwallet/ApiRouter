@@ -1,6 +1,6 @@
 # Client Integrations
 
-MultiAI Router provides one gateway for different AI client protocols.
+ApiRouter provides one gateway for different AI client protocols.
 
 | Client | Endpoint | Protocol |
 |---|---|---|
@@ -47,14 +47,14 @@ On a bridged request some content is dropped rather than guessed at:
 Optional:
 
 ```env
-MULTIAI_ROUTER_API_KEYS=YOUR_LOCAL_GATEWAY_KEY
+APIROUTER_API_KEYS=YOUR_LOCAL_GATEWAY_KEY
 ```
 
 Use the value as the client's API key when gateway authentication is enabled.
 
 ## Provider keys
 
-Provider API keys stay inside MultiAI Router. Clients only need the router endpoint and, when enabled, the router key.
+Provider API keys stay inside ApiRouter. Clients only need the router endpoint and, when enabled, the router key.
 
 ## Fallback
 

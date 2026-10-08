@@ -1,6 +1,6 @@
-# Qwen Code + MultiAI Router
+# Qwen Code + ApiRouter
 
-Qwen Code can use MultiAI Router through an OpenAI-compatible endpoint when its provider configuration supports a custom base URL.
+Qwen Code can use ApiRouter through an OpenAI-compatible endpoint when its provider configuration supports a custom base URL.
 
 ## Router
 
@@ -35,7 +35,7 @@ In Qwen Code, configure a custom OpenAI-compatible provider/base URL:
 ```text
 Base URL: http://localhost:8788/v1
 API key: YOUR_LOCAL_ROUTER_KEY
-Model: a model configured in MultiAI Router
+Model: a model configured in ApiRouter
 ```
 
 If router authentication is disabled, the gateway API key can be omitted according to the client's configuration.
@@ -47,7 +47,7 @@ Qwen Code
    ↓
 /v1/chat/completions
    ↓
-MultiAI Router
+ApiRouter
    ↓
 health ranking
    ↓

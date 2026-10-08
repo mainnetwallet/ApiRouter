@@ -1,8 +1,8 @@
-# MultiAI Router — Full Architecture
+# ApiRouter — Full Architecture
 
 ## Overview
 
-MultiAI Router is a protocol-aware multi-provider AI gateway.
+ApiRouter is a protocol-aware multi-provider AI gateway.
 
 ```text
 Client
@@ -250,7 +250,7 @@ A successful target becomes the session's sticky target for 20 minutes (refreshe
 Router authentication is optional:
 
 ```env
-MULTIAI_ROUTER_API_KEYS=
+APIROUTER_API_KEYS=
 ```
 
 Provider API keys remain server-side and are never returned in routing metadata.

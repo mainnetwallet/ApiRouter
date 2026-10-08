@@ -396,7 +396,7 @@ test("count_tokens answers locally and respects client auth", async (t) => {
   const { upstream, router } = await withRig(
     t,
     () => ({ status: 200, body: {} }),
-    (u) => ({ GROQ_API_KEYS: "g", GROQ_MODELS: "m", GROQ_BASE_URL: u.baseUrl + "/v1", MULTIAI_ROUTER_API_KEYS: "secret" })
+    (u) => ({ GROQ_API_KEYS: "g", GROQ_MODELS: "m", GROQ_BASE_URL: u.baseUrl + "/v1", APIROUTER_API_KEYS: "secret" })
   );
   const denied = await router.request("/v1/messages/count_tokens", postJson(anthropicBody()));
   assert.equal(denied.status, 401);

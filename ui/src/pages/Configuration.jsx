@@ -160,7 +160,7 @@ export default function Configuration() {
                   <dt className="dl__term"><code>REQUEST_TIMEOUT_MS</code></dt>
                   <dd className="dl__desc mono">{data.server.requestTimeoutMs} ms</dd>
 
-                  <dt className="dl__term"><code>MULTIAI_ROUTER_API_KEYS</code></dt>
+                  <dt className="dl__term"><code>APIROUTER_API_KEYS</code></dt>
                   <dd className="dl__desc">
                     {data.server.clientAuthRequired
                       ? <span>{data.server.clientKeyCount} configured — client auth enforced</span>

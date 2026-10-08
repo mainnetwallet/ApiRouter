@@ -1,5 +1,5 @@
 {
-  "name": "multi-ai-router",
+  "name": "apirouter",
   "version": "0.1.0",
   "private": true,
   "description": "Protocol-aware multi-provider AI router with health tracking and automatic fallback.",

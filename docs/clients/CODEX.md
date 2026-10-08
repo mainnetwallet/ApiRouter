@@ -1,4 +1,4 @@
-# Codex + MultiAI Router
+# Codex + ApiRouter
 
 Use the router as Codex's OpenAI Responses gateway.
 
@@ -55,16 +55,16 @@ Example:
 model_provider = "multi_ai_router"
 
 [model_providers.multi_ai_router]
-name = "MultiAI Router"
+name = "ApiRouter"
 base_url = "http://localhost:8788/v1"
-env_key = "MULTIAI_ROUTER_API_KEY"
+env_key = "APIROUTER_API_KEY"
 wire_api = "responses"
 ```
 
 Then, if gateway authentication is enabled:
 
 ```powershell
-$env:MULTIAI_ROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
+$env:APIROUTER_API_KEY="YOUR_LOCAL_ROUTER_KEY"
 ```
 
 Start:
