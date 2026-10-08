@@ -20,50 +20,6 @@ npm install -g @openai/codex
 npm install -g @openai/codex@latest
 ```
 
-## ApiRouter
-
-```powershell
-cd ApiRouter
-git pull origin main
-npm install
-```
-
-## ApiRouter .env
-
-### Windows
-
-```powershell
-notepad .env
-```
-
-### Linux / macOS / Termux
-
-```bash
-nano .env
-```
-
-### API key
-
-```env
-APIROUTER_API_KEYS=YOUR_APIROUTER_KEY
-GEMINI_API_KEYS=YOUR_GEMINI_KEY
-GEMINI_MODELS=gemini-3.8-flash
-```
-
-### No API key
-
-```env
-APIROUTER_API_KEYS=
-GEMINI_API_KEYS=YOUR_GEMINI_KEY
-GEMINI_MODELS=gemini-3.8-flash
-```
-
-## Start ApiRouter
-
-```powershell
-npm run start:all
-```
-
 ## Codex config
 
 ### Windows
@@ -123,14 +79,4 @@ codex
 
 ```powershell
 codex --model YOUR_MODEL
-```
-
-## Check ApiRouter
-
-```powershell
-curl http://localhost:8788/health
-```
-
-```powershell
-curl http://localhost:8788/v1/models
 ```
