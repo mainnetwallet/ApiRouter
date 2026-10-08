@@ -66,7 +66,7 @@ Then:
 codex
 ```
 
-The official Codex config reference documents `~/.codex/config.toml`, custom `model_providers`, `base_url`, `env_key`, and `wire_api = "responses"`. citeturn0search1
+See the official OpenAI Codex configuration reference for the current supported provider fields: https://developers.openai.com/docs/config-file/config-reference
 
 ## Routing and session behavior
 
