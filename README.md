@@ -15,8 +15,7 @@ Multi-provider AI routing gateway with health-based fallback.
 
 ## One-Command Startup (Recommended)
 
-### Development Mode (
-pm run dev:all)
+### Development Mode (`npm run dev:all`)
 Runs both the backend API router (http://localhost:8788) and the frontend Vite dev server (http://localhost:5173) with live proxying in a single cross-platform command:
 
 `ash
@@ -26,8 +25,7 @@ npm run dev:all
 - Detects port conflicts before starting.
 - Press Ctrl+C to cleanly terminate both processes and their child trees.
 
-### Production / VPS Mode (
-pm run start:all)
+### Production / VPS Mode (`npm run start:all`)
 Builds the production control panel and starts the backend serving everything from port 8788:
 
 `ash
