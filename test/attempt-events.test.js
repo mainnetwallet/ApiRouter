@@ -433,8 +433,11 @@ test("HTTP: the SSE stream emits a new attempt event for every real attempt", as
   for (const id of ids) {
     const states = pushed.filter((e) => e.attemptId === id).map((e) => e.state);
     assert.equal(states[0], "calling", "each attempt first appears on the wire");
-    assert.equal(states.length, 2, "and is settled exactly once");
     assert.notEqual(states[1], "calling");
+    // Settled exactly once: after that the state never moves again. The only thing a
+    // settled attempt may still announce is the usage its provider reported.
+    assert.equal(new Set(states.slice(1)).size, 1, "and is settled exactly once");
+    assert.ok(states.length <= 3, "at most one more snapshot, carrying the reported usage");
   }
   const last = ids.map((id) => pushed.filter((e) => e.attemptId === id).at(-1));
   assert.deepEqual(last.map((e) => [e.keyIndex, e.status]), [[0, 429], [1, 200], [1, 200]]);

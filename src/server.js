@@ -22,6 +22,7 @@ import { RouteSession, SessionStore, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
+import { createSseUsageTap, createJsonUsageTap, tapBytes, tapEvents, usageFrom } from "./usage.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, routeOrderByPool } from "./routing-plan.js";
@@ -203,7 +204,7 @@ function publicFailure(error) {
  * and the UI reports "not reported" rather than guessing.
  */
 function extractUsage(parsed) {
-  if (!parsed || typeof parsed !== "object") return { tokens: null, finishReason: null };
+  if (!parsed || typeof parsed !== "object") return { tokens: null, finishReason: null, reported: null };
 
   const usage = parsed.usage ?? parsed.usageMetadata ?? null;
   const tokens = Number.isFinite(usage?.total_tokens)
@@ -222,7 +223,9 @@ function extractUsage(parsed) {
 
   return {
     tokens,
-    finishReason: typeof candidate === "string" ? candidate : null
+    finishReason: typeof candidate === "string" ? candidate : null,
+    // Input / output / total exactly as the provider reported them (null when it did not).
+    reported: usageFrom(parsed)
   };
 }
 
@@ -263,6 +266,16 @@ function startAttemptEvent(startSeq, target) {
 function finishAttemptEvent(attemptId, result) {
   if (!attemptId) return;
   try { requestLog.finishAttempt(attemptId, result); } catch { /* observability only */ }
+}
+
+/**
+ * Attach what the provider reported to the ONE attempt that answered. Usage is
+ * keyed by that attempt's id, so a fallback attempt can never receive (or lose)
+ * another attempt's figures.
+ */
+function reportAttemptUsage(attemptId, usage) {
+  if (!attemptId || !usage) return;
+  try { requestLog.recordAttemptUsage(attemptId, usage); } catch { /* observability only */ }
 }
 
 function progressRequest(startSeq, update) {
@@ -600,7 +613,7 @@ async function proxy(req, res, protocol, pathname) {
           // The successful attempt is recorded too — otherwise the log would
           // show a chain of failures with no terminal success.
           attempt(true, upstream.status, null);
-          return { upstream, target, upstreamProtocol, translated };
+          return { upstream, target, upstreamProtocol, translated, attemptId };
         } catch (error) {
           if (isAbortError(error)) {
             if (clientDisconnected) {
@@ -671,6 +684,7 @@ async function proxy(req, res, protocol, pathname) {
       let converted = null;
       if (!wantsStream) {
         const upstreamJson = await result.upstream.json();
+        reportAttemptUsage(result.attemptId, usageFrom(upstreamJson));
         converted = bridgeKind === "codex"
           ? convertCodexJson(result.upstreamProtocol, upstreamJson, clientModel, bridgeCtx)
           : bridgeKind === "chat"
@@ -704,8 +718,11 @@ async function proxy(req, res, protocol, pathname) {
       if (converted) return json(res, 200, converted, meta);
 
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", ...meta });
+      // Watches the upstream events as they pass through; the client's stream is
+      // produced from exactly the same events, in the same order.
+      const usageTap = createSseUsageTap();
       try {
-        const upstreamEvents = sseData(result.upstream.body);
+        const upstreamEvents = tapEvents(sseData(result.upstream.body), usageTap);
         const events = bridgeKind === "codex"
           ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
           : bridgeKind === "chat"
@@ -716,13 +733,15 @@ async function proxy(req, res, protocol, pathname) {
         await pipeline(Readable.from(events), res);
       } catch {
         res.destroy();
+      } finally {
+        reportAttemptUsage(result.attemptId, usageTap.usage);
       }
       return undefined;
     }
 
     const contentType = result.upstream.headers.get("content-type") || "application/json";
     const declaredLength = Number(result.upstream.headers.get("content-length"));
-    let usage = { tokens: null, finishReason: null };
+    let usage = { tokens: null, finishReason: null, reported: null };
     let buffered = null;
 
     // Only small, explicitly-sized JSON bodies are inspected for usage. The
@@ -743,6 +762,8 @@ async function proxy(req, res, protocol, pathname) {
         buffered = null;
       }
     }
+
+    reportAttemptUsage(result.attemptId, usage.reported);
 
     const latencyMs = Date.now() - receivedAt;
 
@@ -783,14 +804,23 @@ async function proxy(req, res, protocol, pathname) {
     if (buffered) {
       res.end(buffered);
     } else if (result.upstream.body) {
+      // The usage tap only reads each chunk on its way past: the bytes the client
+      // receives are the upstream's own, unchanged, with no whole-body buffering.
+      const tap = contentType.includes("text/event-stream")
+        ? createSseUsageTap()
+        : contentType.includes("json") ? createJsonUsageTap({ maxBytes: MAX_INSPECT_BYTES }) : null;
       try {
         // pipeline() applies backpressure and tears down the upstream reader
         // when the client disconnects.
-        await pipeline(Readable.fromWeb(result.upstream.body), res);
+        const source = Readable.fromWeb(result.upstream.body);
+        await pipeline(tap ? Readable.from(tapBytes(source, tap), { objectMode: false }) : source, res);
       } catch {
         // Headers are already on the wire, so the failure cannot be reported
         // as a JSON error response. Drop the connection instead.
         res.destroy();
+      } finally {
+        // Whatever the provider reported before the stream ended (or was cut) is kept.
+        if (tap) reportAttemptUsage(result.attemptId, tap.usage);
       }
     } else {
       res.end();

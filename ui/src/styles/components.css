@@ -1067,6 +1067,15 @@
 }
 .livelog__lone, .livelog__reason { padding: 0 var(--sp-3) var(--sp-2); }
 
+/* One compact line of token usage at the foot of an attempt card. */
+.livelog__usage {
+  padding: 0 var(--sp-3) var(--sp-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
 .livelog__steps { display: flex; flex-direction: column; padding: 0 var(--sp-3) var(--sp-3); }
 
 /* One box per model the router tried. */

@@ -160,6 +160,10 @@ export function toOpenAIChatRequest(body, model) {
   }
 
   const payload = { model, messages, stream: body.stream === true };
+  // Ask an OpenAI-compatible upstream to report usage in its final stream chunk. This
+  // request is built here and its stream is translated before the client sees it, so the
+  // extra usage-only chunk never reaches the client as-is.
+  if (payload.stream) payload.stream_options = { include_usage: true };
   // The client's own limit is forwarded as sent; when it sends none, none is added.
   if (body.max_tokens !== undefined && body.max_tokens !== null) payload.max_tokens = body.max_tokens;
   if (typeof body.temperature === "number") payload.temperature = body.temperature;
