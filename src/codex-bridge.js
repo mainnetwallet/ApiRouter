@@ -169,6 +169,69 @@ export function customToolNames(body) {
   return new Set(toolList(body).filter((t) => t.custom).map((t) => t.name));
 }
 
+/** Function-calling view of the request's tools (name + JSON schema), for response mapping. */
+export function codexToolDefs(body) {
+  return toolList(body);
+}
+
+/** Diagnostics: which tools Codex sent and which ones the bridge cannot forward. */
+export function describeCodexTools(body) {
+  const sent = (Array.isArray(body?.tools) ? body.tools : []).map((t) => ({ type: t?.type || "?", name: t?.name || null }));
+  const forwarded = toolList(body).map((t) => t.name);
+  const dropped = sent.filter((t) => !(t.name && forwarded.includes(t.name) && (t.type === "function" || t.type === "custom")));
+  return { sent, forwarded, dropped };
+}
+
+// ------------------------------------------- text-encoded tool call fallback
+//
+// Some models do not return structured `tool_calls`. They write the call into
+// the message text instead, e.g.
+//   <|message_model|>exec<|content_invoke_tool_json|>{"name":"exec","args":{"command":"ls"}}<|end_message|>
+// Codex would show that as plain chat text and never run it. These helpers
+// recognise that format and turn it into a real function_call.
+
+export const TEXT_CALL_START = "<|message_model|>";
+const TEXT_CALL_RE = /<\|message_model\|>\s*([^<\s]*)\s*<\|content_invoke_tool_json\|>([\s\S]*?)<\|end_message\|>/g;
+const SHELL_NAMES = new Set(["exec", "shell", "bash", "sh", "run", "run_command", "execute", "terminal", "local_shell", "shell_command", "exec_command"]);
+const SHELL_TARGETS = ["exec_command", "shell", "shell_command", "local_shell", "container.exec"];
+
+function mapTextCall(rawName, rawArgs, tools) {
+  if (!tools.length) return null;
+  const args = rawArgs && typeof rawArgs === "object" ? rawArgs : {};
+  const exact = tools.find((t) => t.name === rawName);
+  if (exact) return { name: exact.name, args: rawArgs ?? {} };
+  if (!SHELL_NAMES.has(String(rawName).toLowerCase())) return null;
+  const target = SHELL_TARGETS.map((n) => tools.find((t) => t.name === n)).find(Boolean);
+  if (!target) return null;
+  const raw = args.command ?? args.cmd;
+  const cmd = Array.isArray(raw) ? raw.join(" ") : typeof raw === "string" ? raw : "";
+  if (!cmd) return null;
+  const props = target.parameters?.properties || {};
+  const mapped = {};
+  if (props.cmd) mapped.cmd = cmd;
+  else if (props.command?.type === "array") mapped.command = ["bash", "-lc", cmd];
+  else mapped.command = cmd;
+  if (props.workdir && typeof args.workdir === "string") mapped.workdir = args.workdir;
+  return { name: target.name, args: mapped };
+}
+
+/** Pulls text-encoded tool calls out of `text`. Returns { text, calls }. */
+export function extractTextToolCalls(text, tools = []) {
+  const calls = [];
+  if (typeof text !== "string" || !text.includes(TEXT_CALL_START)) return { text, calls };
+  const rest = text.replace(TEXT_CALL_RE, (whole, header, payload) => {
+    let parsed;
+    try { parsed = JSON.parse(payload); } catch { return whole; }
+    if (!parsed || typeof parsed !== "object") return whole;
+    const name = typeof parsed.name === "string" && parsed.name ? parsed.name : header;
+    const mapped = mapTextCall(name, parsed.args ?? parsed.arguments ?? {}, tools);
+    if (!mapped) return whole;
+    calls.push(mapped);
+    return "";
+  });
+  return { text: calls.length ? rest.trim() : text, calls };
+}
+
 function callNames(items) {
   const names = new Map();
   for (const item of items) {
@@ -461,10 +524,20 @@ export function openAIJsonToResponses(json, model, ctx = {}) {
   const choice = json?.choices?.[0] ?? {};
   const message = choice.message ?? {};
   const output = [];
-  if (typeof message.content === "string" && message.content) output.push(messageItem(message.content));
+  let content = typeof message.content === "string" ? message.content : "";
+  const textCalls = [];
+  if (content && !(message.tool_calls || []).length) {
+    const extracted = extractTextToolCalls(content, ctx.tools || []);
+    content = extracted.text;
+    textCalls.push(...extracted.calls);
+  }
+  if (content) output.push(messageItem(content));
   for (const call of message.tool_calls || []) {
     const name = call.function?.name || "tool";
     output.push(toolCallItem(call.id || newId("call"), name, call.function?.arguments || "{}", custom.has(name)));
+  }
+  for (const call of textCalls) {
+    output.push(toolCallItem(newId("call"), call.name, call.args, custom.has(call.name)));
   }
   const truncated = choice.finish_reason === "length";
   const input = json?.usage?.prompt_tokens ?? ctx.inputTokens ?? 0;
@@ -598,6 +671,35 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
     }
   };
 
+  // Leading text-encoded tool call: hold the text back until it is clear whether
+  // it is the marker format (then it becomes a real tool call) or ordinary text.
+  const toolDefs = ctx.tools || [];
+  let lead = "undecided";   // undecided | capture | pass
+  let held = "";
+  const feedText = function* (delta) {
+    if (lead === "pass") { yield* writeText(delta); return; }
+    held += delta;
+    const probe = held.trimStart();
+    if (probe.startsWith(TEXT_CALL_START)) { lead = "capture"; return; }
+    if (TEXT_CALL_START.startsWith(probe)) return;
+    lead = "pass";
+    const flush = held;
+    held = "";
+    yield* writeText(flush);
+  };
+  const resolveHeld = function* () {
+    if (!held) return;
+    const text = held;
+    held = "";
+    const extracted = lead === "capture" ? extractTextToolCalls(text, toolDefs) : { text, calls: [] };
+    if (extracted.text) yield* writeText(extracted.text);
+    for (const call of extracted.calls) {
+      const tool = yield* startTool(`t${nextIndex}`, newId("call"), call.name);
+      yield* toolArgs(tool, argsString(call.args));
+      yield* finishTool(tool);
+    }
+  };
+
   const finishTool = function* (tool) {
     if (tool.done) return;
     tool.done = true;
@@ -645,7 +747,7 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
       const choice = chunk.choices?.[0];
       if (!choice) continue;
       const delta = choice.delta || {};
-      if (typeof delta.content === "string" && delta.content) yield* writeText(delta.content);
+      if (typeof delta.content === "string" && delta.content) yield* feedText(delta.content);
 
       for (const call of delta.tool_calls || []) {
         const key = call.index ?? 0;
@@ -668,6 +770,7 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
     throw markStreamFailure(error);
   }
 
+  yield* resolveHeld();
   yield* closeText();
   for (const tool of tools.values()) yield* finishTool(tool);
 
