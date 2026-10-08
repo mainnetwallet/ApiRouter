@@ -25,6 +25,7 @@ import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream, par
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
 import { usageFrom, totalOf, createUsageTap, tapBytes, tapEvents } from "./usage.js";
+import { createStreamDebug, redactForLog } from "./stream-debug.js";
 import { createStaticHandler } from "./static-files.js";
 import { createDevUiProxy, isReservedWhenDecoded } from "./dev-proxy.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
@@ -693,6 +694,8 @@ async function proxyRequest(req, res, protocol, pathname) {
           startedAt: attemptStartedAt
         });
 
+        debugLog(`[ATTEMPT_START] attemptId=${attemptId ?? "-"} phase=${phase ?? "-"} provider=${target.provider} model=${target.model} key=${target.keyIndex} protocol=${upstreamProtocol} translated=${translated} stream=${wantsStream}`);
+
         // Records one real upstream attempt, in the order `withFallback` makes
         // them. This is the true fallback chain, observed rather than
         // reconstructed from the final error.
@@ -731,6 +734,7 @@ async function proxyRequest(req, res, protocol, pathname) {
             outputTokens: usage?.outputTokens ?? null
           });
           progressRequest(liveSeq, { attempts, inflight: null });
+          debugLog(`[ATTEMPT_END] attemptId=${attemptId ?? "-"} provider=${target.provider} model=${target.model} ok=${ok} status=${Number.isInteger(status) ? status : "-"} latency=${completedAt - attemptStartedAt}ms reason=${redactForLog(errorMessage ?? "", 160) || "-"}`);
         };
 
         try {
@@ -960,20 +964,24 @@ async function proxyRequest(req, res, protocol, pathname) {
       let streamOutcome = "truncated";
       let streamError = null;
       const usageTap = createUsageTap();
+      const streamDebug = createStreamDebug({
+        enabled: DEBUG_INGRESS, log: debugLog, target: result.target,
+        status: result.upstream.status, protocol: result.upstreamProtocol
+      });
       try {
-        const upstreamEvents = tapEvents(sseData(guardUpstreamStream(result.upstream.body, {
+        const upstreamEvents = tapEvents(sseData(streamDebug.upstream(guardUpstreamStream(result.upstream.body, {
           idleMs: config.streamIdleTimeoutMs,
           deadlineAt: result.deadlineAt,
           clientSignal: clientGone.signal
-        }), { maxEventBytes: config.maxSseEventBytes }), usageTap);
-        const events = bridgeKind === "codex"
+        })), { maxEventBytes: config.maxSseEventBytes }), usageTap);
+        const bridgedEvents = bridgeKind === "codex"
           ? streamToResponses(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
           : bridgeKind === "chat"
             ? streamToChat(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx)
             : bridgeKind === "gemini"
               ? streamToGemini(upstreamEvents)
               : streamToAnthropic(result.upstreamProtocol, upstreamEvents, clientModel, bridgeCtx);
-        await pipeline(Readable.from(events), res);
+        await pipeline(Readable.from(streamDebug.client(bridgedEvents)), res);
         streamOutcome = "completed";
       } catch (error) {
         streamError = error;
@@ -984,6 +992,7 @@ async function proxyRequest(req, res, protocol, pathname) {
           : "aborted";
       }
 
+      streamDebug.end(streamOutcome, streamError);
       if (streamOutcome === "completed") {
         const streamUsage = usageTap.usage;
         settleAttempt?.(true, result.upstream.status, null, streamUsage);
@@ -1128,6 +1137,7 @@ async function proxyRequest(req, res, protocol, pathname) {
       "x-multi-ai-session-id": sessionId
     });
 
+    let passDebug = null;
     try {
       if (buffered) {
         res.end(buffered);
@@ -1140,7 +1150,12 @@ async function proxyRequest(req, res, protocol, pathname) {
           deadlineAt: result.deadlineAt,
           clientSignal: clientGone.signal
         });
-        await pipeline(Readable.from(passthroughTap ? tapBytes(source, passthroughTap) : source), res);
+        passDebug = createStreamDebug({
+          enabled: DEBUG_INGRESS && streamed, log: debugLog, target: result.target,
+          status: result.upstream.status, protocol: result.upstreamProtocol
+        });
+        await pipeline(Readable.from(passDebug.passthrough(passthroughTap ? tapBytes(source, passthroughTap) : source)), res);
+        passDebug.end("completed");
       } else {
         res.end();
       }
@@ -1149,6 +1164,7 @@ async function proxyRequest(req, res, protocol, pathname) {
       // JSON error response. Cool the target (unless the client left) and drop
       // the connection instead.
       const aborted = error?.streamCause !== "upstream" && !isUpstreamFault(error) && clientAborted();
+      passDebug?.end(aborted ? "aborted" : "truncated", error);
       settleAttempt?.(
         false,
         result.upstream.status,
