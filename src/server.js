@@ -298,8 +298,20 @@ function convertedTokens(converted) {
   return input + output || null;
 }
 
+// TEMPORARY ingress diagnostics (enable with MULTIAI_DEBUG_INGRESS=1). They log
+// method, path, peer, user-agent and the client's own request-id header, and
+// nothing else: never a body, an Authorization header or a key.
+const DEBUG_INGRESS = process.env.MULTIAI_DEBUG_INGRESS === "1";
+const debugLog = (line) => { if (DEBUG_INGRESS) console.log(line); };
+
 /** Records a routed request. Never allowed to break the request it describes. */
 function recordRequest(fields) {
+  if (DEBUG_INGRESS) {
+    // `open=false` means this lifecycle was already retired (or never begun):
+    // the log is about to file a SECOND row, under a freshly minted request id.
+    const open = Number.isInteger(fields?.pendingSeq) ? requestLog.requestIdOf(fields.pendingSeq) : null;
+    debugLog(`[RECORD] pendingSeq=${fields?.pendingSeq ?? "-"} open=${open ? "true" : "false"} requestId=${open || "-"} outcome=${fields?.outcome ?? "-"} http=${fields?.httpStatus ?? "-"}`);
+  }
   try {
     return requestLog.record(fields);
   } catch {
@@ -368,9 +380,40 @@ pinnedHealth.isAvailable = () => true;
 const lastRealAttempt = (list) => [...list].reverse().find((item) => !item.skipped);
 
 async function proxy(req, res, protocol, pathname) {
+  debugLog(`[PROXY_START] requestId=- ${req.method} ${req.url}`);
+  try {
+    return await proxyRequest(req, res, protocol, pathname);
+  } finally {
+    debugLog(`[PROXY_END] requestId=${res.getHeader("x-multi-ai-request-id") || "-"}`);
+  }
+}
+
+async function proxyRequest(req, res, protocol, pathname) {
   const receivedAt = Date.now();
   const attempts = [];
   let liveSeq = null;
+  // ONE incoming HTTP request is ONE top-level request, so it gets exactly ONE
+  // terminal record. Every terminal below (success, failure, abort, the outer
+  // catch) files through this, because a throw AFTER a terminal has already
+  // recorded (e.g. writeHead rejecting a header value) lands in the outer catch,
+  // and a second `record()` on a retired lifecycle mints a brand-new requestId:
+  // a phantom second request for one HTTP call and one upstream call. The first
+  // verdict stands; a refused second one is reported loudly, never dropped
+  // silently. `lifecycleRequestId` is the id begin() minted (the one echoed to
+  // the client), so the row keeps it even if the pending entry was pruned.
+  let lifecycleRequestId = null;
+  let terminalRecorded = false;
+  const recordTerminal = (fields) => {
+    if (terminalRecorded) {
+      console.warn(
+        `[router] second terminal record refused for ${lifecycleRequestId ?? "-"} ` +
+        `(${fields?.outcome ?? "-"} http=${fields?.httpStatus ?? "-"}): ${sanitizeMessage(fields?.errorMessage) ?? ""}`.trimEnd()
+      );
+      return null;
+    }
+    terminalRecorded = true;
+    return recordRequest(lifecycleRequestId ? { ...fields, requestId: lifecycleRequestId } : fields);
+  };
   // Set by the invoke callback for every 200: a 200 only carried the headers,
   // so the attempt is not settled as a success until the body has been consumed
   // and delivered (or has failed). Streamed and non-streamed attempts settle
@@ -392,7 +435,7 @@ async function proxy(req, res, protocol, pathname) {
   const clientAborted = () => clientGone.signal.aborted;
 
   if (!authorized(req)) {
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       receivedAt,
       protocol,
@@ -408,7 +451,7 @@ async function proxy(req, res, protocol, pathname) {
   let body;
   try { body = await readJsonBody(req, { maxBytes: config.maxBodyBytes }); }
   catch (error) {
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       receivedAt,
       protocol,
@@ -426,7 +469,7 @@ async function proxy(req, res, protocol, pathname) {
   // never reach routing, an upstream or the fallback walk.
   const shapeError = validateRequestShape(protocol, body);
   if (shapeError) {
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       receivedAt,
       protocol,
@@ -487,11 +530,12 @@ async function proxy(req, res, protocol, pathname) {
   // `x-multi-ai-session-id` identifies the sticky session it belongs to and is
   // shared by every request from the same client.
   const requestId = requestIdOf(liveSeq);
+  lifecycleRequestId = requestId;
   if (requestId) res.setHeader("x-multi-ai-request-id", requestId);
 
   const pin = readPin(req);
   if (pin.error) {
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: "invalid_request_error", errorMessage: pin.error, attempts
@@ -504,7 +548,7 @@ async function proxy(req, res, protocol, pathname) {
   // model is not a vision model" when both are true.
   if (pool === VISION_POOL && poolTargets.length === 0) {
     const message = "No vision provider is configured";
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
       outcome: "failed", errorType: "no_vision_route", errorMessage: message, attempts
@@ -520,7 +564,7 @@ async function proxy(req, res, protocol, pathname) {
   const capability = validateModelForPool(modelCapabilities, requestedModel, pool);
   if (capability) {
     const message = capabilityErrorMessage(capability);
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: capability.type, errorMessage: message, attempts
@@ -539,7 +583,7 @@ async function proxy(req, res, protocol, pathname) {
   if (pinned.pinned && pinned.targets.length === 0) {
     const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;
     const message = `No configured target matches the pinned selection (${sanitizeMessage(where)})`;
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 404,
       outcome: "failed", errorType: "no_route", errorMessage: message, attempts
@@ -573,7 +617,7 @@ async function proxy(req, res, protocol, pathname) {
     const noRouteMessage = pool === VISION_POOL
       ? "No configured vision target supports this client protocol"
       : "No configured provider targets support this client protocol";
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       id: sessionInfo.id,
       receivedAt,
@@ -815,7 +859,7 @@ async function proxy(req, res, protocol, pathname) {
       // Every terminal outcome is recorded through one shape, so a failure
       // after the headers can never be filed as a success. `streamOutcome` is
       // only set for a streamed request.
-      const record = (outcome, extra = {}) => recordRequest({
+      const record = (outcome, extra = {}) => recordTerminal({
         pendingSeq: liveSeq,
         id: sessionId,
         receivedAt,
@@ -1022,7 +1066,7 @@ async function proxy(req, res, protocol, pathname) {
     // One shape for both terminal outcomes, so a post-header failure can never
     // be filed as a success. `latencyMs` is time-to-upstream-response, the
     // figure an operator acts on; stream duration is not included.
-    const record = (outcome, extra = {}) => recordRequest({
+    const record = (outcome, extra = {}) => recordTerminal({
       pendingSeq: liveSeq,
       id: sessionId,
       receivedAt,
@@ -1142,7 +1186,7 @@ async function proxy(req, res, protocol, pathname) {
         : (sanitizeMessage(error?.message) || "Upstream response could not be read")
     );
     if (error?.clientAborted === true || error instanceof ClientAbortError) {
-      recordRequest({
+      recordTerminal({
         pendingSeq: liveSeq,
         id: sessionInfo.id,
         receivedAt,
@@ -1165,7 +1209,7 @@ async function proxy(req, res, protocol, pathname) {
       else json(res, 499, { error: { message: "Client disconnected", type: "client_aborted" } });
       return undefined;
     }
-    recordRequest({
+    recordTerminal({
       pendingSeq: liveSeq,
       id: sessionInfo.id,
       receivedAt,
@@ -1238,6 +1282,16 @@ function respondUnexpected(res, error) {
 }
 
 async function handleRequest(req, res) {
+  if (DEBUG_INGRESS) {
+    const incomingId = req.headers["x-request-id"] || req.headers["x-client-request-id"] || "-";
+    console.log(
+      `[INCOMING] ${new Date().toISOString()} ` +
+      `${req.method} ${req.url} ` +
+      `remote=${req.socket.remoteAddress || "-"} ` +
+      `ua=${req.headers["user-agent"] || "-"} ` +
+      `x-request-id=${incomingId}`
+    );
+  }
   // "//v1/models" (base URL with trailing slash + "/v1/...") must not parse as a host.
   // The request target is client-controlled and `new URL` throws on a malformed
   // one (e.g. an absolute-form target with a bad host), so it is parsed guardedly.
