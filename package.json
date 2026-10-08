@@ -13,7 +13,9 @@
     "ui:dev": "vite --config ui/vite.config.js",
     "ui:build": "vite build --config ui/vite.config.js",
     "ui:preview": "vite preview --config ui/vite.config.js",
-    "demo:live-logs": "node scripts/demo-live-logs.mjs"
+    "demo:live-logs": "node scripts/demo-live-logs.mjs",
+    "dev:all": "node scripts/dev-all.mjs",
+    "start:all": "node scripts/start-all.mjs"
   },
   "dependencies": {
     "dotenv": "^17.2.2",
