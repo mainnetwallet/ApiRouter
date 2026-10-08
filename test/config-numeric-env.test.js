@@ -32,10 +32,18 @@ test("REQUEST_TIMEOUT_MS rejects non-numeric, zero, negative and fractional valu
   }
 });
 
-test("there is no request body size setting: MAX_REQUEST_BODY_MB is ignored", () => {
-  for (const value of ["1", "abc", "0", "-3"]) {
-    const c = loadConfig({ MAX_REQUEST_BODY_MB: value });
-    assert.equal("maxBodyBytes" in c, false, value);
+test("MAX_REQUEST_BODY_BYTES is parsed and validated", () => {
+  assert.equal(loadConfig({ MAX_REQUEST_BODY_BYTES: "1048576" }).maxBodyBytes, 1048576);
+  assert.equal(loadConfig({}).maxBodyBytes, 10 * 1024 * 1024);
+  for (const bad of ["abc", "0", "-1", "1.5", "104857601"]) {
+    assert.throws(() => loadConfig({ MAX_REQUEST_BODY_BYTES: bad }), /Invalid MAX_REQUEST_BODY_BYTES/);
+  }
+});
+
+test("RETRY_STATUS_CODES rejects invalid values instead of silently dropping them", () => {
+  assert.deepEqual([...loadConfig({ RETRY_STATUS_CODES: "418,429" }).retryableStatus], [418, 429]);
+  for (const bad of ["418,abc", "99", "600", "1.5"]) {
+    assert.throws(() => loadConfig({ RETRY_STATUS_CODES: bad }), /Invalid RETRY_STATUS_CODES/);
   }
 });
 
@@ -87,7 +95,7 @@ for (const [name, value] of [["REQUEST_TIMEOUT_MS", "abc"], ["REQUEST_TIMEOUT_MS
   });
 }
 
-test("valid REQUEST_TIMEOUT_MS=30000 starts normally and a large body is not rejected", async (t) => {
+test("valid REQUEST_TIMEOUT_MS=30000 starts normally and a body within the limit is accepted", async (t) => {
   const upstream = await startMockUpstream(() => ({ status: 200, body: {
     id: "c1", object: "chat.completion", created: 0, model: "u",
     choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
@@ -103,5 +111,5 @@ test("valid REQUEST_TIMEOUT_MS=30000 starts normally and a large body is not rej
   assert.equal(ok.status, 200);
 
   const big = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [{ role: "user", content: "x".repeat(2 * 1024 * 1024) }] }));
-  assert.equal(big.status, 200);
+  assert.equal(big.status, 413);
 });
