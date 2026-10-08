@@ -69,6 +69,13 @@ export function createSessionId() { return randomUUID(); }
 
 export async function readJsonBody(req, maxBytes = 10 * 1024 * 1024) {
   const limit = Number.isFinite(Number(maxBytes)) && Number(maxBytes) > 0 ? Number(maxBytes) : 10 * 1024 * 1024;
+  const declared = Number(req.headers?.["content-length"]);
+  if (Number.isFinite(declared) && declared > limit) {
+    const error = new Error(`Request body exceeds the maximum allowed size of ${limit} bytes`);
+    error.status = 413;
+    req.resume();
+    throw error;
+  }
   const chunks = [];
   let total = 0;
   for await (const chunk of req) {
@@ -76,9 +83,9 @@ export async function readJsonBody(req, maxBytes = 10 * 1024 * 1024) {
     if (total > limit) {
       const error = new Error(`Request body exceeds the maximum allowed size of ${limit} bytes`);
       error.status = 413;
-      // Stop consuming the oversized request immediately; the caller can close
-      // the response without retaining an arbitrarily large body in memory.
-      req.destroy();
+      // Stop retaining data immediately. Drain the socket without buffering it
+      // so the client can receive the 413 cleanly and the process stays bounded.
+      req.resume();
       throw error;
     }
     chunks.push(chunk);
