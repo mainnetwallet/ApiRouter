@@ -81,11 +81,13 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
               <dt className="dl__term">Streamed</dt>
               <dd className="dl__desc">{entry.streamed ? "yes" : "no"}</dd>
 
-              <dt className="dl__term">Tokens</dt>
-              <dd className="dl__desc">
-                {Number.isFinite(entry.tokens)
-                  ? formatTokens(entry.tokens)
-                  : <span className="dim" title="The upstream response did not report usage">not reported by provider</span>}
+              <dt className="dl__term">Token usage</dt>
+              <dd className="dl__desc mono">
+                input {Number.isFinite(entry.inputTokens) ? formatTokens(entry.inputTokens) : EMPTY}
+                {" · "}
+                output {Number.isFinite(entry.outputTokens) ? formatTokens(entry.outputTokens) : EMPTY}
+                {" · "}
+                total {Number.isFinite(entry.tokens) ? formatTokens(entry.tokens) : EMPTY}
               </dd>
 
               <dt className="dl__term">Finish reason</dt>
