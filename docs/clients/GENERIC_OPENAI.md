@@ -1,11 +1,23 @@
-# OpenAI-Compatible Clients
+# OpenAI-Compatible Clients + ApiRouter
 
-Any client or SDK that supports a custom OpenAI-compatible base URL can use ApiRouter.
-
-Gateway:
+## Base URL
 
 ```text
 http://localhost:8788/v1
+```
+
+## API key
+
+### With ApiRouter API key
+
+```text
+YOUR_APIROUTER_KEY
+```
+
+### Without ApiRouter API key
+
+```text
+any-key
 ```
 
 ## JavaScript
@@ -15,11 +27,11 @@ import OpenAI from "openai";
 
 const client = new OpenAI({
   baseURL: "http://localhost:8788/v1",
-  apiKey: process.env.APIROUTER_API_KEY
+  apiKey: process.env.APIROUTER_API_KEY || "any-key"
 });
 
 const response = await client.chat.completions.create({
-  model: "your-model",
+  model: "Router",
   messages: [{ role: "user", content: "Hello" }]
 });
 ```
@@ -28,34 +40,14 @@ const response = await client.chat.completions.create({
 
 ```python
 from openai import OpenAI
-import os
 
 client = OpenAI(
     base_url="http://localhost:8788/v1",
-    api_key=os.environ["APIROUTER_API_KEY"],
+    api_key="YOUR_APIROUTER_KEY",
+)
+
+response = client.chat.completions.create(
+    model="Router",
+    messages=[{"role": "user", "content": "Hello"}],
 )
 ```
-
-## cURL
-
-PowerShell:
-
-```powershell
-curl.exe http://localhost:8788/v1/chat/completions `
-  -H "Authorization: Bearer $env:APIROUTER_API_KEY" `
-  -H "Content-Type: application/json" `
-  -d '{"model":"your-model","messages":[{"role":"user","content":"Hello"}]}'
-```
-
-The router handles health ranking and fallback while provider keys stay server-side.
-
-A chat-completions provider is called directly. A Gemini provider is reached
-through the router's translation bridge, so a Gemini-only configuration still
-serves any OpenAI-compatible client. On such a bridged request, tools that are
-not `type: "function"` are dropped (they have no `generateContent` equivalent)
-and only base64 `data:` image URLs are forwarded.
-
-An exact match for the requested model is tried first, then the remaining
-reachable targets; a retryable failure moves the request to the next one.
-
-Clients such as Cursor, Cline, Roo Code, Continue, Qwen Code and similar tools can use the same endpoint when they support custom OpenAI-compatible providers.
