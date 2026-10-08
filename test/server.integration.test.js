@@ -375,7 +375,7 @@ test("a hung streaming upstream fails over after STREAM_CONNECT_TIMEOUT_MS, not 
   assert.ok(Date.now() - startedAt < 5000, "should give up well before REQUEST_TIMEOUT_MS");
 });
 
-test("the router imposes no request body size limit, even with MAX_REQUEST_BODY_MB set", async (t) => {
+test("the router rejects request bodies above MAX_REQUEST_BODY_BYTES", async (t) => {
   const { router } = await withRig(
     t,
     () => ({ status: 200, body: { ok: true } }),
@@ -383,13 +383,13 @@ test("the router imposes no request body size limit, even with MAX_REQUEST_BODY_
       GROQ_API_KEYS: "k0",
       GROQ_MODELS: "m",
       GROQ_BASE_URL: u.baseUrl,
-      MAX_REQUEST_BODY_MB: "1"
+      MAX_REQUEST_BODY_BYTES: "1048576"
     })
   );
 
   const big = "x".repeat(2 * 1024 * 1024);
   const res = await router.request("/v1/chat/completions", postJson({ model: "m", messages: [{ role: "user", content: big }] }));
-  assert.notEqual(res.status, 413);
+  assert.equal(res.status, 413);
 });
 
 test("an upstream 413 (provider size/TPM limit) falls back to the next target", async (t) => {
@@ -582,7 +582,7 @@ test("an empty body is accepted", async (t) => {
   assert.equal(upstream.apiRequests.length, 1);
 });
 
-test("a very large body (11 MB) is forwarded, not rejected with 413", async (t) => {
+test("a very large body (11 MB) is rejected by the default 10 MiB limit", async (t) => {
   const { upstream, router } = await withRig(
     t,
     () => ok(),
@@ -590,7 +590,7 @@ test("a very large body (11 MB) is forwarded, not rejected with 413", async (t) 
       GROQ_API_KEYS: "k",
       GROQ_MODELS: "m",
       GROQ_BASE_URL: u.baseUrl,
-      MAX_REQUEST_BODY_MB: "10"
+      MAX_REQUEST_BODY_BYTES: String(10 * 1024 * 1024)
     })
   );
 
@@ -599,8 +599,8 @@ test("a very large body (11 MB) is forwarded, not rejected with 413", async (t) 
     postJson({ model: "m", messages: [{ role: "user", content: "x".repeat(11 * 1024 * 1024) }] })
   );
 
-  assert.equal(res.status, 200);
-  assert.equal(upstream.apiRequests.length, 1);
+  assert.equal(res.status, 413);
+  assert.equal(upstream.apiRequests.length, 0);
 });
 
 test("streamed upstream responses arrive intact", async (t) => {
