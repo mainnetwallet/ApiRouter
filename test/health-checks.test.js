@@ -79,6 +79,28 @@ test("openai-compatible targets probe the models endpoint on their configured ba
   assert.equal(bare.url, "https://agentrouter.org/v1/models");
 });
 
+
+test("Cohere compatibility targets probe the same chat-completions route used for Playground", () => {
+  const plan = healthProbePlan(chatTarget({
+    provider: "cohere",
+    model: "command-a-plus-05-2026",
+    baseUrl: "https://api.cohere.ai/compatibility/v1",
+    apiKey: "cohere-secret-key"
+  }));
+
+  assert.equal(plan.provider, "cohere-chat");
+  assert.equal(plan.method, "POST");
+  assert.equal(plan.url, "https://api.cohere.ai/compatibility/v1/chat/completions");
+  assert.equal(plan.headers.authorization, "Bearer cohere-secret-key");
+  assert.equal(plan.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(plan.body), {
+    model: "command-a-plus-05-2026",
+    messages: [{ role: "user", content: "health" }],
+    max_tokens: 1,
+    stream: false
+  });
+});
+
 test("openai-responses-only targets are probed through the same family", () => {
   const plan = healthProbePlan(chatTarget({ protocols: ["openai-responses"] }));
   assert.equal(plan.url, "https://api.groq.com/openai/v1/models");
@@ -133,6 +155,25 @@ test("missing or unimplemented probe endpoints stay passive", () => {
 // ---------------------------------------------------------------------------
 // probeTargetHealth
 // ---------------------------------------------------------------------------
+
+
+test("Cohere health sends a minimal POST instead of GET /models", async () => {
+  const target = chatTarget({
+    provider: "cohere",
+    model: "command-a-plus-05-2026",
+    baseUrl: "https://api.cohere.ai/compatibility/v1",
+    apiKey: "cohere-secret-key"
+  });
+  const fetchImpl = stubFetch({ status: 200 });
+  const result = await probeTargetHealth(target, { fetchImpl });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 200);
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.equal(fetchImpl.calls[0].url, "https://api.cohere.ai/compatibility/v1/chat/completions");
+  assert.equal(fetchImpl.calls[0].init.method, "POST");
+  assert.equal(JSON.parse(fetchImpl.calls[0].init.body).max_tokens, 1);
+});
 
 test("a healthy provider reports ok with the observed status and latency", async () => {
   const fetchImpl = stubFetch({ status: 200 });
