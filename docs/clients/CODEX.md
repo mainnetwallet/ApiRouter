@@ -53,6 +53,7 @@ Example:
 
 ```toml
 model_provider = "multi_ai_router"
+model = "Router"
 
 [model_providers.multi_ai_router]
 name = "MultiAI Router"
