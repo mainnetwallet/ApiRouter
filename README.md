@@ -29,7 +29,33 @@ git pull origin main
 npm install
 ```
 
-### 2. Configure
+### 2. Start
+
+**Recommended — Router**
+
+```bash
+cd ApiRouter
+git pull origin main
+Router
+```
+
+**Development mode**
+
+```bash
+cd ApiRouter
+git pull origin main
+npm run dev:all
+```
+
+**Production mode**
+
+```bash
+cd ApiRouter
+git pull origin main
+npm run start:all
+```
+
+### 3. Configure
 
 Copy the example environment file and add your provider credentials:
 
