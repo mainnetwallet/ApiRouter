@@ -67,3 +67,48 @@ test("dev:all exits non-zero when 5173 is occupied and leaves process alive", as
 });
 
 
+
+
+test("port 8788 conflict leaves existing process alive", async () => {
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(8788, "127.0.0.1", resolve));
+  try {
+    const child = spawn(process.execPath, ["scripts/router.mjs"], { stdio: ["ignore", "pipe", "pipe"] });
+    const code = await new Promise((resolve) => child.on("exit", (c) => resolve(c)));
+    assert.notStrictEqual(code, 0);
+    const alive = await new Promise((resolve) => {
+      const s = net.connect(8788, "127.0.0.1", () => { s.end(); resolve(true); });
+      s.on("error", () => resolve(false));
+    });
+    assert.strictEqual(alive, true, "Conflicting process must remain alive after Router exits");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("port 5173 conflict leaves existing process alive", async () => {
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(5173, "127.0.0.1", resolve));
+  try {
+    const child = spawn(process.execPath, ["scripts/router.mjs"], { stdio: ["ignore", "pipe", "pipe"] });
+    const code = await new Promise((resolve) => child.on("exit", (c) => resolve(c)));
+    assert.notStrictEqual(code, 0);
+    const alive = await new Promise((resolve) => {
+      const s = net.connect(5173, "127.0.0.1", () => { s.end(); resolve(true); });
+      s.on("error", () => resolve(false));
+    });
+    assert.strictEqual(alive, true, "Conflicting process must remain alive after Router exits");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("Windows browser opening does not use cmd /c start", () => {
+  const content = fs.readFileSync("scripts/router.mjs", "utf8");
+  assert.strictEqual(content.includes("cmd /c start"), false);
+  assert.strictEqual(content.includes("cmd"), false);
+  assert.strictEqual(content.includes("rundll32.exe"), true);
+  assert.strictEqual(content.includes("url.dll,FileProtocolHandler"), true);
+  assert.strictEqual(content.includes("shell: true"), false);
+});
+
