@@ -112,8 +112,18 @@ export function readProviders(env, { vision = false } = {}) {
 export function loadConfig(env = process.env) {
   const providers = readProviders(env);
   const visionProviders = readProviders(env, { vision: true });
-  const retryableValues = split(env.RETRY_STATUS_CODES || DEFAULT_RETRY_STATUS_CODES.join(","))
-    .map(Number).filter((v) => Number.isInteger(v) && v >= 100 && v <= 599);
+  const retryRaw = env.RETRY_STATUS_CODES;
+  const retryableValues = split(retryRaw === undefined || String(retryRaw).trim() === ""
+    ? DEFAULT_RETRY_STATUS_CODES.join(",")
+    : retryRaw);
+  if (retryRaw !== undefined && String(retryRaw).trim() !== "") {
+    for (const raw of retryableValues) {
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < 100 || value > 599) {
+        throw new Error(`Invalid RETRY_STATUS_CODES: expected comma-separated HTTP status codes from 100 to 599, got "${String(retryRaw).slice(0, 120)}"`);
+      }
+    }
+  }
   return {
     routerApiKeys: split(env.APIROUTER_API_KEYS),
     port: readNumber(env, "PORT", 8788, { min: 0, max: 65535, expected: "an integer from 0 to 65535" }),
@@ -123,7 +133,8 @@ export function loadConfig(env = process.env) {
     retryableStatus: new Set(retryableValues),
     // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
     // exists so tests can use a short real-clock TTL).
-    stickyTtlMs: Number.isInteger(Number(env.STICKY_TTL_MS)) && Number(env.STICKY_TTL_MS) > 0 ? Number(env.STICKY_TTL_MS) : 20 * 60 * 1000,
+    stickyTtlMs: readNumber(env, "STICKY_TTL_MS", 20 * 60 * 1000, { min: 1, expected: "a positive integer" }),
+    maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", 10 * 1024 * 1024, { min: 1, max: 100 * 1024 * 1024, expected: "an integer from 1 to 104857600" }),
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
     providers,
