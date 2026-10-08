@@ -591,6 +591,21 @@ export class RequestLog {
     };
   }
 
+  /**
+   * Forget every FINISHED request and its attempt events, but keep requests that
+   * are still running (and their attempts), so a Clear pressed mid-request does
+   * not orphan a call that is about to be recorded. Returns how many finished
+   * requests were removed.
+   */
+  clearFinished() {
+    const removed = this.entries.size;
+    this.entries.clear();
+    for (const [attemptId, event] of this.attemptEvents) {
+      if (!this.pendingEntries.has(event.requestSeq)) this.attemptEvents.delete(attemptId);
+    }
+    return removed;
+  }
+
   clear() {
     this.entries.clear();
     this.pendingEntries.clear();

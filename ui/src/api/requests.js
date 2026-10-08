@@ -14,3 +14,8 @@ export function getRequests(query = {}, { signal } = {}) {
 export function getRequest(id, { signal } = {}) {
   return apiRequest(`/api/requests/${encodeURIComponent(id)}`, { signal });
 }
+
+/** Clear the router's request/attempt log on the server (running requests stay). */
+export function clearRequests({ signal } = {}) {
+  return apiRequest("/api/requests", { method: "DELETE", signal });
+}

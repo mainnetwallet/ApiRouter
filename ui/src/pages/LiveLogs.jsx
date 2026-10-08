@@ -11,7 +11,8 @@ import { LiveLogList, formatRowsAsText } from "../components/domain/LiveLogList.
 import { CopyButton } from "../components/ui/CopyButton.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
-import { getRequests } from "../api/requests.js";
+import { getRequests, clearRequests } from "../api/requests.js";
+import { useToast, toastApiError } from "../context/ToastContext.jsx";
 import { openRequestStream } from "../api/liveStream.js";
 import { MAX_ROWS, filterRows, ingestEvent, ingestPayload, isLive, isNearBottom, mergeRows } from "../lib/liveLogs.js";
 import { providerLabel } from "../lib/format.js";
@@ -53,6 +54,7 @@ export default function LiveLogs() {
   const debouncedSearch = useDebouncedValue(search, 150);
   const debouncedRequestId = useDebouncedValue(requestId, 150);
 
+  const toast = useToast();
   const maxSeq = useRef(0);
   const floor = useRef(0);
   const [now, setNow] = useState(() => Date.now());
@@ -152,6 +154,8 @@ export default function LiveLogs() {
     // Everything seen so far is cleared; only calls that start later come back.
     floor.current = maxSeq.current;
     setRows([]);
+    // Also clear the server's log, otherwise a refresh brings the old calls back.
+    clearRequests().catch((error) => toastApiError(toast, error, "Could not clear the server log"));
   };
 
   const copyText = useCallback(() => formatRowsAsText(visible), [visible]);
