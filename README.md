@@ -146,7 +146,7 @@ MULTIAI_ROUTER_API_KEYS=
 
 - `PORT` — gateway/control-panel port.
 - `HOST` — bind address.
-- `MULTIAI_ROUTER_API_KEYS` — optional keys used to authenticate gateway clients.
+- `MULTIAI_ROUTER_API_KEYS` — optional keys used to authenticate gateway clients. Leave it empty for local unauthenticated use. When it is empty, Codex must omit `env_key` from its provider configuration; see [Codex](docs/clients/CODEX.md).
 
 ### Providers
 
