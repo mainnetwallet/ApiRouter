@@ -1,264 +1,300 @@
 # ApiRouter
 
-Multi-provider AI routing gateway with health-based fallback.
+**Multi-provider AI gateway with intelligent routing, health-aware fallback, sticky sessions, and a built-in control panel.**
 
-## Client Integration Guides
+ApiRouter gives OpenAI-compatible and native AI clients one local endpoint while handling provider selection, model routing, key rotation, cooldowns, retries, and observability.
 
-- [Claude Code](docs/clients/CLAUDE_CODE.md)
-- [Codex](docs/clients/CODEX.md)
-- [Qwen Code](docs/clients/QWEN_CODE.md)
-- [OpenCode](docs/clients/OPENCODE.md)
-- [Generic OpenAI-compatible Clients](docs/clients/GENERIC_OPENAI.md)
-- [Other AI Clients](docs/clients/OTHER_CLIENTS.md)
-- [All Client Protocols](docs/clients/CLIENTS.md)
+## Features
 
+- **Multi-provider routing** — route requests across configured AI providers and models.
+- **Priority routing** — define ordered text and vision targets.
+- **Health-aware fallback** — unhealthy or cooled-down targets are skipped automatically.
+- **Sticky sessions** — successful targets can remain sticky for 20 minutes per session.
+- **Key-aware routing** — keys are handled independently within each provider/model target.
+- **Text + vision separation** — vision requests stay in the vision pool; they do not silently fall back to text-only targets.
+- **Multiple client protocols** — Claude Messages, OpenAI Responses, OpenAI Chat Completions, Gemini, and generic OpenAI-compatible clients.
+- **Control Panel** — inspect providers, models, health, routing, requests, live logs, analytics, configuration, and system state.
+- **Live Logs** — follow request and per-target lifecycle events in real time.
+- **Cross-platform launcher** — Windows, Linux, and macOS startup support.
+- **Security-focused configuration** — provider credentials stay server-side and are never exposed through the control panel.
 
-## One-Command Startup (Recommended)
+## Quick Start
 
-### Development Mode (`npm run dev:all`)
-Runs both the backend API router (http://localhost:8788) and the frontend Vite dev server (http://localhost:5173) with live proxying in a single cross-platform command:
+### 1. Clone
+
+```bash
+git clone https://github.com/mainnetwallet/ApiRouter.git
+cd ApiRouter
+npm install
+```
+
+### 2. Configure
+
+Copy the example environment file and add your provider credentials:
+
+**PowerShell**
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+**Linux / macOS**
+```bash
+cp .env.example .env
+nano .env
+```
+
+### 3. Start
+
+For development:
 
 ```bash
 npm run dev:all
 ```
-- Works identically on **Windows (CMD / PowerShell)**, **Linux**, and **macOS**.
-- Detects port conflicts before starting.
-- Press Ctrl+C to cleanly terminate both processes and their child trees.
 
-### Production / VPS Mode (`npm run start:all`)
-Builds the production control panel and starts the backend serving everything from port 8788:
+For production:
 
 ```bash
 npm run start:all
 ```
 
----
-
-## Quick Start
-
-```powershell
-git clone https://github.com/mainnetwallet/ApiRouter.git
-cd ApiRouter
-npm install
-Copy-Item .env.example .env
-notepad .env
-npm run ui:build     # build the control panel (optional — Router can build it automatically)
-npm start
-```
-
-Default server:
+The gateway runs on:
 
 ```text
 http://localhost:8788
 ```
 
-Open `http://localhost:8788` for the control panel.
+The development control panel runs on:
 
-### Running again (second time onwards)
-
-The clone, `npm install` and `.env` setup are one-time steps. Next time, just:
-
-```powershell
-cd ApiRouter
-git pull origin main
-npm start
+```text
+http://localhost:5173
 ```
 
-After pulling updates (`git pull`), rebuild only what changed:
+## One-Command Router
 
-```powershell
-cd ApiRouter
-git pull origin main
-npm run ui:build    
-npm start
-```
+ApiRouter includes a cross-platform `Router` launcher.
 
-Do not run `Copy-Item .env.example .env` again — it would overwrite your keys.
-Stop the router with `Ctrl + C`.
+### Windows
 
-### Windows `Router` command
-
-Install the repository launcher once from PowerShell:
+From PowerShell:
 
 ```powershell
 .\scripts\install-router.ps1
 ```
 
-Open a new PowerShell window. From then on, run:
+Open a new terminal and run:
 
 ```powershell
 Router
 ```
 
-The launcher changes to the repository directory, installs dependencies if needed,
-builds the control panel if `ui/dist/index.html` is missing, opens the control panel
-in the browser, and starts the gateway on `localhost:8788`. If the panel has not been
-built, that address serves a short page explaining how to build it — the
-gateway itself needs no build step and is unaffected.
+### Linux / macOS
 
-## Configuration
-
-A provider needs:
-
-- API keys
-- Models
-- Base URL
-
-Configure them in `.env`.
-
-
-
-## Priority Routing
-
-```env
-TEXT_PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3
-VISION_PRIORITY_MODELS=gemini/V1,groq/V2
+```bash
+./bin/Router
 ```
 
-Priority targets are tried first, in exactly this order (providers may be
-interleaved), and the first success stops the request. Priority is
-**model-centric**: each entry is one provider/model, and *every eligible key* of
-it is tried in key order (`gemini/G1/key1, key2, key3`) before the walk moves to
-the next entry (`groq/GR2` keys, then `gemini/G3` keys). Only when all entries
-and all their keys have failed or cooled down does the normal fallback start. **Empty or unset means no
-priority phase**: routing goes directly to the normal fallback. `TEXT_PRIORITY_MODELS` sets the text pool list and
-`VISION_PRIORITY_MODELS` the vision pool list (**empty or unset inherits `TEXT_PRIORITY_MODELS`**, same models in the same order);
-entries only match the pool being routed, so there is never text-to-vision or
-vision-to-text fallback. Pinned requests ignore priority and sticky. A pinned success is not remembered as the session's sticky target. If a client names a model this pool serves, only priority entries of that model apply, so a priority entry of a different model never outranks the requested one.
+The launcher:
 
-A session's last successful target stays sticky for 20 minutes (refreshed by each success) and is tried before priority. If it fails, the **other keys of the same provider/model** are tried next (in key order); only when that model is exhausted does routing continue with the priority models listed **after** it (priority `A,B,C,D` with sticky on `B` continues `B keys → C keys → D keys`, then the normal fallback; `A` is not revisited in the priority phase). The normal fallback itself is unchanged: it is the full Provider → Key → Models list of every target not yet tried. A fallback success is remembered the same way (exact provider + model + key).
+1. Checks the required ports.
+2. Installs dependencies when needed.
+3. Starts the development or production stack.
+4. Opens the local control panel.
+5. Delegates process lifecycle management to the existing startup scripts.
 
-Stickiness is **per session** (`X-Multi-AI-Session-ID`; reuse the `x-multi-ai-session-id` response header) and remembers the exact `provider + key + model`, not just the model name. Requests that send **no** session header (Claude Code, Codex, OpenAI SDKs…) share one default session per protocol and pool, so they get the sticky behaviour automatically. A different explicit session id never inherits it, text and vision keep separate sticky targets, and a success never reorders the priority list: a new session always starts at the first configured priority entry. A sticky success ends the request (no priority/fallback call), and a target is never called twice in one request. Example with `TEXT_PRIORITY_MODELS=groq/A1,openrouter/B1`: request #1 runs `priority groq/A1/key1 → 200`, so request #2 of the same session runs `sticky groq/A1/key1 → 200` and stops; if the sticky call fails, request #2 continues `priority groq/A1 (its other keys) → priority openrouter/B1 → fallback`, never repeating the sticky target.
+Use `Router --prod` for production mode.
 
-After priority, the normal fallback is key-scoped: **Provider -> Key -> Models ->
-next Key -> Models -> next Provider**. Each key restarts at its provider's first
-model, and a target already tried in the same request is skipped. See
-`Architecture.md` for details.
+## Client Integrations
 
-## Endpoints
+| Client | Guide |
+|---|---|
+| Claude Code | [docs/clients/CLAUDE_CODE.md](docs/clients/CLAUDE_CODE.md) |
+| Codex | [docs/clients/CODEX.md](docs/clients/CODEX.md) |
+| Qwen Code | [docs/clients/QWEN_CODE.md](docs/clients/QWEN_CODE.md) |
+| OpenCode | [docs/clients/OPENCODE.md](docs/clients/OPENCODE.md) |
+| Generic OpenAI-compatible | [docs/clients/GENERIC_OPENAI.md](docs/clients/GENERIC_OPENAI.md) |
+| Other clients | [docs/clients/OTHER_CLIENTS.md](docs/clients/OTHER_CLIENTS.md) |
+| Protocol reference | [docs/clients/CLIENTS.md](docs/clients/CLIENTS.md) |
 
-### Gateway (public)
+## Routing
+
+Priority routing can be configured independently for text and vision:
+
+```env
+TEXT_PRIORITY_MODELS=gemini/G1,groq/GR2,openrouter/G3
+VISION_PRIORITY_MODELS=gemini/V1,openrouter/V2
+```
+
+Targets are attempted in the configured order. Once a target succeeds, the request ends.
+
+If priority targets are exhausted, ApiRouter enters normal fallback routing.
+
+### Sticky sessions
+
+A successful target can remain sticky for **20 minutes** for the same session.
+
+Sessions are identified with:
+
+```text
+X-Multi-AI-Session-ID
+```
+
+The response also returns the session ID so clients can reuse it.
+
+Sticky routing is isolated by protocol/pool and remembers the exact provider, key, and model.
+
+### Fallback
+
+Normal fallback is key-scoped:
+
+```text
+Provider → Key → Models → next Key → Models → next Provider
+```
+
+Targets already attempted during the request are not retried later in the same request.
+
+## API Endpoints
+
+### Gateway
 
 | Method | Endpoint |
 |---|---|
-| GET | /health |
-| GET | /v1/models |
-| POST | /v1/messages |
-| POST | /v1/responses |
-| POST | /v1/chat/completions |
-| POST | /v1beta/models/{model}:generateContent |
+| GET | `/health` |
+| GET | `/v1/models` |
+| POST | `/v1/messages` |
+| POST | `/v1/responses` |
+| POST | `/v1/chat/completions` |
+| POST | `/v1beta/models/{model}:generateContent` |
 
-Optional pin headers (same auth as the other gateway endpoints) call one exact
-target instead of letting the router choose — the Playground uses them:
-
-| Header | Meaning |
-|---|---|
-| `x-multi-ai-pin-provider` | Only this provider's targets are eligible. With a request `model`, only that model on that provider. |
-| `x-multi-ai-pin-key-index` | With a provider pin, only that 0-based key. Ignored without one. |
-
-A pinned request never falls back to another provider, key or model, and it
-ignores cooldown so a rate-limited key can still be tested. A pin that matches
-no configured target returns `404 no_route`.
-
-### Control panel (read-only)
-
-Served under `/api`. Requires `APIROUTER_API_KEYS` when that is set; open
-otherwise. None of these can change routing, health or provider behaviour.
+### Control Panel API
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | /api/health | Health with provider rollups and monitor state |
-| POST | /api/health/refresh | Run one health cycle now |
-| GET | /api/providers | Provider rollup joined with safe config |
-| GET | /api/models | Model catalogue with health and usage |
-| GET | /api/requests | Request log (`limit`, `cursor`, `outcome`, `provider`, `protocol`, `status`), plus `pending`: calls still running |
-| GET | /api/requests/stream | Server-sent events for Live Logs: a `snapshot`, then a `pending` / `entry` event per change |
-| GET | /api/requests/:id | One request's full lifecycle |
-| GET | /api/router/preview | The routing decision for a protocol/model |
-| GET | /api/analytics | Series and breakdowns (`range=5m\|15m\|1h\|6h\|24h\|7d`) |
-| GET | /api/config | Effective configuration, secrets as counts only |
-| GET | /api/system | Runtime, uptime and health-monitor scheduling |
-
-`/api/config` reports key **counts** and env var **names**; it has no code path
-that reads key material, so credentials cannot leak through it.
+| GET | `/api/health` | Provider and target health |
+| POST | `/api/health/refresh` | Run a health cycle |
+| GET | `/api/providers` | Provider status and safe configuration |
+| GET | `/api/models` | Model catalogue and health |
+| GET | `/api/requests` | Request history |
+| GET | `/api/requests/stream` | Live request events |
+| GET | `/api/requests/:id` | Request lifecycle |
+| GET | `/api/router/preview` | Preview routing decisions |
+| GET | `/api/analytics` | Usage and performance analytics |
+| GET | `/api/config` | Effective configuration without secrets |
+| GET | `/api/system` | Runtime and health-monitor state |
 
 ## Control Panel
 
-A React + Vite single-page app in `ui/`, served by the gateway itself.
+The React + Vite control panel is served by the gateway.
 
-```powershell
-npm run ui:dev      # dev server on :5173, proxying /api and /v1 to :8788
-npm run ui:build    # production build into ui/dist
-npm run test:ui     # frontend unit tests
-npm run test:all    # backend + frontend
+Run it independently during development:
+
+```bash
+npm run ui:dev
 ```
 
-Twelve pages: Dashboard, Providers, Models, Health Monitor, Router, Fallback,
-Playground, Requests, Live Logs, Analytics, Configuration, System.
+Build it for production:
 
-Live Logs shows one card per API call and updates it in place while the call
-runs. The card header carries the call as a whole (`ROUTING` → `RUNNING` →
-`RETRYING` → `SUCCESS` / `FAILED`). Inside it, every model the router tries gets
-its own box: `CALLING` (on the wire, with a live timer), `FAILED` (status and
-reason) or `SUCCESS`. When a box fails, a `FALLBACK` line follows and the next
-model's box appears below it. Every change is pushed over a server-sent event
-stream, so boxes appear with no polling delay; the page polls only while that
-stream is not connected. The page keeps the last 50 calls; when a newer one
-arrives past that, the oldest is dropped.
+```bash
+npm run ui:build
+```
 
-To see the Live Logs page populated without real provider keys, run
-`npm run ui:build` then `npm run demo:live-logs`. It starts the router against
-scripted mock providers and prints a `/live-logs` URL; the traffic includes
-`429` key 0 -> key 1 fallbacks and a request that exhausts its targets.
+Useful areas include:
 
-Real-time data uses polling with conditional `ETag` requests — the gateway has
-no push channel and no fake one is invented. Polling pauses while the tab is
-hidden and backs off when the gateway is failing.
+- Dashboard
+- Providers
+- Models
+- Health Monitor
+- Router
+- Fallback
+- Playground
+- Requests
+- Live Logs
+- Analytics
+- Configuration
+- System
 
-## Health
+Live Logs receives request lifecycle events through Server-Sent Events and shows the individual upstream attempts, failures, fallbacks, and final outcomes.
 
-Each `provider + model + key` target is ranked independently and probed in the
-background every 15 minutes. A failed target is cooled down for 20 minutes
-without affecting its sibling keys or models.
+For local demo traffic:
 
-Probes are provider-aware and quota-free: they list the provider's models
-rather than generating anything.
+```bash
+npm run demo:live-logs
+```
+
+## Health Monitoring
+
+ApiRouter monitors targets at the **provider + model + key** level.
+
+Targets can report:
 
 ```text
-Gemini             GET {base}/v1beta/models   (x-goog-api-key)
-OpenAI-compatible  GET {base}/v1/models        (Bearer)
+unknown
+healthy
+failed
+cooldown
 ```
 
-Probe outcomes that cannot establish health — a missing `/models` endpoint, or
-a provider with no safe probe — leave the target `unknown`. The router reports
-`unknown` rather than claiming a provider is healthy.
+Failed targets enter cooldown without disabling their sibling keys or models.
 
-`GET /health` reports per-target `status` (`unknown`, `healthy`, `failed`,
-`cooldown`), `score`, `lastStatus`, `lastReason`, latency, success/failure
-counts and `cooldownUntil`. It never returns API keys or upstream bodies.
+Health probes are provider-aware and designed to avoid consuming generation quota where a safe model-list endpoint is available.
 
-## Test
-
-```powershell
-npm test           # backend: 191 tests
-npm run test:ui    # frontend: 47 tests
-npm run test:all   # both
-```
+The `/health` endpoint exposes target status, score, latency, success/failure counters, and cooldown information without returning API keys or upstream response bodies.
 
 ## Security
 
-Keep real API keys in `.env`. Never commit credentials.
+- Keep provider API keys in `.env`.
+- Never commit credentials.
+- Provider credentials are not sent to the browser.
+- `/api/config` exposes configuration metadata and key counts, not key values.
+- UI-facing errors are sanitized to prevent credential-shaped data from reaching logs or UI components.
+- The gateway client token is stored in session storage rather than local storage or URLs.
 
-The control panel never receives provider credentials. `/api/config` reports a
-key *count* per provider and the *names* of the environment variables to edit;
-it renders as `Configured` / `Not configured` and never as a value.
+## Development
 
-The one secret the browser holds is the gateway's own client token
-(`APIROUTER_API_KEYS`), entered in the panel's connection dialog. It is
-stored in `sessionStorage` — never `localStorage`, never a URL, never a log —
-and shown masked, with no reveal or copy control.
+Install dependencies:
 
-Every error message that crosses into the UI is scrubbed of credential-shaped
-text on the server (`src/observability/sanitize.js`) and again in the browser
-(`ui/src/lib/sanitize.js`), so a provider error cannot echo a key into a table,
-a toast or the console.
+```bash
+npm install
+```
+
+Run backend tests:
+
+```bash
+npm test
+```
+
+Run frontend tests:
+
+```bash
+npm run test:ui
+```
+
+Run the complete test suite:
+
+```bash
+npm run test:all
+```
+
+Build the UI:
+
+```bash
+npm run ui:build
+```
+
+## Project Structure
+
+```text
+ApiRouter/
+├── bin/                 # Cross-platform Router launchers
+├── docs/                # Client integration guides
+├── scripts/             # Development, production and launcher scripts
+├── src/                 # Gateway and backend
+├── test/                # Backend tests
+├── ui/                  # React + Vite control panel
+├── .env.example         # Configuration template
+└── package.json
+```
+
+## License
+
+See the repository license for usage and distribution terms.
