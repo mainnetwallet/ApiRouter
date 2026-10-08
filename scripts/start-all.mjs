@@ -14,6 +14,26 @@ async function checkPort(port) {
   });
 }
 
+function killProcessTree(child) {
+  if (!child || child.killed) return;
+  const pid = child.pid;
+  if (!pid) return;
+
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore" });
+    } else {
+      process.kill(-pid, "SIGTERM");
+    }
+  } catch {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+  }
+}
+
 async function main() {
   const portInUse = await checkPort(PORT);
   if (portInUse) {
@@ -22,9 +42,8 @@ async function main() {
   }
 
   console.log(`[ApiRouter] Building production UI...`);
-  const buildChild = spawn("npm", ["run", "ui:build"], {
-    stdio: "inherit",
-    shell: true
+  const buildChild = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "build", "--config", "ui/vite.config.js"], {
+    stdio: "inherit"
   });
 
   buildChild.on("exit", (code) => {
@@ -34,21 +53,41 @@ async function main() {
     }
 
     console.log(`[ApiRouter] Starting production server on http://localhost:${PORT}...`);
-    const serverChild = spawn("node", ["src/server.js"], {
+    const serverChild = spawn(process.execPath, ["src/server.js"], {
       stdio: "inherit",
-      shell: true
+      detached: process.platform !== "win32"
     });
 
+    let isShuttingDown = false;
+
+    function shutdown(exitCode = 0) {
+      if (isShuttingDown) return;
+      isShuttingDown = true;
+      console.log(`\n[ApiRouter] Shutting down production server...`);
+      killProcessTree(serverChild);
+      setTimeout(() => {
+        try {
+          if (serverChild.pid) {
+            if (process.platform === "win32") {
+              spawn("taskkill", ["/pid", String(serverChild.pid), "/t", "/f"], { stdio: "ignore" });
+            } else {
+              process.kill(-serverChild.pid, "SIGKILL");
+            }
+          }
+        } catch {
+          // ignore
+        }
+        process.exit(exitCode);
+      }, 1000);
+    }
+
     serverChild.on("exit", (code, signal) => {
+      if (isShuttingDown) return;
       process.exit(code !== null && code !== 0 ? code : 0);
     });
 
-    process.on("SIGINT", () => {
-      serverChild.kill("SIGINT");
-    });
-    process.on("SIGTERM", () => {
-      serverChild.kill("SIGTERM");
-    });
+    process.on("SIGINT", () => shutdown(0));
+    process.on("SIGTERM", () => shutdown(0));
   });
 }
 

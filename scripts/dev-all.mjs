@@ -15,6 +15,26 @@ async function checkPort(port) {
   });
 }
 
+function killProcessTree(child) {
+  if (!child || child.killed) return;
+  const pid = child.pid;
+  if (!pid) return;
+
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/t", /f/], { stdio: "ignore" });
+    } else {
+      process.kill(-pid, "SIGTERM");
+    }
+  } catch {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // ignore
+    }
+  }
+}
+
 async function main() {
   const backendInUse = await checkPort(BACKEND_PORT);
   if (backendInUse) {
@@ -33,11 +53,13 @@ async function main() {
   console.log(`[ApiRouter] Frontend: http://localhost:${FRONTEND_PORT}`);
 
   const children = [];
+  let isShuttingDown = false;
+  let exitCodeToUse = 0;
 
-  function spawnPrefixed(name, command, args, colorPrefix) {
+  function spawnService(name, command, args, colorPrefix) {
     const child = spawn(command, args, {
       stdio: ["inherit", "pipe", "pipe"],
-      shell: true,
+      detached: process.platform !== "win32",
       env: { ...process.env, FORCE_COLOR: "1" }
     });
 
@@ -55,48 +77,61 @@ async function main() {
       }
     });
 
+    child.on("error", (err) => {
+      console.error(`[ApiRouter] Process ${name} failed to start:`, err.message);
+      if (!isShuttingDown) {
+        exitCodeToUse = 1;
+        shutdown(1);
+      }
+    });
+
     child.on("exit", (code, signal) => {
       if (isShuttingDown) return;
-      console.log(`[ApiRouter] Process ${name} exited with code ${code}, signal ${signal}`);
-      shutdown(code !== null && code !== 0 ? code : 0);
+      console.log(`[ApiRouter] Process ${name} exited unexpectedly (code ${code}, signal ${signal})`);
+      exitCodeToUse = code !== null && code !== 0 ? code : 1;
+      shutdown(exitCodeToUse);
     });
 
     children.push(child);
     return child;
   }
 
-  let isShuttingDown = false;
-
-  function shutdown(exitCode = 0) {
+  function shutdown(code = 0) {
     if (isShuttingDown) return;
     isShuttingDown = true;
     console.log(`\n[ApiRouter] Shutting down development servers...`);
 
     for (const child of children) {
-      try {
-        if (process.platform === "win32") {
-          spawn(`taskkill /pid ${child.pid} /T /F`, { shell: true });
-        } else {
-          child.kill("SIGTERM");
-        }
-      } catch {
-        // ignore
-      }
+      killProcessTree(child);
     }
 
     setTimeout(() => {
-      process.exit(exitCode);
-    }, 500);
+      // Force kill fallback if needed
+      for (const child of children) {
+        try {
+          if (child.pid) {
+            if (process.platform === "win32") {
+              spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+            } else {
+              process.kill(-child.pid, "SIGKILL");
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+      process.exit(code);
+    }, 1000);
   }
 
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
 
-  // Start Backend (node --watch src/server.js)
-  spawnPrefixed("Backend", "node", ["--watch", "src/server.js"], "\x1b[36m");
+  // Start Backend: node --watch src/server.js
+  spawnService("Backend", process.execPath, ["--watch", "src/server.js"], "\x1b[36m");
 
-  // Start Frontend (npx vite --config ui/vite.config.js)
-  spawnPrefixed("Frontend", "npx", ["vite", "--config", "ui/vite.config.js"], "\x1b[35m");
+  // Start Frontend: node node_modules/vite/bin/vite.js --config ui/vite.config.js
+  spawnService("Frontend", process.execPath, ["node_modules/vite/bin/vite.js", "--config", "ui/vite.config.js"], "\x1b[35m");
 }
 
 main().catch((err) => {
