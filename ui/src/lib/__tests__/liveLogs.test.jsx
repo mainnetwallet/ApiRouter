@@ -3,10 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   MAX_ROWS, STATE, buildAttemptRow, buildRequestRow, buildRows, filterRows, ingestEvent, ingestPayload,
-  isLive, isNearBottom, mergeRows, shortRequestId
+  isLive, isNearBottom, mergeRows, readUsage, shortRequestId
 } from "../liveLogs.js";
 import { createSseParser } from "../../api/liveStream.js";
-import { LiveLogList, LiveLogRow, describeOutcome, formatClock, formatRowsAsText } from "../../components/domain/LiveLogList.jsx";
+import { LiveLogList, LiveLogRow, describeOutcome, describeUsage, formatClock, formatRowsAsText } from "../../components/domain/LiveLogList.jsx";
 
 const SECRET = "sk-super-secret-provider-key-1234567890";
 const T0 = Date.UTC(2026, 9, 1, 14, 2, 11);
@@ -576,5 +576,111 @@ describe("copy logs as text", () => {
   it("is empty for no rows", () => {
     expect(formatRowsAsText([])).toBe("");
     expect(formatRowsAsText(null)).toBe("");
+  });
+});
+
+
+describe("token usage on a Live Logs card", () => {
+  const usageOf = (row) => [row.inputTokens, row.outputTokens, row.totalTokens];
+  const html = (row) => renderToStaticMarkup(<LiveLogRow row={row} now={T0} />);
+  const text = (markup) => markup.replace(/<[^>]+>/g, "");
+
+  it("shows Input, Output and Total inside the attempt's own card", () => {
+    const row = buildAttemptRow(attempt(1, { inputTokens: 1245, outputTokens: 387, tokens: 1632 }));
+    expect(usageOf(row)).toEqual([1245, 387, 1632]);
+    expect(describeUsage(row)).toBe("Input: 1,245 · Output: 387 · Total: 1,632");
+
+    const markup = html(row);
+    expect(text(markup)).toContain("Input: 1,245 · Output: 387 · Total: 1,632");
+    expect(markup).toContain('data-usage="reported"');
+  });
+
+  it("shows a dash, never a zero, for usage the provider did not report", () => {
+    const row = buildAttemptRow(attempt(1));
+    expect(usageOf(row)).toEqual([null, null, null]);
+    expect(describeUsage(row)).toBe("Input: — · Output: — · Total: —");
+    expect(html(row)).toContain('data-usage="unavailable"');
+    expect(text(html(row))).not.toMatch(/Input: 0|Output: 0|Total: 0/);
+  });
+
+  it("keeps a reported zero, and shows a dash only for the missing figure", () => {
+    const row = buildAttemptRow(attempt(1, { inputTokens: 12, outputTokens: null, tokens: null }));
+    expect(describeUsage(row)).toBe("Input: 12 · Output: — · Total: —");
+    expect(describeUsage(buildAttemptRow(attempt(2, { inputTokens: 0, outputTokens: 0, tokens: 0 }))))
+      .toBe("Input: 0 · Output: 0 · Total: 0");
+  });
+
+  it("uses the provider's total, and derives one only when input and output are both known", () => {
+    expect(readUsage({ inputTokens: 10, outputTokens: 5, tokens: 40 })).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 40 });
+    expect(readUsage({ inputTokens: 10, outputTokens: 5 })).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
+    expect(readUsage({ inputTokens: 10, outputTokens: null })).toEqual({ inputTokens: 10, outputTokens: null, totalTokens: null });
+    expect(readUsage({ totalTokens: 9 })).toEqual({ inputTokens: null, outputTokens: null, totalTokens: 9 });
+    expect(readUsage({ inputTokens: "10", outputTokens: -1, tokens: Number.NaN }))
+      .toEqual({ inputTokens: null, outputTokens: null, totalTokens: null });
+    expect(readUsage(undefined)).toEqual({ inputTokens: null, outputTokens: null, totalTokens: null });
+  });
+
+  it("a running attempt has no usage yet", () => {
+    const row = buildAttemptRow(attempt(1, { state: "calling", ok: false, status: null, inputTokens: 5, outputTokens: 5, tokens: 10 }));
+    expect(row.state).toBe(STATE.CALLING);
+    expect(usageOf(row)).toEqual([null, null, null]);
+  });
+
+  it("fallback attempts each show their own figures and a failed one shows none", () => {
+    const failed = attempt(1, { state: "failed", ok: false, status: 429, errorMessage: "rate limited" });
+    const answered = attempt(2, { callIndex: 2, keyIndex: 1, inputTokens: 200, outputTokens: 80, tokens: 280 });
+    const rows = mergeRows([], [failed, answered].map((event) => buildAttemptRow(event)));
+    expect(rows.map(usageOf)).toEqual([[null, null, null], [200, 80, 280]]);
+
+    const markup = renderToStaticMarkup(<LiveLogList rows={rows} now={T0} />);
+    const lines = [...markup.matchAll(/class="livelog__usage[^"]*"[^>]*>([^<]*)</g)].map((m) => m[1]);
+    expect(lines).toEqual(["Input: — · Output: — · Total: —", "Input: 200 · Output: 80 · Total: 280"]);
+  });
+
+  it("a settled card gains its usage when it arrives, once, and never loses it", () => {
+    const settled = buildAttemptRow(attempt(1));
+    const withUsage = buildAttemptRow(attempt(1, { inputTokens: 100, outputTokens: 50, tokens: 150 }));
+    const other = buildAttemptRow(attempt(1, { inputTokens: 999, outputTokens: 999, tokens: 1998 }));
+
+    let rows = mergeRows([], [settled]);
+    expect(usageOf(rows[0])).toEqual([null, null, null]);
+
+    rows = mergeRows(rows, [withUsage]);
+    expect(rows).toHaveLength(1);
+    expect(usageOf(rows[0])).toEqual([100, 50, 150]);
+
+    // A stale snapshot without usage, or a repeated report, changes nothing.
+    rows = mergeRows(rows, [settled]);
+    expect(usageOf(rows[0])).toEqual([100, 50, 150]);
+    rows = mergeRows(rows, [other]);
+    expect(usageOf(rows[0])).toEqual([100, 50, 150]);
+  });
+
+  it("usage never turns a finished card back into a running one, or change its outcome", () => {
+    const failed = buildAttemptRow(attempt(1, { state: "failed", ok: false, status: 500 }));
+    const claimsSuccess = buildAttemptRow(attempt(1, { inputTokens: 1, outputTokens: 1, tokens: 2 }));
+    const rows = mergeRows(mergeRows([], [failed]), [claimsSuccess]);
+    expect(rows[0].state).toBe(STATE.FAILED);
+    expect(usageOf(rows[0])).toEqual([null, null, null]);
+  });
+
+  it("usage arriving through a pushed attempt event or a payload reaches the card", () => {
+    const event = { event: "attempt", data: attempt(1, { inputTokens: 7, outputTokens: 3, tokens: 10 }) };
+    expect(usageOf(ingestEvent(event).rows[0])).toEqual([7, 3, 10]);
+
+    const nested = { seq: 1, startSeq: 1, requestId: "req-a1b2c3-000001", outcome: "success", attempts: [
+      { ...attempt(1), inputTokens: 7, outputTokens: 3, tokens: 10 }
+    ] };
+    expect(usageOf(ingestPayload({ entries: [nested] }).rows[0])).toEqual([7, 3, 10]);
+  });
+
+  it("the copied transcript carries each attempt's usage", () => {
+    const rows = [
+      buildAttemptRow(attempt(1, { inputTokens: 1245, outputTokens: 387, tokens: 1632 })),
+      buildAttemptRow(attempt(2, { state: "failed", ok: false, status: 500 }))
+    ];
+    const copied = formatRowsAsText(rows);
+    expect(copied).toContain("Input: 1,245 · Output: 387 · Total: 1,632");
+    expect(copied).toContain("Input: — · Output: — · Total: —");
   });
 });

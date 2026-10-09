@@ -56,6 +56,26 @@ export const MAX_ROWS = 50;
 
 const isNum = (value) => typeof value === "number" && Number.isFinite(value);
 const optInt = (value) => (Number.isInteger(value) ? value : null);
+const tokenCount = (value) => (isNum(value) && value >= 0 ? Math.round(value) : null);
+
+/**
+ * The token usage ONE attempt reported. Missing figures stay `null`, never 0. The
+ * total is the provider's own when it sent one; otherwise input + output, and only
+ * when both are known.
+ */
+export function readUsage(source) {
+  const inputTokens = tokenCount(source?.inputTokens);
+  const outputTokens = tokenCount(source?.outputTokens);
+  let totalTokens = tokenCount(source?.tokens) ?? tokenCount(source?.totalTokens);
+  if (totalTokens === null && inputTokens !== null && outputTokens !== null) totalTokens = inputTokens + outputTokens;
+  return { inputTokens, outputTokens, totalTokens };
+}
+
+/** Does this card carry at least one reported token figure? */
+export const hasUsage = (row) =>
+  row?.inputTokens !== null && row?.inputTokens !== undefined
+  || row?.outputTokens !== null && row?.outputTokens !== undefined
+  || row?.totalTokens !== null && row?.totalTokens !== undefined;
 const optText = (value, maxLength = 300) => {
   const text = sanitizeText(value, { maxLength });
   return text ? text : null;
@@ -128,7 +148,9 @@ export function buildAttemptRow(attempt, ctx = {}) {
     status: calling ? null : optInt(attempt.status),
     durationMs: calling ? null : (isNum(attempt.latencyMs) ? attempt.latencyMs : null),
     reason: failed ? describeAttempt({ ...attempt, ok: false }).label : null,
-    detail: failed ? optText(attempt.errorMessage) : null
+    detail: failed ? optText(attempt.errorMessage) : null,
+    // This attempt's own usage; a running attempt has none yet.
+    ...(calling ? { inputTokens: null, outputTokens: null, totalTokens: null } : readUsage(attempt))
   };
 }
 
@@ -166,7 +188,10 @@ export function buildRequestRow(entry) {
     status: pending ? null : optInt(entry.httpStatus),
     durationMs: pending ? null : total,
     reason: state === STATE.FAILED ? (optText(entry.errorMessage) ?? optText(entry.errorType, 60)) : null,
-    detail: null
+    detail: null,
+    inputTokens: null,
+    outputTokens: null,
+    totalTokens: null
   };
 }
 
@@ -213,7 +238,15 @@ export function compareRows(a, b) {
  */
 function supersedes(next, prev) {
   if (!prev) return true;
-  if (prev.kind === "attempt") return prev.pending;
+  if (prev.kind === "attempt") {
+    if (prev.pending) return true;
+    // An answered attempt is final, with one exception: the usage its provider
+    // reports arrives after the answer (a stream reports it last). The same attempt,
+    // in the same state, may gain it once; nothing else about the card changes,
+    // and a snapshot without usage never erases usage already shown.
+    return next.kind === "attempt" && !next.pending && next.state === prev.state
+      && !hasUsage(prev) && hasUsage(next);
+  }
   return !(!prev.pending && next.pending);
 }
 

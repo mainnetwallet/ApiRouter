@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { sanitizeMessage } from "./sanitize.js";
+import { hasUsage, normalizeUsage } from "../usage.js";
 
 export const DEFAULT_MAX_ENTRIES = 500;
 
@@ -64,7 +65,9 @@ function plainAttempt(attempt, index) {
     startedAt: Number.isFinite(attempt?.startedAt) ? attempt.startedAt : null,
     completedAt: Number.isFinite(attempt?.completedAt) ? attempt.completedAt : null,
     latencyMs: Number.isFinite(attempt?.latencyMs) ? attempt.latencyMs : null,
-    errorMessage: sanitizeMessage(attempt?.errorMessage)
+    errorMessage: sanitizeMessage(attempt?.errorMessage),
+    // What the provider reported for THIS attempt only; null (never 0) when it reported nothing.
+    ...normalizeUsage(attempt)
   };
 }
 
@@ -211,7 +214,10 @@ export class RequestLog {
           startedAt: row.startedAt,
           completedAt: row.completedAt ?? (row.startedAt !== null && row.latencyMs !== null ? row.startedAt + row.latencyMs : null),
           latencyMs: row.latencyMs,
-          errorMessage: row.errorMessage
+          errorMessage: row.errorMessage,
+          inputTokens: row.inputTokens,
+          outputTokens: row.outputTokens,
+          tokens: row.tokens
         });
       } else if (event && event.state === ATTEMPT_STATES.CALLING) {
         event = this.finishAttempt(row.attemptId, row);
@@ -226,6 +232,10 @@ export class RequestLog {
         row.completedAt = event.completedAt;
         row.latencyMs = event.latencyMs;
         row.errorMessage = event.errorMessage;
+        // Usage belongs to the attempt event; a nested row never invents its own.
+        row.inputTokens = event.inputTokens ?? null;
+        row.outputTokens = event.outputTokens ?? null;
+        row.tokens = event.tokens ?? null;
       } else {
         row.attemptSeq = null;
         row.callIndex = calls;
@@ -332,7 +342,10 @@ export class RequestLog {
       startedAt,
       completedAt: null,
       latencyMs: null,
-      errorMessage: null
+      errorMessage: null,
+      inputTokens: null,
+      outputTokens: null,
+      tokens: null
     });
 
     pending.inflight = {
@@ -371,12 +384,55 @@ export class RequestLog {
       status: Number.isInteger(result.status) ? result.status : null,
       completedAt,
       latencyMs,
-      errorMessage: sanitizeMessage(result.errorMessage)
+      errorMessage: sanitizeMessage(result.errorMessage),
+      // Only usage the caller reports for THIS attempt id. A failed attempt that
+      // reported nothing stays null; it can never inherit another attempt's figures.
+      ...normalizeUsage(result)
     });
 
     const pending = this.pendingEntries.get(current.requestSeq);
     if (pending?.inflight?.attemptId === attemptId) pending.inflight = null;
     return done;
+  }
+
+  /**
+   * Attach the usage a provider reported for ONE already-settled attempt.
+   *
+   * An attempt settles when the upstream answers (headers), but the figures can
+   * only be read from the body, which arrives later (and for a stream, last). So
+   * usage is the one thing a settled attempt may still gain, exactly once:
+   * state, status and timing never change, an attempt that already carries usage
+   * keeps it, and no other attempt is touched. Announced as a new `attempt`
+   * snapshot with the same `attemptId`, like any other transition.
+   */
+  recordAttemptUsage(attemptId, usage = {}) {
+    const current = this.attemptEvents.get(attemptId);
+    if (!current || current.state === ATTEMPT_STATES.CALLING) return current ?? null;
+    if (hasUsage(current)) return current;
+
+    const reported = normalizeUsage(usage);
+    if (!hasUsage(reported)) return current;
+
+    const done = this.#putAttemptEvent({ ...current, ...reported });
+    this.#syncAttemptUsage(done);
+    return done;
+  }
+
+  /** Mirror an attempt's usage into the request rows that already copied the attempt. */
+  #syncAttemptUsage(event) {
+    const apply = (rows) => {
+      for (const row of rows ?? []) {
+        if (row?.attemptId === event.attemptId) {
+          row.inputTokens = event.inputTokens;
+          row.outputTokens = event.outputTokens;
+          row.tokens = event.tokens;
+        }
+      }
+    };
+    apply(this.pendingEntries.get(event.requestSeq)?.attempts);
+    for (const entry of this.entries.values()) {
+      if (entry.startSeq === event.requestSeq) apply(entry.attempts);
+    }
   }
 
   /**

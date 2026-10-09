@@ -1,7 +1,7 @@
 import { Fragment } from "react";
-import { STATE, STATE_TONE, isLive, shortRequestId } from "../../lib/liveLogs.js";
+import { STATE, STATE_TONE, hasUsage, isLive, shortRequestId } from "../../lib/liveLogs.js";
 import { sanitizeText } from "../../lib/sanitize.js";
-import { EMPTY, formatLatency, providerLabel } from "../../lib/format.js";
+import { EMPTY, formatLatency, formatNumber, providerLabel } from "../../lib/format.js";
 
 /** 24-hour local clock, `HH:MM:SS`; an explicit placeholder when unknown. */
 export function formatClock(ts) {
@@ -43,6 +43,30 @@ export function describeOutcome(row, now = Date.now()) {
   if (row.state === STATE.FAILED && !Number.isInteger(row.status)) parts.push("failed");
   if (isNum(row.durationMs)) parts.push(formatLatency(row.durationMs));
   return parts.join(" · ");
+}
+
+/**
+ * `Input: 1,245 · Output: 387 · Total: 1,632`. A figure the provider did not
+ * report is shown as a dash, never as 0.
+ */
+export function describeUsage(row) {
+  const figure = (value) => (isNum(value) ? formatNumber(value) : EMPTY);
+  return `Input: ${figure(row?.inputTokens)} · Output: ${figure(row?.outputTokens)} · Total: ${figure(row?.totalTokens)}`;
+}
+
+/** This attempt's own token usage, inside its card. */
+function UsageLine({ row }) {
+  const reported = hasUsage(row);
+  const title = reported
+    ? "Tokens this attempt used, as reported by the provider"
+    : row.state === STATE.CALLING
+      ? "Reported once the provider answers"
+      : "The provider did not report usage for this attempt";
+  return (
+    <div className={`livelog__usage mono tabular${reported ? "" : " dim"}`} title={title} data-usage={reported ? "reported" : "unavailable"}>
+      {describeUsage(row)}
+    </div>
+  );
 }
 
 /** What the row says while it has no target yet, or besides the target. */
@@ -191,6 +215,7 @@ export function LiveLogRow({ row, now = Date.now(), first = true, onSelectReques
     <li className={cardClass} {...identity}>
       <CardHead row={row} request={request} rid={rid} outcome={figures} onSelectRequest={onSelectRequest} />
       <TargetBox row={row} tone={tone} />
+      <UsageLine row={row} />
     </li>
   );
 }
@@ -241,6 +266,7 @@ export function formatRowsAsText(rows) {
     const target = clean(describeTarget(row));
     if (target) lines.push(`  ${target}${figures && row.kind === "attempt" ? `  (${figures})` : ""}`);
     if (row.kind === "request" && figures) lines.push(`  ${figures}`);
+    if (row.kind === "attempt") lines.push(`  ${describeUsage(row)}`);
 
     const why = clean([row.reason, row.detail].filter(Boolean).join(" · "));
     if (why) lines.push(`  ${why}`);
