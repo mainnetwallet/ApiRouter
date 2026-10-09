@@ -18,8 +18,14 @@ const SIZE_LIMIT_COOLDOWN_MS = 60 * 1000;
 // moment puts every provider and model into cooldown at once.
 const TIMEOUT_COOLDOWN_MS = 60 * 1000;
 
+// A 400 from upstream puts that model on a fixed 8 minute cooldown, so the
+// router stops sending it requests it keeps rejecting and falls through to the
+// next target instead.
+const BAD_REQUEST_COOLDOWN_MS = 8 * 60 * 1000;
+
 /** `markFailure` options for a failed attempt: short cooldowns for transient statuses. */
 function cooldownOptions(status) {
+  if (status === 400) return { cooldownMs: BAD_REQUEST_COOLDOWN_MS };
   if (status === 413) return { cooldownMs: SIZE_LIMIT_COOLDOWN_MS };
   if (status === 408) return { cooldownMs: TIMEOUT_COOLDOWN_MS };
   return {};
@@ -188,10 +194,8 @@ export async function withFallback(
           throw error;
         }
 
-        // A generic 400 says this provider rejected this particular request
-        // (unsupported parameter, schema quirk, context window), not that the
-        // provider is unhealthy. Try the next target, but leave this one's
-        // health and cooldown alone so it keeps serving requests it accepts.
+        // An error can opt out of health tracking entirely (skipCooldown).
+        // Upstream 400s no longer do: they cool the model down for 8 minutes.
         if (error?.skipCooldown) continue;
 
         // A 413 depends on the size of this one request (per-minute token caps

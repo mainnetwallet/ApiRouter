@@ -606,12 +606,10 @@ async function proxy(req, res, protocol, pathname) {
             if (upstream.status === 400 && isModelRejection(error.message)) error.retryable = true;
             // Any other 400 may still be specific to this provider (unsupported
             // parameter, tool schema, context window), so fall back to the next
-            // target too — without cooling this one down, since it is not
-            // unhealthy. If every target answers 400 the client gets the 400.
-            else if (upstream.status === 400) {
-              error.retryable = true;
-              error.skipCooldown = true;
-            }
+            // target too. Either kind of 400 puts this model on an 8 minute
+            // cooldown (see cooldownOptions in router.js). If every target
+            // answers 400 the client gets the 400.
+            else if (upstream.status === 400) error.retryable = true;
             attempt(false, upstream.status, error.message);
             throw error;
           }
