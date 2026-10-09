@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini } from "./anthropic-bridge.js";
-import { toolCallKey } from "./bridge-utils.js";
+import { toolCallKey, geminiNativeMediaUnsupportedError } from "./bridge-utils.js";
+import { openAiSuffixPath } from "./url-utils.js";
 
 function id(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
@@ -24,9 +25,12 @@ function textParts(parts = []) {
 function inlineToChat(part) {
   const data = part?.inlineData;
   if (!data?.data) return null;
+  // The SDK-style snake_case spelling carries `mime_type`; honour both so the
+  // data URL keeps the real media type instead of degrading to octet-stream.
+  const mimeType = data.mimeType ?? data.mime_type ?? "application/octet-stream";
   return {
     type: "image_url",
-    image_url: { url: "data:" + (data.mimeType || "application/octet-stream") + ";base64," + data.data }
+    image_url: { url: "data:" + mimeType + ";base64," + data.data }
   };
 }
 
@@ -91,9 +95,23 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
         // is an object. A bare string is not a valid OpenAI content part.
         parts.push({ type: "text", text: part.text });
       }
-      if (part?.inlineData) {
-        const image = inlineToChat(part);
-        if (image) parts.push(image);
+      // Both spellings are accepted: the REST API uses camelCase (`inlineData`),
+      // the official SDKs use snake_case (`inline_data`). `vision.js` detects
+      // both as images, so both must be carried here — dropping either would
+      // send an image-bearing request to the text-only upstream as plain text.
+      const inline = part?.inlineData ?? part?.inline_data;
+      if (inline) {
+        const image = inlineToChat({ inlineData: inline });
+        // An inline part with no payload has nothing to forward. Refuse it
+        // rather than drop it, so the client never gets an answer that pretends
+        // the model saw bytes it never received.
+        if (!image) throw geminiNativeMediaUnsupportedError("inlineData");
+        parts.push(image);
+      }
+      // A Files API URI is private to the Gemini provider (it needs the Gemini
+      // key to fetch), so an OpenAI-compatible provider cannot be given one.
+      if (part?.fileData || part?.file_data) {
+        throw geminiNativeMediaUnsupportedError("fileData");
       }
       if (part?.functionCall) {
         const callId = part.functionCall.id || id("call");
@@ -249,7 +267,7 @@ export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { s
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
 
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
-  const path = /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions";
+  const path = openAiSuffixPath(base, "chat/completions");
   return {
     url: joinUrl(base, path),
     options: {

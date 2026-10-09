@@ -516,15 +516,6 @@ async function proxy(req, res, protocol, pathname) {
           ? upstreamProtocolFor(target)
           : protocol;
         const translated = bridged && upstreamProtocol !== nativeProtocol;
-        const request = !translated
-          ? buildUpstreamRequest(target, protocol, body, req.headers, { stream: wantsStream })
-          : bridgeKind === "codex"
-            ? buildCodexRequest(target, upstreamProtocol, body, req.headers)
-            : bridgeKind === "chat"
-              ? buildChatRequest(target, upstreamProtocol, body, req.headers)
-              : bridgeKind === "gemini"
-                ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream })
-                : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
         const controller = new AbortController();
         // If the client goes away while an upstream attempt is pending, abort
         // that attempt immediately. Do not turn a client cancellation into a
@@ -592,6 +583,19 @@ async function proxy(req, res, protocol, pathname) {
         };
 
         try {
+          // Building the request lives inside the try so a target that cannot
+          // represent the request at all (a bridge refusing media its protocol
+          // has no form for) is recorded as an attempt and cleaned up exactly
+          // like a failed fetch, instead of escaping with the timer still armed.
+          const request = !translated
+            ? buildUpstreamRequest(target, protocol, body, req.headers, { stream: wantsStream })
+            : bridgeKind === "codex"
+              ? buildCodexRequest(target, upstreamProtocol, body, req.headers)
+              : bridgeKind === "chat"
+                ? buildChatRequest(target, upstreamProtocol, body, req.headers)
+                : bridgeKind === "gemini"
+                  ? buildGeminiBridgeRequest(target, body, req.headers, { stream: wantsStream })
+                  : buildBridgeRequest(target, upstreamProtocol, body, req.headers);
           const upstream = await fetch(request.url, { ...request.options, signal: controller.signal });
           if (!upstream.ok) {
             const text = await upstream.text();
@@ -965,7 +969,10 @@ async function handleRequest(req, res) {
   if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
     if (!authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
     try {
-      const body = await readJsonBody(req);
+      // The same configured cap as every other JSON body: this endpoint is
+      // authenticated, but an oversized body must still fail as a 413 here
+      // rather than be buffered up to the (larger) hard-coded default.
+      const body = await readJsonBody(req, config.maxBodyBytes);
       const shapeError = validateRequestShape("anthropic", body);
       if (shapeError) return json(res, 400, { error: { message: shapeError, type: "invalid_request_error" } });
       return json(res, 200, { input_tokens: estimateInputTokens(body) });

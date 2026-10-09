@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
+import { stripApiVersion, openAiSuffixPath } from "./url-utils.js";
 
 export function providerProtocols(provider) {
   if (provider === "agentrouter") return ["anthropic", "openai-chat", "openai-responses"];
@@ -41,11 +42,11 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
     headers["anthropic-version"] = incomingHeaders["anthropic-version"] || "2023-06-01";
     if (incomingHeaders["anthropic-beta"]) headers["anthropic-beta"] = incomingHeaders["anthropic-beta"];
   } else if (protocol === "openai-responses") {
-    url = joinUrl(base, /\/v\d+$/i.test(base) ? "responses" : "v1/responses");
+    url = joinUrl(base, openAiSuffixPath(base, "responses"));
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
   } else if (protocol === "openai-chat") {
-    url = joinUrl(base, /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions");
+    url = joinUrl(base, openAiSuffixPath(base, "chat/completions"));
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
   } else if (protocol === "gemini") {
@@ -58,8 +59,7 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
     // A configured base URL may already carry the API version — `health-checks.js`
     // accepts either form — so it is stripped before the model path is appended.
     // Otherwise the request goes to `/v1beta/v1beta/models/...`.
-    const root = base.replace(/\/v\d+(?:alpha|beta)?\d*$/i, "");
-    url = joinUrl(root, "v1beta/models/" + encodeURIComponent(target.model) + method);
+    url = joinUrl(stripApiVersion(base), "v1beta/models/" + encodeURIComponent(target.model) + method);
     headers["x-goog-api-key"] = target.apiKey;
   } else {
     throw new Error("Unsupported upstream protocol: " + protocol);

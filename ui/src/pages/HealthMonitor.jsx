@@ -550,6 +550,30 @@ function TargetDrawer({ target, onClose }) {
               {target.lastReason || <span className="dim">none recorded</span>}
             </dd>
 
+            <dt className="dl__term">Configured model</dt>
+            <dd className="dl__desc">
+              {/* Health above describes the KEY and the endpoint, not this
+                  model. Say so explicitly when the provider's own catalogue
+                  does not list it: a reachable API with a valid key must not
+                  read as a confirmed usable model. */}
+              {target.modelListed === false
+                ? <span className="text--warn">Not listed in the provider's model catalogue</span>
+                : target.modelListed === true
+                  ? <span className="dim">Listed in the provider's model catalogue</span>
+                  : <span className="dim">Catalogue unreadable — not verified</span>}
+              {target.modelListedAt && <span className="dim"> · as of {formatDateTime(target.modelListedAt)}</span>}
+              {/* The last confirmed value is a DIFFERENT fact from the latest
+                  observation, so it is shown separately and dated. It is never
+                  rendered as the current result, which is what would make a
+                  stale `false` look freshly confirmed. */}
+              {target.modelListed === null && target.modelListedConfirmed !== null && (
+                <div className="dim tiny">
+                  Last confirmed {target.modelListedConfirmed ? "present" : "absent"}
+                  {target.modelListedConfirmedAt ? ` on ${formatDateTime(target.modelListedConfirmedAt)}` : ""}
+                </div>
+              )}
+            </dd>
+
             <dt className="dl__term">Cooldown until</dt>
             <dd className="dl__desc">
               {target.cooldownUntil > Date.now()

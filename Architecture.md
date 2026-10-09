@@ -166,6 +166,23 @@ Gemini uses the native `generateContent` protocol and standard model path.
 
 The adapter converts the common gateway request into the provider request format.
 
+### Image content across protocols
+
+A bridge either carries an image or refuses the request. It never replaces one with text.
+
+Each protocol has its own spelling for image content — `{type:"image_url"}` (Chat Completions), `{type:"input_image"}` (Responses), `{type:"image"}` with a `base64` or `url` source (Anthropic), `inlineData` / `fileData` (Gemini) — and they do not overlap completely:
+
+| From | To | Carried | Refused |
+|---|---|---|---|
+| Chat / Responses | Gemini | inline base64 (`inlineData`) | remote `https:` URLs, an `input_image` with no URL |
+| Gemini | OpenAI-compatible | `inlineData` / `inline_data` | `fileData` / `file_data` (a provider-private Files API URI), `inlineData` with no payload |
+| Anthropic | Gemini | `source.type === "base64"` | `source.type === "url"` |
+| Anthropic | OpenAI Chat | both source forms | — |
+
+Three positions hold only text — a **system prompt**, an **assistant turn** and a **tool result**. An image there has no representation in any of these protocols, so the request is refused rather than sent with the literal string `"[image]"` standing in for it. A marker would be content the model never received, presented as though it had.
+
+A refusal is a `400` `UnsupportedMediaError` carrying `retryable` and `skipCooldown`. That combination is deliberate: the fallback walk records the attempt, moves on to a target that *can* carry the image, and does not cool the refusing provider down, because the limitation belongs to the request rather than the provider. Only when no target can carry the image does the client see the error.
+
 ## Health System
 
 Each target tracks:
@@ -196,17 +213,23 @@ cooldown   a failed target that is still inside its cooldown window
 
 ### Provider-aware probing
 
-A generic `GET <baseUrl>` cannot establish that a provider is healthy, and it never exercises the API key. Each protocol capability therefore gets an explicit, quota-free probe against the provider's own model-listing endpoint:
+A generic `GET <baseUrl>` cannot establish that a provider is healthy, and it never exercises the API key. Each protocol capability therefore gets an explicit probe against the provider's own model-listing endpoint:
 
-| Capability | Probe | Credential |
-|---|---|---|
-| Gemini | `GET {base}/v1beta/models` | `x-goog-api-key` |
-| OpenAI Chat / Responses | `GET {base}/v1/models` | `Authorization: Bearer` |
-| Anthropic only | none | passive |
+| Capability | Probe | Credential | Generation quota |
+|---|---|---|---|
+| Gemini | `GET {base}/v1beta/models` | `x-goog-api-key` | not consumed |
+| OpenAI Chat / Responses | `GET {base}/v1/models` | `Authorization: Bearer` | not consumed |
+| Cloudflare Workers AI | `GET {base}/models/search?per_page=1` | `Authorization: Bearer` | not consumed |
+| Cohere | `POST {base}/chat/completions` (1 token) | `Authorization: Bearer` | **consumed** |
+| Anthropic only | none | passive | not consumed |
 
-Probes list models, so they never send a prompt and never consume generation quota. Probe URLs never carry a credential in the query string.
+Probes never send a credential in the query string.
 
-Probe results are normalized to `{ ok, status, latencyMs, reason }`:
+Cohere is the one exception. Its OpenAI Compatibility surface is chat-first: the base is guaranteed for chat completions, while `GET /models` there is not a reliable health signal, so the probe is the exact route the Playground uses with the smallest useful generation request (`max_tokens: 1`). **That probe consumes generation quota**, unlike every other provider's. It is the only probe in the system that does, so the README's "avoids consuming generation quota" applies to every provider except Cohere. Reducing it further would mean dropping to a model-list probe that does not dependably answer.
+
+The models endpoint is also read, not just called: the probe looks for the target's configured model id in the listing to report `modelListed` (see below). A single-page catalogue therefore costs no extra request; a paginated one is walked within a strict budget, using the probe's own timeout.
+
+Probe results are normalized to `{ ok, status, latencyMs, reason, modelListed }`:
 
 ```text
 ok: true   2xx — reachable and the credential was accepted
@@ -217,6 +240,39 @@ ok: null   passive — the endpoint is missing (404/405/501), or the provider
 ```
 
 Authentication failures are never reported as healthy.
+
+#### Connectivity and model availability are separate
+
+`status` describes the **key and the endpoint**: was the credential accepted, was the provider reachable. It does not describe the configured **model**. A valid key against a reachable `/models` endpoint is reported `healthy` even when the configured model does not exist, was withdrawn, or is not entitled to the account — and the request only finds out at routing time.
+
+`modelListed` is the separate, additive signal: whether the provider's own model catalogue named this target's model. The catalogue the probe already fetches is read for the model id, so this costs no extra request, and it is deliberately tri-state:
+
+```text
+true    a complete catalogue was read and it named the model
+false   a complete catalogue was read and the model was not in it
+null    the catalogue could not be inspected to the end — "not verified",
+        never "missing"
+```
+
+`false` is a claim about a **complete** catalogue. A catalogue that was not read to the end never produces it: an unrecognized shape, a body past the byte limit, a non-200 response, an unreadable or unreachable page, or a page budget that ran out while the provider still advertised more pages all yield `null`. This matters because the catalogues are paginated — Gemini's `models.list` serves 50 models per page — so reading only the first page would report a real model as missing on any sizeable account.
+
+The walk is bounded by `MAX_MODEL_LIST_PAGES` pages, `MAX_MODEL_LIST_BYTES` total bytes and the probe timeout. The byte limit is enforced **while the body is consumed**, not after it has been buffered, because a provider may omit or understate `Content-Length`; a body that crosses the limit is abandoned and its reader cancelled. Follow-up pages use the probe's own `fetch` signal, so the timeout bounds the whole walk, and any failure to finish it is `null` rather than a false negative.
+
+##### Latest observation vs last confirmation
+
+Because `null` is a real answer, the signal is reported as two separate facts rather than one:
+
+```text
+modelListed              what the MOST RECENT probe observed (tri-state)
+modelListedAt            when that observation was taken
+modelListedConfirmed     the last DEFINITE value seen, kept across
+                         indeterminate probes
+modelListedConfirmedAt   when that definite value was observed
+```
+
+Retaining the last confirmation is useful — "absent yesterday, unreadable today" is worth knowing — but it must never be presented as the latest result. `modelListed` is therefore *replaced* by `null` when a probe cannot inspect the catalogue, including when the probe throws or the provider has no probe at all, so a stale `false` can never appear freshly confirmed. The panel renders the two separately and dates both.
+
+Only `false` is evidence. It is surfaced in the health payload and the panel, and neither field **ever changes `status`, the score or a cooldown**, so routing behaves exactly as before. Catalogue observations are also recorded while a target is cooling down, and carry their own ordering guard so a slow probe cannot overwrite a newer catalogue fact.
 
 ### Observation ordering
 
@@ -278,6 +334,8 @@ Router authentication is optional:
 ```env
 APIROUTER_API_KEYS=
 ```
+
+When it is set, every `/api/*` route and every proxy route (`POST /v1/messages`, `/v1/responses`, `/v1/chat/completions`, `/v1beta/models/{model}:generateContent`, `/v1/messages/count_tokens`) requires the token. `GET /health` and `GET /v1/models` do not, and this is intentional rather than an oversight: a liveness probe has to answer before a credential is available, and model discovery happens before a client can name a model. Neither returns credentials, and the README documents the inventory they do reveal so an operator can decide whether to restrict them at the network layer.
 
 Provider API keys remain server-side and are never returned in routing metadata.
 
@@ -392,7 +450,7 @@ The core implementation is separated by responsibility:
 - `src/config.js` — environment parsing and routing-target construction.
 - `src/router.js` — health-ranked fallback and sticky routing.
 - `src/health.js` — target health, scoring, cooldown and health-refresh infrastructure.
-- `src/health-checks.js` — provider-aware, quota-free health probes and status classification.
+- `src/health-checks.js` — provider-aware health probes (no generation quota, except Cohere — see "Provider-aware probing") and status classification.
 - `src/adapters.js` — client protocol detection and upstream request construction.
 - `src/providers/catalog.js` — provider catalog.
 - `src/observability/` — request log, metrics, safe config view, routing preview and sanitization.

@@ -109,9 +109,44 @@ export function readProviders(env, { vision = false } = {}) {
   return providers;
 }
 
+/**
+ * A configured base URL must be a plain URL: no query string, no fragment.
+ *
+ * Every request builder appends its endpoint path to the base URL as a plain
+ * string, so `https://gw.example.com/v1?key=abc` becomes
+ * `https://gw.example.com/v1?key=abc/v1/chat/completions` — the path lands
+ * inside the query value and the provider receives a malformed request. Nothing
+ * in the router can express "append to the path, keep the query", so such a base
+ * URL cannot work, and it is refused at startup rather than failing every
+ * request later with a confusing 404.
+ *
+ * The URL itself is never echoed: a base URL is the one place an operator is
+ * most likely to have pasted a credential, and a startup error must not be the
+ * thing that writes it to the logs.
+ */
+function assertPlainBaseUrls(providers, envSuffix) {
+  for (const [id, provider] of Object.entries(providers || {})) {
+    const candidates = [provider?.baseUrl, ...(Array.isArray(provider?.baseUrls) ? provider.baseUrls : [])];
+    for (const candidate of candidates) {
+      const value = String(candidate || "").trim();
+      if (!value) continue;
+      if (/[?#]/.test(value)) {
+        throw new Error(
+          `Invalid ${id.toUpperCase()}_${envSuffix}: a base URL must not contain a query string or fragment. `
+          + "Point it at the API root only (for example https://api.groq.com/openai/v1)."
+        );
+      }
+    }
+  }
+}
+
 export function loadConfig(env = process.env) {
   const providers = readProviders(env);
   const visionProviders = readProviders(env, { vision: true });
+  // Refused before anything else is built: a base URL that cannot carry an
+  // appended endpoint path would produce a malformed URL on every request.
+  assertPlainBaseUrls(providers, "BASE_URL");
+  assertPlainBaseUrls(visionProviders, "VISION_BASE_URL");
   const retryRaw = env.RETRY_STATUS_CODES;
   const retrySource = retryRaw === undefined || String(retryRaw).trim() === ""
     ? DEFAULT_RETRY_STATUS_CODES.join(",")

@@ -1003,6 +1003,7 @@
 .grow { flex: 1 1 auto; min-width: 0; }
 .muted { color: var(--text-muted); }
 .dim { color: var(--text-dim); }
+.text--warn { color: var(--warn); }
 .small { font-size: var(--fs-sm); }
 .tiny { font-size: var(--fs-xs); }
 .nowrap { white-space: nowrap; }

@@ -1,5 +1,6 @@
 import { apiStream } from "./client.js";
 import { sanitizeText } from "../lib/sanitize.js";
+import { ApiError, apiErrorFromException, apiErrorFromTimeout } from "../lib/errors.js";
 
 /**
  * Playground transport.
@@ -248,11 +249,32 @@ export async function sendPlaygroundRequest({
   body,
   headers,
   signal,
+  timeoutMs,
   onDelta,
   onMeta
 }) {
-  const response = await apiStream(endpointFor(protocol, model ?? body.model), { body, signal, headers });
+  // `apiStream` keeps its timeout and the caller's abort bridge attached for the
+  // whole stream lifetime; `release` drops them once the body is done with.
+  const { response, release, wasTimedOut } = await apiStream(
+    endpointFor(protocol, model ?? body.model),
+    { body, signal, headers, ...(timeoutMs === undefined ? {} : { timeoutMs }) }
+  );
 
+  try {
+    return await readPlaygroundResponse({ protocol, response, onDelta, onMeta });
+  } catch (error) {
+    // Errors raised while consuming the body reach here unnormalized, because
+    // `apiStream` has already returned. Normalizing them keeps one error shape
+    // for every caller — and a timeout stays a timeout rather than being
+    // reported as the user cancelling.
+    if (error instanceof ApiError) throw error;
+    throw wasTimedOut() ? apiErrorFromTimeout() : apiErrorFromException(error);
+  } finally {
+    release();
+  }
+}
+
+async function readPlaygroundResponse({ protocol, response, onDelta, onMeta }) {
   const routed = {
     provider: response.headers.get("x-multi-ai-provider"),
     model: response.headers.get("x-multi-ai-model"),

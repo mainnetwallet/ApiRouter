@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
-import { geminiOutputTokens, streamErrorMessage } from "./bridge-utils.js";
+import { geminiOutputTokens, streamErrorMessage, base64DataUrl, geminiImageUnsupportedError, textPositionImageUnsupportedError } from "./bridge-utils.js";
+import { stripApiVersion } from "./url-utils.js";
 
 /**
  * OpenAI chat-completions bridge.
@@ -72,7 +73,10 @@ function textOfContent(content) {
   return content
     .map((part) => {
       if (typeof part === "string") return part;
-      if (part?.type === "image_url") return "[image]";
+      // Only ever reached for a system prompt, an assistant turn or a tool
+      // result — the user path handles image parts before calling this. A text
+      // stand-in here would be content the model never received.
+      if (part?.type === "image_url") throw textPositionImageUnsupportedError();
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");
@@ -184,8 +188,12 @@ export function toGeminiFromChat(body) {
     if (Array.isArray(message.content)) {
       for (const part of message.content) {
         if (part?.type === "image_url") {
-          const data = /^data:([^;,]+);base64,(.+)$/s.exec(imageUrlOf(part));
-          if (data) parts.push({ inlineData: { mimeType: data[1], data: data[2] } });
+          // Gemini takes inline bytes. A remote URL has no equivalent, so it is
+          // refused rather than dropped: the client must not receive an answer
+          // that pretends the model saw an image it never received.
+          const inline = base64DataUrl(imageUrlOf(part));
+          if (!inline) throw geminiImageUnsupportedError();
+          parts.push({ inlineData: inline });
         } else {
           const text = textOfContent([part]);
           if (text) parts.push({ text });
@@ -255,7 +263,10 @@ export function buildChatRequest(target, upstreamProtocol, body, incomingHeaders
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
     const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
-    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
+    // A configured base URL may already carry the API version (`.../v1beta`),
+    // so it is stripped first — otherwise the request goes to
+    // `/v1beta/v1beta/models/...`.
+    const url = joinUrl(stripApiVersion(base), "v1beta/models/" + encodeURIComponent(target.model) + method);
     return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromChat(body)) } };
   }
   throw new Error("Unsupported Chat bridge protocol: " + upstreamProtocol);
