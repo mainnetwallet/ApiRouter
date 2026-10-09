@@ -284,12 +284,6 @@ Install dependencies:
 npm install
 ```
 
-Run backend tests:
-
-```bash
-npm test
-```
-
 Run frontend tests:
 
 ```bash
@@ -316,7 +310,6 @@ ApiRouter/
 ├── docs/                # Client integration guides
 ├── scripts/             # Development, production and launcher scripts
 ├── src/                 # Gateway and backend
-├── test/                # Backend tests
 ├── ui/                  # React + Vite control panel
 ├── .env.example         # Configuration template
 └── package.json
