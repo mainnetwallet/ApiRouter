@@ -462,3 +462,187 @@ test("streaming, authentication and the request log are unaffected", async () =>
     await router.close(); await groq.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// A remembered target may not bypass a key restriction applied afterwards
+// ---------------------------------------------------------------------------
+
+test("a remembered key excluded by the current chain is not attempted", async () => {
+  // groq key 0 is down, key 1 works; mistral always works.
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    await saveMode(router, "last-success");
+    // Start with only key 1 allowed, so key 1 answers and is remembered.
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1", keys: [1] },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(posts(groq), ["g1"]);
+    assert.equal((await getFallback(router)).remembered.remembered.text[0].targetId, "groq:m1:key-1");
+
+    // The operator now allows ONLY key 0. The remembered key 1 must not be
+    // tried: it is excluded by the configuration in force.
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1", keys: [0] },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(posts(groq), ["g1", "g0"], "key 1 must not be attempted again");
+    assert.deepEqual(posts(mistral), ["s0"], "the request falls through to the next configured model");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("a remembered model with a restricted subset uses only allowed keys", async () => {
+  const groq = await startMockUpstream((record) => (bearer(record) === "g0" ? down : ok("m1")));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1,g2",
+    GROQ_MODELS: "m1",
+    GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    MISTRAL_API_KEYS: "s0",
+    MISTRAL_MODELS: "m2",
+    MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`
+  });
+  try {
+    await saveMode(router, "last-success");
+    // Every key is allowed at first, so key 2 answers and is remembered.
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+    assert.equal((await chat(router)).status, 200);
+    // g0 is down, so the walk reaches g1.
+    assert.deepEqual(posts(groq), ["g0", "g1"]);
+    assert.equal((await getFallback(router)).remembered.remembered.text[0].targetId, "groq:m1:key-1");
+
+    // Restrict the entry to keys 0 and 2. The remembered key 1 is now excluded.
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1", keys: [0, 2] },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+
+    assert.equal((await chat(router)).status, 200);
+    const after = posts(groq).slice(2);
+    assert.ok(!after.includes("g1"), `key 1 is excluded and must not be attempted (saw ${JSON.stringify(after)})`);
+    assert.ok(after.includes("g2"), "the other allowed key is still reached");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A saved configuration takes effect without waiting for the order cache
+// ---------------------------------------------------------------------------
+
+test("a model added to the chain is used on the very next request in Automatic mode", async () => {
+  const groq = await startMockUpstream(() => down);
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`
+  });
+  try {
+    await saveMode(router, "auto");
+    assert.equal((await saveChain(router, "text", [{ provider: "groq", model: "m1" }])).status, 200);
+    // groq is entirely down and is the only configured model: nothing can serve.
+    assert.equal((await chat(router)).status, 502);
+
+    // Adding mistral must take effect at once, in the same 30-second bucket.
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+    assert.equal((await chat(router)).status, 200, "the newly added model must be eligible immediately");
+    assert.deepEqual(posts(mistral), ["s0"]);
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("disabling an entry removes it from the effective order immediately", async () => {
+  const groq = await startMockUpstream(() => down);
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`
+  });
+  try {
+    await saveMode(router, "auto");
+    await saveChain(router, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2" }
+    ]);
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(posts(mistral), ["s0"]);
+
+    // Disabling mistral must remove it from the order at once. groq is already
+    // cooling from the previous request, so nothing at all is eligible now:
+    // that is the documented 503 ("no routing targets available"), not a 502.
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2", enabled: false }
+    ])).status, 200);
+    assert.equal((await chat(router)).status, 503, "a disabled entry must not serve");
+    assert.deepEqual(posts(mistral), ["s0"], "and must never be called again");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("a mode change is reflected in the routing decision immediately", async () => {
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    await saveChain(router, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2" }
+    ]);
+    const preview = () => router.request("/api/router/preview?pool=text&protocol=openai-chat").then(json);
+
+    assert.equal((await saveMode(router, "fixed")).status, 200);
+    const fixed = await preview();
+    assert.equal(fixed.mode, "fixed");
+    assert.equal(fixed.orderSource, "chain");
+    assert.equal(fixed.automatic, false);
+
+    // No sleep: the switch must be live on the very next read.
+    assert.equal((await saveMode(router, "auto")).status, 200);
+    const auto = await preview();
+    assert.equal(auto.mode, "auto");
+    assert.equal(auto.orderSource, "auto");
+    assert.equal(auto.automatic, true);
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("saving a chain re-plans immediately, with no health change and no new bucket", async () => {
+  // The preview path is read-only: it plans the order without observing any
+  // health, so the health version and the 30-second bucket are both unchanged
+  // between the two reads. Only the configuration differs, which is exactly the
+  // case a cache keyed on health and time alone cannot notice.
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    await saveMode(router, "auto");
+    // fallbackOrder is per TARGET (one row per key), so read the distinct models.
+    const order = async () => [...new Set(
+      (await router.request("/api/router/preview?pool=text&protocol=openai-chat").then(json))
+        .fallbackOrder.map((item) => item.model)
+    )];
+
+    assert.equal((await saveChain(router, "text", [{ provider: "groq", model: "m1" }])).status, 200);
+    assert.deepEqual(await order(), ["m1"], "only the configured model is planned");
+
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+    assert.ok((await order()).includes("m2"),
+      "the model just added must be planned immediately, not after the next bucket");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});

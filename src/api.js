@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
-import { routeOrderByPool } from "./fallback-plan.js";
+import { resetAutomaticOrderCache, routeOrderByPool } from "./fallback-plan.js";
 import {
   FALLBACK_MODE_INFO,
   FALLBACK_MODES,
@@ -587,6 +587,9 @@ export function createApi({
           }
           try { fallbackChain.setMode(mode); }
           catch { return fail(req, res, 500, "Could not save the fallback mode", "server_error"); }
+          // The saved mode is live from this moment. Invalidated only after the
+          // write succeeded: a rejected save must leave the running order alone.
+          resetAutomaticOrderCache();
           if (body?.pool === undefined) return sendJson(req, res, 200, fallbackPayload(now));
         }
 
@@ -616,6 +619,10 @@ export function createApi({
 
           try { fallbackChain.set(pool, entries); }
           catch { return fail(req, res, 500, "Could not save the fallback chain", "server_error"); }
+          // Drop the cached automatic order so the chain just saved is the one
+          // the very next request is planned against. Called AFTER the write, so
+          // a failed save cannot disturb the order already in force.
+          resetAutomaticOrderCache();
           return sendJson(req, res, 200, fallbackPayload(now));
         }
 

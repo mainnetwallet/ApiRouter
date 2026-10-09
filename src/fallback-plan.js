@@ -57,14 +57,24 @@ export function groupTargets(targets) {
 }
 
 /**
- * The configured order. Every enabled entry that has targets in this pool, in
+ * The configured order. Every enabled entry that has a target in this pool, in
  * the order the operator saved, each expanded to its eligible keys — or to
- * every configured key when the entry names no subset. An entry naming a model
- * this pool does not serve simply contributes nothing; it is never guessed at.
+ * every configured key when the entry names no subset.
+ *
+ * Two ways an entry can contribute nothing, and they must not be confused:
+ *
+ *   - The model is not in this pool at all. The entry is dropped and does not
+ *     count as configured, because it says nothing about what THIS request may
+ *     reach.
+ *   - The model IS here but the entry's key subset matches none of the keys the
+ *     provider currently has (an old key index, or one narrowed away). That is
+ *     still a configured entry, so it is kept with NO targets: the model is
+ *     simply not routable. Dropping it instead would empty the chain, and an
+ *     empty chain means the automatic order over EVERY target — which would
+ *     quietly route to the very keys the operator excluded.
  */
 export function chainGroups(chain, targets) {
   const grouped = groupTargets(targets);
-  const used = new Set();
   const groups = [];
 
   for (const entry of activeEntries(chain)) {
@@ -73,12 +83,10 @@ export function chainGroups(chain, targets) {
     if (!group) continue;
     const keys = allowedKeyIndexes(entry, group.targets.map((target) => target.keyIndex));
     const narrowed = group.targets.filter((target) => keys.includes(target.keyIndex));
-    if (narrowed.length === 0) continue;
-    used.add(id);
     groups.push({ ...group, targets: narrowed, entryOrder: groups.length });
   }
 
-  return { groups, used };
+  return { groups };
 }
 
 /**
@@ -135,14 +143,31 @@ export function orderGroupsByHealth(groups, health, now) {
 }
 
 /**
- * Ordered group ids for the automatic order, cached against the health
- * registry's version and a coarse time bucket.
+ * A stable fingerprint of the exact set being ordered: which groups, in which
+ * order, each still holding which keys.
+ *
+ * This is what makes the cache safe to key on time and health alone. Those two
+ * say nothing about the configuration, so without this a chain edited within
+ * the same 30-second bucket — a model added, an entry disabled, a key subset
+ * narrowed — would keep being served the order computed before the edit.
+ * Including the shape of the input makes the key change the moment the
+ * configuration does, and leaves it identical when nothing has changed, so an
+ * unchanged configuration still reuses its cached order.
+ */
+function groupFingerprint(groups) {
+  return groups.map((group) => `${group.id}[${group.targets.map((target) => target.keyIndex).join(",")}]`).join("|");
+}
+
+/**
+ * Ordered group ids for the automatic order, cached against the configuration
+ * being ordered, the health registry's version, and a coarse time bucket.
  *
  * The bucket is what lets a target that has finished cooling down rejoin the
  * order without a full recomputation on every request; the version is what
- * makes a real health change take effect immediately. Ids — not target objects —
- * are cached, so a caller whose target list narrowed (a pin, a protocol filter)
- * simply ignores ids it no longer has.
+ * makes a real health change take effect immediately; the fingerprint is what
+ * makes a CONFIGURATION change take effect immediately. Ids — not target
+ * objects — are cached, so a caller whose target list narrowed (a pin, a
+ * protocol filter) simply ignores ids it no longer has.
  */
 const AUTO_CACHE = new Map();
 export const AUTO_ORDER_BUCKET_MS = 30_000;
@@ -154,7 +179,7 @@ export function resetAutomaticOrderCache() {
 export function automaticGroupIds({ cacheKey, groups, health, now, bucketMs = AUTO_ORDER_BUCKET_MS }) {
   const version = Number(health?.version) || 0;
   const bucket = Math.floor(now / bucketMs);
-  const key = `${cacheKey}|${version}|${bucket}`;
+  const key = `${cacheKey}|${version}|${bucket}|${groupFingerprint(groups)}`;
   const cached = AUTO_CACHE.get(key);
   if (cached) return cached;
 
@@ -218,7 +243,7 @@ export function buildRoutePlan({
   const phase = source === PLAN_SOURCE.AUTO ? PHASES.AUTO : PHASES.CHAIN;
   const base = toSteps(ordered, phase);
 
-  const sticky = resolveSticky({ stickyTargetId, ordered, grouped, all, mode, pinned });
+  const sticky = resolveSticky({ stickyTargetId, ordered, mode, pinned });
   if (!sticky) {
     return { steps: base, source, mode, sticky: null, groups: ordered, configured: configured.length };
   }
@@ -226,20 +251,25 @@ export function buildRoutePlan({
   // The remembered target leads, and the rest of its own model is exhausted
   // before the configured order resumes — otherwise a working second key of the
   // remembered model would be passed over in favour of another model entirely.
-  const remembered = grouped.get(groupKey(sticky)) ?? null;
-  const siblings = (remembered?.targets ?? [])
-    .filter((target) => targetId(target) !== targetId(sticky))
-    .sort((a, b) => a.keyIndex - b.keyIndex);
+  //
+  // Both halves come from the REMEMBERED GROUP AS THE ORDER HOLDS IT, never from
+  // the raw target list: `ordered` is what the configuration narrowed each entry
+  // to, so a key the operator has excluded is not in it to be remembered or to
+  // be tried as a sibling. Reading the unrestricted group here would let an old
+  // remembered target — and every key beside it — silently bypass a key
+  // restriction the operator has since applied.
+  const siblings = sticky.group.targets
+    .filter((target) => targetId(target) !== targetId(sticky.target));
 
   return {
     steps: [
-      { target: sticky, phase: PHASES.STICKY },
-      ...siblings.map((target) => ({ target, phase: PHASES.STICKY, group: groupKey(target) })),
+      { target: sticky.target, phase: PHASES.STICKY, group: sticky.group.id },
+      ...siblings.map((target) => ({ target, phase: PHASES.STICKY, group: sticky.group.id })),
       ...base
     ],
     source,
     mode,
-    sticky,
+    sticky: sticky.target,
     groups: ordered,
     configured: configured.length
   };
@@ -252,24 +282,28 @@ function automaticGroupsOrder(groups, { cacheKey, health, now }) {
 }
 
 /**
- * The remembered target, when the selected mode remembers one and it is still
- * part of this request's pool, protocol and order.
+ * The remembered target, when the selected mode remembers one and the ORDER
+ * still contains it.
+ *
+ * The search runs over `ordered` — the groups as the configuration narrowed
+ * them, entry by entry — and not over the raw target list. That is the whole
+ * point: a remembered target whose key the current entry no longer allows is
+ * simply not found, so it cannot lead the walk, and the group it is returned
+ * with is already narrowed to the keys that are still permitted.
  *
  * `fixed` never resolves one: that is the whole point of the mode, and it is
- * also what makes "Reset Fallback" trivially correct there.
+ * also what makes "Reset Fallback" trivially correct there. A pinned request is
+ * strict — it uses neither the chain nor the remembered target.
  */
-function resolveSticky({ stickyTargetId, ordered, grouped, all, mode, pinned }) {
+function resolveSticky({ stickyTargetId, ordered, mode, pinned }) {
   if (pinned || !stickyTargetId) return null;
-  if (mode === FALLBACK_MODES.FIXED) return null;
   if (!rememberedModes.has(mode)) return null;
 
-  const candidate = all.find((target) => targetId(target) === stickyTargetId) ?? null;
-  if (!candidate) return null;
-  // Only a target this request could actually reach: the chain may have been
-  // edited since the success was remembered.
-  const inOrder = ordered.some((group) => group.id === groupKey(candidate));
-  if (!inOrder) return null;
-  return grouped.get(groupKey(candidate)) ? candidate : null;
+  for (const group of ordered) {
+    const target = group.targets.find((item) => targetId(item) === stickyTargetId);
+    if (target) return { target, group };
+  }
+  return null;
 }
 
 /**

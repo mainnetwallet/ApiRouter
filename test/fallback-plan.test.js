@@ -366,3 +366,264 @@ test("a pinned request walks its targets in key order with no chain and no memor
   assert.equal(sticky, null, "a pin is strict and remembers nothing");
   assert.deepEqual(labels(steps).slice(0, 2), ["chain:a/A#0", "chain:a/A#1"]);
 });
+
+// ---------------------------------------------------------------------------
+// A remembered target may never bypass the configured key restrictions
+// ---------------------------------------------------------------------------
+
+/** One model with three keys, so a subset can exclude the middle one. */
+const threeKeyTargets = [
+  t("a", "A", 0), t("a", "A", 1), t("a", "A", 2),
+  t("b", "B", 0)
+];
+
+test("a remembered key the current entry no longer allows is never remembered", () => {
+  resetAutomaticOrderCache();
+  const { steps, sticky } = buildRoutePlan({
+    targets: threeKeyTargets,
+    // The operator has since restricted A to keys 0 and 2.
+    chain: entries(["a", "A", { keys: [0, 2] }], ["b", "B"]),
+    mode: FALLBACK_MODES.LAST_SUCCESS,
+    stickyTargetId: "a:A:key-1",
+    cacheKey: "remember-excluded-key"
+  });
+
+  assert.equal(sticky, null, "key 1 is excluded by the entry, so it cannot be remembered");
+  assert.ok(!labels(steps).some((label) => label.endsWith("#1") && label.includes("a/A")),
+    "the excluded key must not appear in any phase");
+  assert.deepEqual(labels(steps), ["chain:a/A#0", "chain:a/A#2", "chain:b/B#0"]);
+});
+
+test("a remembered model with a restricted key subset leads with, and exhausts, only allowed keys", () => {
+  resetAutomaticOrderCache();
+  const { steps, sticky } = buildRoutePlan({
+    targets: threeKeyTargets,
+    chain: entries(["a", "A", { keys: [0, 2] }], ["b", "B"]),
+    mode: FALLBACK_MODES.LAST_SUCCESS,
+    // Key 2 is remembered and IS allowed.
+    stickyTargetId: "a:A:key-2",
+    cacheKey: "remember-allowed-key"
+  });
+
+  assert.equal(sticky.model, "A");
+  assert.deepEqual(labels(steps), [
+    // The remembered key, then the model's OTHER ALLOWED key — never key 1 —
+    // and only then the configured chain, in its saved order.
+    "sticky:a/A#2", "sticky:a/A#0", "chain:a/A#0", "chain:a/A#2", "chain:b/B#0"
+  ]);
+  assert.ok(!labels(steps).some((label) => label === "sticky:a/A#1"));
+});
+
+test("a remembered target that is still allowed still leads in Remember Last Successful mode", () => {
+  resetAutomaticOrderCache();
+  const { steps, sticky } = buildRoutePlan({
+    targets: threeKeyTargets,
+    chain: entries(["a", "A"], ["b", "B"]),
+    mode: FALLBACK_MODES.LAST_SUCCESS,
+    stickyTargetId: "b:B:key-0",
+    cacheKey: "remember-eligible"
+  });
+
+  assert.equal(sticky.model, "B");
+  assert.equal(steps[0].phase, PHASES.STICKY);
+  assert.equal(labels(steps)[0], "sticky:b/B#0");
+  // The chain still resumes in its configured order afterwards.
+  assert.deepEqual(labels(steps).slice(1), ["chain:a/A#0", "chain:a/A#1", "chain:a/A#2", "chain:b/B#0"]);
+});
+
+test("a disabled entry cannot be reintroduced by sticky routing", () => {
+  resetAutomaticOrderCache();
+  const { steps, sticky } = buildRoutePlan({
+    targets: threeKeyTargets,
+    chain: entries(["a", "A"], ["b", "B", { enabled: false }]),
+    mode: FALLBACK_MODES.LAST_SUCCESS,
+    stickyTargetId: "b:B:key-0",
+    cacheKey: "remember-disabled-entry"
+  });
+
+  assert.equal(sticky, null);
+  assert.ok(!labels(steps).some((label) => label.includes("b/B")));
+});
+
+test("an entry removed from the chain cannot be reintroduced by sticky routing", () => {
+  resetAutomaticOrderCache();
+  const { steps, sticky } = buildRoutePlan({
+    targets: threeKeyTargets,
+    // B is simply gone from the chain.
+    chain: entries(["a", "A"]),
+    mode: FALLBACK_MODES.LAST_SUCCESS,
+    stickyTargetId: "b:B:key-0",
+    cacheKey: "remember-removed-entry"
+  });
+
+  assert.equal(sticky, null);
+  assert.ok(!labels(steps).some((label) => label.includes("b/B")));
+});
+
+test("Fixed Order and Automatic mode both respect the configured key restrictions", () => {
+  resetAutomaticOrderCache();
+  const chain = entries(["a", "A", { keys: [0, 2] }], ["b", "B"]);
+
+  // Fixed Order ignores the remembered target entirely, but must still honour
+  // the entry's key subset.
+  const fixed = buildRoutePlan({
+    targets: threeKeyTargets,
+    chain,
+    mode: FALLBACK_MODES.FIXED,
+    stickyTargetId: "a:A:key-1",
+    cacheKey: "restrict-fixed"
+  });
+  assert.equal(fixed.sticky, null);
+  assert.deepEqual(labels(fixed.steps), ["chain:a/A#0", "chain:a/A#2", "chain:b/B#0"]);
+
+  // Automatic mode re-orders the entries; it may not widen them. A's only
+  // measurement belongs to key 1, which the entry excludes, so A is correctly
+  // treated as unmeasured and yields to B — a measurement on an excluded key
+  // must not leak into the group's stats either.
+  const health = new HealthRegistry();
+  health.markSuccess(t("a", "A", 1), { latencyMs: 1 });
+  health.markSuccess(t("b", "B", 0), { latencyMs: 900 });
+  const auto = buildRoutePlan({
+    targets: threeKeyTargets,
+    chain,
+    mode: FALLBACK_MODES.AUTO,
+    stickyTargetId: "a:A:key-1",
+    health,
+    cacheKey: "restrict-auto"
+  });
+  assert.equal(auto.sticky, null, "the excluded key cannot be remembered even in automatic mode");
+  assert.deepEqual(labels(auto.steps), ["auto:b/B#0", "auto:a/A#0", "auto:a/A#2"]);
+});
+
+test("a pinned request still bypasses the chain, the automatic order and any memory", () => {
+  resetAutomaticOrderCache();
+  const { steps, sticky, source } = buildRoutePlan({
+    targets: threeKeyTargets,
+    chain: entries(["a", "A", { keys: [0] }]),
+    mode: FALLBACK_MODES.LAST_SUCCESS,
+    stickyTargetId: "a:A:key-2",
+    pinned: true,
+    cacheKey: "pin-strict"
+  });
+
+  assert.equal(sticky, null);
+  assert.equal(source, "chain");
+  // A pin is narrowed before the plan is built, and its own targets are walked
+  // in key order — the chain entry is not consulted at all.
+  assert.deepEqual(labels(steps), ["chain:a/A#0", "chain:a/A#1", "chain:a/A#2", "chain:b/B#0"]);
+});
+
+// ---------------------------------------------------------------------------
+// The automatic-order cache must not outlive the configuration it was built on
+// ---------------------------------------------------------------------------
+
+/** The automatic order for one cacheKey, as the walker would see it. */
+const autoOrder = (targets, chain, health, cacheKey) =>
+  labels(buildRoutePlan({
+    targets, chain, mode: FALLBACK_MODES.AUTO, health, cacheKey
+  }).steps);
+
+test("a model added to the chain is eligible immediately in Automatic mode", () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  const targets = [t("a", "A"), t("b", "B")];
+
+  // First order is computed against a chain that holds only A.
+  assert.deepEqual(autoOrder(targets, entries(["a", "A"]), health, "cfg-add"), ["auto:a/A#0"]);
+
+  // Saving a chain that also holds B must take effect at once — the same health
+  // version and the same 30-second bucket must not serve the old order.
+  assert.deepEqual(autoOrder(targets, entries(["a", "A"], ["b", "B"]), health, "cfg-add"),
+    ["auto:a/A#0", "auto:b/B#0"]);
+});
+
+test("removing or disabling an entry takes effect immediately in Automatic mode", () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  const targets = [t("a", "A"), t("b", "B")];
+  const full = entries(["a", "A"], ["b", "B"]);
+
+  assert.deepEqual(autoOrder(targets, full, health, "cfg-remove"), ["auto:a/A#0", "auto:b/B#0"]);
+  assert.deepEqual(autoOrder(targets, entries(["a", "A"]), health, "cfg-remove"), ["auto:a/A#0"]);
+  assert.deepEqual(autoOrder(targets, entries(["a", "A"], ["b", "B", { enabled: false }]), health, "cfg-remove"),
+    ["auto:a/A#0"]);
+});
+
+test("changing an entry's key subset takes effect immediately in Automatic mode", () => {
+  resetAutomaticOrderCache();
+  // A is only measured on key 1, so it is unmeasured while key 1 is excluded and
+  // measured — and therefore first — as soon as the subset admits it.
+  const health = new HealthRegistry();
+  health.markSuccess(t("a", "A", 1), { latencyMs: 1 });
+  health.markSuccess(t("b", "B", 0), { latencyMs: 900 });
+  const targets = threeKeyTargets;
+
+  assert.deepEqual(autoOrder(targets, entries(["a", "A", { keys: [0] }], ["b", "B"]), health, "cfg-keys"),
+    ["auto:b/B#0", "auto:a/A#0"]);
+  // A now measures 1 ms and leads. Its keys stay in KEY ORDER inside the group:
+  // latency orders models, and the key order within a model is configuration.
+  assert.deepEqual(autoOrder(targets, entries(["a", "A"], ["b", "B"]), health, "cfg-keys"),
+    ["auto:a/A#0", "auto:a/A#1", "auto:a/A#2", "auto:b/B#0"]);
+});
+
+test("an unchanged configuration still reuses the cached order within its bucket", () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  health.markSuccess(t("a", "A"), { latencyMs: 800 });
+  health.markSuccess(t("b", "B"), { latencyMs: 200 });
+  const targets = [t("a", "A"), t("b", "B")];
+  const run = () => autoOrder(targets, [], health, "cfg-reuse");
+
+  assert.deepEqual(run(), ["auto:b/B#0", "auto:a/A#0"]);
+
+  // Move the measurement WITHOUT going through the registry, so the version
+  // counter does not change: within this bucket the cached order is reused.
+  health.ensureTarget(t("a", "A")).requestLatencyMs = 10;
+  assert.deepEqual(run(), ["auto:b/B#0", "auto:a/A#0"], "the cached order is still valid for this bucket");
+
+  // A real health observation moves the version and must take effect at once.
+  health.markSuccess(t("a", "A"), { latencyMs: 5 });
+  assert.deepEqual(run(), ["auto:a/A#0", "auto:b/B#0"]);
+});
+
+test("the automatic-order cache stays bounded under configuration churn", () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  const targets = [t("a", "A"), t("b", "B")];
+  // Each distinct chain produces a distinct key; the cache must not grow without
+  // bound across a long-running gateway.
+  for (let i = 0; i < 200; i += 1) {
+    autoOrder(targets, i % 2 === 0 ? entries(["a", "A"]) : entries(["b", "B"]), health, `churn-${i}`);
+  }
+  // Observable through behaviour: the most recent configuration is still honoured.
+  assert.deepEqual(autoOrder(targets, entries(["b", "B"]), health, "churn-after"),
+    ["auto:b/B#0"]);
+});
+
+test("an entry restricted to a key the provider no longer has does not silently widen routing", () => {
+  resetAutomaticOrderCache();
+  // The entry allows only key 5. The provider has keys 0 and 1, so the subset
+  // matches nothing — which must NOT be read as "no chain is configured".
+  const { steps, source, configured } = buildRoutePlan({
+    targets: threeKeyTargets,
+    chain: entries(["a", "A", { keys: [5] }]),
+    cacheKey: "impossible-subset"
+  });
+
+  assert.equal(configured, 1, "the entry is still a configured entry");
+  assert.equal(source, "chain", "so the automatic order over every target must not take over");
+  assert.deepEqual(steps, [], "and the model it names is simply not routable");
+});
+
+test("a chain that is wholly unservable is not silently replaced by routing to everything", () => {
+  resetAutomaticOrderCache();
+  // Every entry names a key that does not exist. The chain is usable, it just
+  // permits nothing — and the excluded keys must not be reached.
+  const { steps, configured } = buildRoutePlan({
+    targets: threeKeyTargets,
+    chain: entries(["a", "A", { keys: [5] }], ["b", "B", { keys: [7] }]),
+    cacheKey: "wholly-unservable"
+  });
+  assert.equal(configured, 2);
+  assert.deepEqual(steps, []);
+});
