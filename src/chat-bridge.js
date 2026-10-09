@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
-import { geminiOutputTokens, streamErrorMessage, base64DataUrl, geminiImageUnsupportedError } from "./bridge-utils.js";
+import { geminiOutputTokens, streamErrorMessage, base64DataUrl, geminiImageUnsupportedError, textPositionImageUnsupportedError } from "./bridge-utils.js";
 import { stripApiVersion } from "./url-utils.js";
 
 /**
@@ -73,7 +73,10 @@ function textOfContent(content) {
   return content
     .map((part) => {
       if (typeof part === "string") return part;
-      if (part?.type === "image_url") return "[image]";
+      // Only ever reached for a system prompt, an assistant turn or a tool
+      // result — the user path handles image parts before calling this. A text
+      // stand-in here would be content the model never received.
+      if (part?.type === "image_url") throw textPositionImageUnsupportedError();
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");

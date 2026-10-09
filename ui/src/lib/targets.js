@@ -81,10 +81,17 @@ export function normalizeTarget(row, index = 0) {
     lastStatus: num(row?.lastStatus),
     lastReason: typeof row?.lastReason === "string" && row.lastReason ? row.lastReason : null,
     // Whether the provider's model catalogue listed this target's model.
-    // Tri-state on purpose: `true` listed, `false` absent, `null` unknown (the
-    // catalogue could not be read). Only `false` is evidence, and only `false`
-    // is ever rendered as a warning — an unreadable catalogue is not a finding.
+    // Tri-state on purpose: `true` listed, `false` absent from a catalogue read
+    // to the end, `null` the catalogue could not be inspected. Only `false` is
+    // evidence, and only `false` is ever rendered as a warning.
+    //
+    // `modelListed` is the LATEST observation; `modelListedConfirmed` is the
+    // last definite one, kept separately so an indeterminate probe cannot leave
+    // an older `false` on screen looking freshly confirmed.
     modelListed: typeof row?.modelListed === "boolean" ? row.modelListed : null,
+    modelListedAt: typeof row?.modelListedAt === "string" ? row.modelListedAt : null,
+    modelListedConfirmed: typeof row?.modelListedConfirmed === "boolean" ? row.modelListedConfirmed : null,
+    modelListedConfirmedAt: typeof row?.modelListedConfirmedAt === "string" ? row.modelListedConfirmedAt : null,
     cooldownUntil: count(row?.cooldownUntil),
     updatedAt: typeof row?.updatedAt === "string" ? row.updatedAt : null,
     // /api/models only. Null rather than 0 on the health projection, so the

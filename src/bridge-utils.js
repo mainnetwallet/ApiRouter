@@ -76,6 +76,26 @@ export function geminiImageUnsupportedError() {
   );
 }
 
+/**
+ * Raised when an image sits in a position that carries only text.
+ *
+ * A system prompt, an assistant turn or a tool result has nowhere to put image
+ * bytes in these protocols. The previous behaviour substituted the literal
+ * string `"[image]"` and sent the request anyway, so the model was handed
+ * plausible-looking text for content it never received and the client was told
+ * nothing. This is the same rule the conversion paths already follow; because
+ * the refusal is retryable, the fallback walk still reaches a target that can
+ * carry the image, and only a request no target can serve fails.
+ */
+export function textPositionImageUnsupportedError() {
+  return unsupportedMediaError(
+    "This request carries an image in a position that holds only text — a system "
+    + "prompt, an assistant turn, or a tool result. Forwarding it would mean "
+    + "substituting text the model never saw. Move the image into a user message, "
+    + "or configure a provider that accepts image content in that position."
+  );
+}
+
 /** Raised when Gemini-native media has no representation in an OpenAI-compatible protocol. */
 export function geminiNativeMediaUnsupportedError(field) {
   return unsupportedMediaError(

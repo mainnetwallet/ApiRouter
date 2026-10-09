@@ -561,6 +561,17 @@ function TargetDrawer({ target, onClose }) {
                 : target.modelListed === true
                   ? <span className="dim">Listed in the provider's model catalogue</span>
                   : <span className="dim">Catalogue unreadable — not verified</span>}
+              {target.modelListedAt && <span className="dim"> · as of {formatDateTime(target.modelListedAt)}</span>}
+              {/* The last confirmed value is a DIFFERENT fact from the latest
+                  observation, so it is shown separately and dated. It is never
+                  rendered as the current result, which is what would make a
+                  stale `false` look freshly confirmed. */}
+              {target.modelListed === null && target.modelListedConfirmed !== null && (
+                <div className="dim tiny">
+                  Last confirmed {target.modelListedConfirmed ? "present" : "absent"}
+                  {target.modelListedConfirmedAt ? ` on ${formatDateTime(target.modelListedConfirmedAt)}` : ""}
+                </div>
+              )}
             </dd>
 
             <dt className="dl__term">Cooldown until</dt>

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
-import { geminiOutputTokens, toolCallKey, streamErrorMessage, geminiImageUnsupportedError } from "./bridge-utils.js";
-import { stripApiVersion } from "./url-utils.js";
+import { geminiOutputTokens, toolCallKey, streamErrorMessage, geminiImageUnsupportedError, textPositionImageUnsupportedError } from "./bridge-utils.js";
+import { stripApiVersion, openAiSuffixPath } from "./url-utils.js";
 
 /**
  * Anthropic Messages bridge.
@@ -50,7 +50,14 @@ function blocksOf(content) {
 
 function textOfBlocks(content) {
   return blocksOf(content)
-    .map((b) => (b?.type === "text" ? b.text ?? "" : b?.type === "image" ? "[image]" : ""))
+    .map((b) => {
+      if (b?.type === "text") return b.text ?? "";
+      // Only reached where a block list has to collapse to a string: a system
+      // prompt or a tool result. An image there has no text form, and inventing
+      // one would tell the model it had seen something it had not.
+      if (b?.type === "image") throw textPositionImageUnsupportedError();
+      return "";
+    })
     .join("\n");
 }
 
@@ -324,7 +331,7 @@ export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeade
   if (upstreamProtocol === "openai-chat") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers.authorization = "Bearer " + target.apiKey;
-    const url = joinUrl(base, /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions");
+    const url = joinUrl(base, openAiSuffixPath(base, "chat/completions"));
     return { url, options: { method: "POST", headers, body: JSON.stringify(toOpenAIChatRequest(body, target.model)) } };
   }
   if (upstreamProtocol === "gemini") {

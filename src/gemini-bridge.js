@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini } from "./anthropic-bridge.js";
 import { toolCallKey, geminiNativeMediaUnsupportedError } from "./bridge-utils.js";
+import { openAiSuffixPath } from "./url-utils.js";
 
 function id(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
@@ -266,7 +267,7 @@ export function buildGeminiBridgeRequest(target, body, incomingHeaders = {}, { s
   if (incomingHeaders["user-agent"]) headers["user-agent"] = incomingHeaders["user-agent"];
 
   const base = String(target.baseUrl || "").replace(/\/+$/, "");
-  const path = /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions";
+  const path = openAiSuffixPath(base, "chat/completions");
   return {
     url: joinUrl(base, path),
     options: {

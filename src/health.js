@@ -61,9 +61,20 @@ export class HealthRegistry {
         lastStatus: null,
         lastReason: null,
         /**
-         * Whether the provider's own model catalogue listed this target's model
-         * on the last probe. `null` means the catalogue could not be read, which
-         * is NOT the same as "the model is missing".
+         * What the provider's own model catalogue said about this target's model
+         * ON THE MOST RECENT PROBE: `true` listed, `false` absent from a
+         * catalogue that was read to the end, `null` the catalogue could not be
+         * inspected.
+         *
+         * Four fields, because "the last thing we were told" and "the last thing
+         * we actually confirmed" are different facts and conflating them shows a
+         * stale result as though it were fresh:
+         *
+         *   modelListed             the latest observation (tri-state)
+         *   modelListedAt           when that observation was taken
+         *   modelListedConfirmed    the last DEFINITE value, kept across
+         *                           indeterminate probes
+         *   modelListedConfirmedAt  when that definite value was observed
          *
          * This is deliberately separate from `status`: a target can have a valid
          * key and a reachable API (healthy) while its configured model is absent
@@ -71,6 +82,13 @@ export class HealthRegistry {
          * reporting a confirmed usable model.
          */
         modelListed: null,
+        modelListedAt: null,
+        modelListedConfirmed: null,
+        modelListedConfirmedAt: null,
+        // Ordering guard for catalogue observations only, so a slow probe cannot
+        // overwrite a newer catalogue fact (and vice versa: routing health and
+        // the catalogue are separate axes and must not gate each other).
+        catalogueObservedAt: 0,
         // Timestamp of the newest accepted observation. Starts at 0 so the
         // first observation is always accepted, whatever its timestamp.
         observedAt: 0,
@@ -112,8 +130,13 @@ export class HealthRegistry {
         latencyMs: state.latencyMs,
         lastStatus: state.lastStatus,
         lastReason: state.lastReason,
-        // Reported, never inferred: `null` says the catalogue was unreadable.
+        // The LATEST observation, and separately the last CONFIRMED one. A `null`
+        // here means the newest probe could not inspect the catalogue — the panel
+        // must not render the confirmed value as though it were that fresh result.
         modelListed: state.modelListed ?? null,
+        modelListedAt: state.modelListedAt ?? null,
+        modelListedConfirmed: state.modelListedConfirmed ?? null,
+        modelListedConfirmedAt: state.modelListedConfirmedAt ?? null,
         updatedAt: state.updatedAt
       };
     });
@@ -178,6 +201,46 @@ export class HealthRegistry {
   }
 
   /**
+   * Record what the provider's model catalogue said about this target's model.
+   *
+   * Separate from health in every direction: it never touches `status`, the
+   * score or `cooldownUntil`, so catalogue uncertainty can never change routing
+   * or start a cooldown, and a routing failure or cooldown never masks what the
+   * catalogue said.
+   *
+   *   true / false  a definite observation. It becomes the latest observation
+   *                 AND the last confirmed one.
+   *   null          the catalogue could not be inspected. This is still an
+   *                 observation of the latest probe, so it REPLACES the reported
+   *                 value — otherwise a `false` from an earlier probe would be
+   *                 shown as though it were the current result. The last
+   *                 confirmed value is retained separately, with its own
+   *                 timestamp, so nothing is lost and nothing is misrepresented.
+   *   undefined     no catalogue observation was made; leave the state alone.
+   *
+   * Guarded by `catalogueObservedAt` so a slow probe cannot overwrite a newer
+   * catalogue fact.
+   */
+  recordCatalogueObservation(target, modelListed, now = Date.now()) {
+    const state = this.ensureTarget(target);
+    if (modelListed === undefined) return state;
+
+    if (Number.isFinite(now) && now < state.catalogueObservedAt) return state;
+    if (Number.isFinite(now)) state.catalogueObservedAt = now;
+
+    const definite = modelListed === true || modelListed === false;
+    const at = new Date(Number.isFinite(now) ? now : Date.now()).toISOString();
+
+    state.modelListed = definite ? modelListed : null;
+    state.modelListedAt = at;
+    if (definite) {
+      state.modelListedConfirmed = modelListed;
+      state.modelListedConfirmedAt = at;
+    }
+    return state;
+  }
+
+  /**
    * Apply a normalized health-probe result.
    *
    * `ok: null` (or absent) is a passive observation: the probe could not
@@ -187,9 +250,9 @@ export class HealthRegistry {
    * cooldown: a probe neither ends it early (success) nor stretches it (failure).
    * The target is retried when its own cooldown runs out, not when a probe says so.
    *
-   * `modelListed` is recorded independently of both. It describes the provider's
-   * catalogue, not this target's health, so it is kept even while the target is
-   * cooling down — and it never changes `status`, which is what routing reads.
+   * `modelListed` is recorded independently of both, and is kept even while the
+   * target is cooling down — it describes the provider's catalogue, not this
+   * target's health.
    */
   recordHealthCheck(
     target,
@@ -198,7 +261,7 @@ export class HealthRegistry {
   ) {
     const state = this.ensureTarget(target);
 
-    if (modelListed === true || modelListed === false) state.modelListed = modelListed;
+    this.recordCatalogueObservation(target, modelListed, now);
 
     if ((ok === true || ok === false) && Number(state.cooldownUntil) > now) {
       return state;
@@ -264,6 +327,10 @@ export function recordHealthCheck(target, result = {}, now = Date.now()) {
   return healthRegistry.recordHealthCheck(target, result, now);
 }
 
+export function recordCatalogueObservation(target, modelListed, now = Date.now()) {
+  return healthRegistry.recordCatalogueObservation(target, modelListed, now);
+}
+
 export function rankTargets(targets, now = Date.now()) {
   return healthRegistry.rank(targets, now);
 }
@@ -292,6 +359,12 @@ async function refreshTarget(target, check) {
     // A probe that throws is an unavailable provider, not a crash.
     const status = Number(error?.status || 503);
     const state = markFailure(target, status, {}, observedAt);
+    // The catalogue was never inspected on this cycle. Recorded as an
+    // indeterminate observation — not left as the previous value — so a `false`
+    // from an earlier probe is never displayed as the latest result. Note this
+    // goes through markFailure above rather than recordHealthCheck, so the
+    // existing cooldown semantics for a thrown probe are unchanged.
+    recordCatalogueObservation(target, null, observedAt);
     return {
       target,
       state,

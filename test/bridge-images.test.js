@@ -231,3 +231,84 @@ test("an image-free request is unaffected in every direction", () => {
   assert.deepEqual(toGeminiRequest({ messages: [{ role: "user", content: "hello" }] }).contents[0].parts, [{ text: "hello" }]);
   assert.equal(toChatFromGemini({ contents: [{ role: "user", parts: [{ text: "hello" }] }] }, "m").messages[0].content, "hello");
 });
+
+// ------------------------------------------------ images in text-only positions
+
+/**
+ * Regression: a system prompt, an assistant turn or a tool result has nowhere to
+ * put image bytes, so the bridges substituted the literal string "[image]" and
+ * sent the request anyway. The model was handed plausible-looking text for
+ * content it never received, and the client was told nothing — the same defect
+ * as the conversion paths, one layer down.
+ */
+
+test("chat -> gemini: an image in a SYSTEM prompt is refused, not turned into text", () => {
+  assert.throws(
+    () => toGeminiFromChat({
+      messages: [
+        { role: "system", content: [{ type: "text", text: "be brief" }, { type: "image_url", image_url: { url: DATA_URL } }] },
+        { role: "user", content: "hi" }
+      ]
+    }),
+    (error) => assertUnsupported(error, /system prompt|only text/)
+  );
+});
+
+test("chat -> gemini: an image in an ASSISTANT turn is refused", () => {
+  assert.throws(
+    () => toGeminiFromChat({ messages: [{ role: "assistant", content: [{ type: "image_url", image_url: { url: DATA_URL } }] }] }),
+    (error) => assertUnsupported(error, /only text/)
+  );
+});
+
+test("responses -> gemini: an image inside a tool result is refused", () => {
+  assert.throws(
+    () => toGeminiFromResponses({
+      input: [{ type: "function_call_output", call_id: "c1", output: [{ type: "input_image", image_url: DATA_URL }] }]
+    }),
+    (error) => assertUnsupported(error, /tool result/)
+  );
+});
+
+test("responses -> chat: an image inside a tool result is refused", () => {
+  assert.throws(
+    () => toOpenAIChatFromResponses({
+      input: [{ type: "function_call_output", call_id: "c1", output: [{ type: "input_image", image_url: "https://example.com/a.png" }] }]
+    }, "m"),
+    (error) => assertUnsupported(error, /tool result/)
+  );
+});
+
+test("anthropic -> gemini and chat: an image inside a tool_result is refused", () => {
+  const body = {
+    messages: [{
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG } }] }]
+    }]
+  };
+  assert.throws(() => toGeminiRequest(body), (error) => assertUnsupported(error, /tool result/));
+  assert.throws(() => toOpenAIChatRequest(body, "m"), (error) => assertUnsupported(error, /tool result/));
+});
+
+test("anthropic -> chat: an image in the SYSTEM prompt is refused", () => {
+  assert.throws(
+    () => toOpenAIChatRequest({
+      system: [{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG } }],
+      messages: [{ role: "user", content: "hi" }]
+    }, "m"),
+    (error) => assertUnsupported(error, /system prompt|only text/)
+  );
+});
+
+test("no bridge emits the literal marker \"[image]\" anywhere in a built payload", () => {
+  // A belt-and-braces guard: the placeholder must never reappear as content.
+  const built = [
+    toGeminiFromChat({ messages: [{ role: "user", content: "hello" }] }),
+    toGeminiFromResponses({ input: "hello" }),
+    toGeminiRequest({ messages: [{ role: "user", content: "hello" }] }),
+    toOpenAIChatRequest({ messages: [{ role: "user", content: "hello" }] }, "m"),
+    toOpenAIChatFromResponses({ input: "hello" }, "m"),
+    toChatFromGemini({ contents: [{ role: "user", parts: [{ text: "hello" }] }] }, "m")
+  ];
+  for (const payload of built) assert.ok(!JSON.stringify(payload).includes("[image]"), JSON.stringify(payload));
+});

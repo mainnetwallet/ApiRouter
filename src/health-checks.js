@@ -103,9 +103,16 @@ const isAbortError = (error) => error?.name === "AbortError" || error?.name === 
 /**
  * The largest model catalogue the probe will read to look for the configured
  * model id. A catalogue larger than this is left unread and reported as
- * "cannot tell" rather than buffered.
+ * "cannot tell" rather than buffered. Enforced while the body is consumed, not
+ * after it has been buffered.
  */
-const MAX_MODEL_LIST_BYTES = 512 * 1024;
+export const MAX_MODEL_LIST_BYTES = 512 * 1024;
+
+/**
+ * How many catalogue pages the probe will walk before giving up and reporting
+ * "cannot tell". Bounds the work a paginated catalogue can cause.
+ */
+export const MAX_MODEL_LIST_PAGES = 5;
 
 /**
  * Model ids named by a provider's catalogue response.
@@ -140,31 +147,163 @@ export function modelInCatalogue(ids, model) {
 }
 
 /**
- * Read a bounded model catalogue off an OK probe response and report whether the
- * configured model appears in it.
+ * What a catalogue page says about further pages.
  *
- * Every failure path answers `null`. A provider that paginates, hides models, or
- * replies with a shape this router does not recognise must never be reported as
- * missing the model it is configured with — the probe has no evidence either way,
- * and a false negative would be worse than the silence it replaces.
+ * `token` is a page this probe can actually request (`nextPageToken`, the
+ * documented cursor on Gemini's `models.list`). `more` is true whenever the page
+ * says further models exist — including a shape whose cursor this router cannot
+ * follow, such as OpenAI's `has_more` without a token. A page that reports
+ * `more` without a usable `token` is not proof that the model is absent, so it
+ * is reported as "cannot tell" rather than "missing".
  */
-async function readModelListing(response, model) {
-  if (Number(response?.status) !== 200) return null;
-  const declared = Number(response?.headers?.get?.("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_MODEL_LIST_BYTES) return null;
+export function nextPageOf(body) {
+  if (!body || typeof body !== "object") return { token: null, more: false };
+  const token = body.nextPageToken ?? body.next_page_token;
+  if (typeof token === "string" && token) return { token, more: true };
+  return { token: null, more: body.has_more === true };
+}
+
+/** The probe URL for a follow-up page, or null when the URL cannot be extended. */
+function pageUrlFor(url, token) {
   try {
-    const text = await response.text();
-    if (typeof text !== "string" || Buffer.byteLength(text) > MAX_MODEL_LIST_BYTES) return null;
-    return modelInCatalogue(listedModelIds(JSON.parse(text)), model);
+    const next = new URL(String(url));
+    next.searchParams.set("pageToken", token);
+    return next.toString();
   } catch {
     return null;
   }
 }
 
+/**
+ * Read a response body up to `limit` bytes, WITHOUT buffering the whole thing.
+ *
+ * `response.text()` would read an unbounded body into memory and only then allow
+ * a size check, which is useless against a provider that omits `Content-Length`
+ * or understates it. This consumes the stream incrementally and stops, cancelling
+ * the reader, the moment the limit is passed.
+ *
+ * Returns `{ text, bytes }` on success, `{ tooLarge: true }` past the limit, or
+ * `{ failed: true }` when the body is missing, not a string, or the stream
+ * errors (which is also how the probe timeout surfaces here).
+ */
+async function readBoundedBody(response, limit) {
+  // A trustworthy length is still worth respecting before spending a byte, but
+  // it is only ever a fast path — never the enforcement.
+  const declared = Number(response?.headers?.get?.("content-length"));
+  if (Number.isFinite(declared) && declared > limit) return { tooLarge: true };
+
+  const body = response?.body;
+  if (!body || typeof body.getReader !== "function") {
+    // Responses without a body stream (non-streaming stubs) fall back to text().
+    try {
+      const text = await response.text();
+      if (typeof text !== "string") return { failed: true };
+      const bytes = Buffer.byteLength(text);
+      return bytes > limit ? { tooLarge: true } : { text, bytes };
+    } catch {
+      return { failed: true };
+    }
+  }
+
+  const reader = body.getReader();
+  const chunks = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      bytes += value.byteLength ?? value.length ?? 0;
+      if (bytes > limit) {
+        await reader.cancel().catch(() => {});
+        return { tooLarge: true };
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } catch {
+    await reader.cancel().catch(() => {});
+    return { failed: true };
+  }
+  return { text: Buffer.concat(chunks).toString("utf8"), bytes };
+}
+
+/**
+ * Read the provider's model catalogue and report whether it names `model`.
+ *
+ * Returns `true` / `false` only on evidence, and `null` whenever the catalogue
+ * could not be inspected to the end:
+ *
+ *   - the first page is unreadable, oversized, non-200 or not a known shape;
+ *   - a later page cannot be fetched, is not OK, or fails to parse;
+ *   - the page budget is exhausted, or the remaining byte budget is gone, while
+ *     the provider is still advertising further pages.
+ *
+ * `false` therefore means "a complete catalogue was read and the model is not in
+ * it" — never "the model was not on the first page". Gemini serves 50 models per
+ * page by default, so a busy account routinely has more.
+ *
+ * Follow-up pages reuse the probe's own `fetchImpl` and `signal`, so the probe
+ * timeout bounds the whole walk.
+ */
+async function readModelListing(response, model, { url, headers, fetchImpl, signal } = {}) {
+  if (Number(response?.status) !== 200) return null;
+
+  let page = response;
+  let pageUrl = url;
+  let remaining = MAX_MODEL_LIST_BYTES;
+
+  for (let index = 0; index < MAX_MODEL_LIST_PAGES; index += 1) {
+    const read = await readBoundedBody(page, remaining);
+    if (!read.text) return null;
+    remaining -= read.bytes;
+
+    let body;
+    try {
+      body = JSON.parse(read.text);
+    } catch {
+      return null;
+    }
+
+    const ids = listedModelIds(body);
+    // An unrecognized shape is "cannot tell" on any page, and stops the walk:
+    // there is no evidence to weigh either way.
+    if (ids === null) return null;
+    if (modelInCatalogue(ids, model) === true) return true;
+
+    const next = nextPageOf(body);
+    if (!next.token) return next.more ? null : false;
+
+    // Further pages exist but this probe cannot reach them: the model might be
+    // on one of them, so absence is unproven.
+    const lastPage = index === MAX_MODEL_LIST_PAGES - 1;
+    if (lastPage || remaining <= 0) return null;
+    if (typeof fetchImpl !== "function" || !pageUrl) return null;
+    const nextUrl = pageUrlFor(pageUrl, next.token);
+    if (!nextUrl) return null;
+
+    let nextResponse;
+    try {
+      nextResponse = await fetchImpl(nextUrl, { method: "GET", headers: page.headers, signal });
+    } catch {
+      return null;
+    }
+    if (Number(nextResponse?.status) !== 200) return null;
+
+    // Release the page just consumed before moving on.
+    try { await page.body?.cancel(); } catch {}
+    page = nextResponse;
+    pageUrl = nextUrl;
+  }
+
+  return null;
+}
+
 export async function probeTargetHealth(target, options = {}) {
   const { timeoutMs = PROBE_TIMEOUT_MS, fetchImpl = fetch } = options;
   const plan = healthProbePlan(target);
-  if (!plan) return { ok: null, status: null, latencyMs: null, reason: "no safe health probe for this provider" };
+  // No probe means no catalogue observation either, so the key is present and
+  // indeterminate rather than missing: every probe result has the same shape.
+  if (!plan) return { ok: null, status: null, latencyMs: null, modelListed: null, reason: "no safe health probe for this provider" };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -178,11 +317,21 @@ export async function probeTargetHealth(target, options = {}) {
     });
     const latencyMs = Date.now() - startedAt;
     // Read the catalogue the probe already fetched to see whether the model this
-    // target is configured with is actually offered. This costs no extra
-    // request; it only stops the body being discarded unread.
+    // target is configured with is actually offered. This costs no extra request
+    // for the common single-page catalogue; a paginated one is walked with the
+    // same fetch and signal, so the probe timeout bounds it too.
     let modelListed = null;
     try {
-      modelListed = await readModelListing(upstream, target.model);
+      modelListed = await readModelListing(upstream, target.model, {
+        url: plan.url,
+        headers: plan.headers,
+        fetchImpl,
+        signal: controller.signal
+      });
+    } catch {
+      // Unreadable is "cannot tell", never a health failure: the endpoint
+      // answered, which is all the health verdict is about.
+      modelListed = null;
     } finally {
       // Nothing else consumes this body; release the socket either way.
       try { await upstream.body?.cancel(); } catch {}

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
-import { geminiOutputTokens, toolCallKey, streamErrorMessage, base64DataUrl, geminiImageUnsupportedError, unsupportedMediaError } from "./bridge-utils.js";
-import { stripApiVersion } from "./url-utils.js";
+import { geminiOutputTokens, toolCallKey, streamErrorMessage, base64DataUrl, geminiImageUnsupportedError, unsupportedMediaError, textPositionImageUnsupportedError } from "./bridge-utils.js";
+import { stripApiVersion, openAiSuffixPath } from "./url-utils.js";
 
 /**
  * Codex (OpenAI Responses) bridge.
@@ -77,7 +77,10 @@ function textOf(content) {
   return content
     .map((part) => {
       if (typeof part === "string") return part;
-      if (part?.type === "input_image") return "[image]";
+      // A position that holds only text: a system prompt, an assistant turn or a
+      // tool result. Substituting a marker here would hand the model text for an
+      // image it never received.
+      if (part?.type === "input_image") throw textPositionImageUnsupportedError();
       return typeof part?.text === "string" ? part.text : "";
     })
     .join("");
@@ -374,7 +377,7 @@ export function buildCodexRequest(target, upstreamProtocol, body, incomingHeader
   if (upstreamProtocol === "openai-chat") {
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers.authorization = "Bearer " + target.apiKey;
-    const url = joinUrl(base, /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions");
+    const url = joinUrl(base, openAiSuffixPath(base, "chat/completions"));
     return { url, options: { method: "POST", headers, body: JSON.stringify(toOpenAIChatFromResponses(body, target.model)) } };
   }
   if (upstreamProtocol === "gemini") {

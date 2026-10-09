@@ -149,17 +149,30 @@ test("modelListed is recorded without ever changing status, score or cooldown", 
   assert.equal(described.modelListed, false);
 });
 
-test("an unreadable catalogue leaves the previous modelListed value alone rather than clearing it", () => {
+test("an unreadable catalogue replaces the reported value but keeps the last confirmed one", () => {
   const registry = new HealthRegistry();
   const target = groqTarget("ghost-model");
 
   registry.recordHealthCheck(target, { ok: true, status: 200, modelListed: false }, 1000);
   registry.recordHealthCheck(target, { ok: true, status: 200, modelListed: null }, 2000);
-  assert.equal(registry.ensureTarget(target).modelListed, false);
 
-  // A defaulted/absent field behaves the same way.
+  const state = registry.ensureTarget(target);
+  // This test used to assert the OPPOSITE — that `false` was retained and
+  // reported. That was the bug: the documented contract says `modelListed` is
+  // what the catalogue said on the LAST probe, and it kept saying `false` after
+  // a probe that could not read the catalogue at all, so the panel presented a
+  // stale absence as a fresh confirmation.
+  assert.equal(state.modelListed, null, "the latest observation is 'could not tell'");
+  assert.equal(state.modelListedAt, new Date(2000).toISOString());
+  // Nothing is lost: the last definite result is retained separately, dated.
+  assert.equal(state.modelListedConfirmed, false);
+  assert.equal(state.modelListedConfirmedAt, new Date(1000).toISOString());
+
+  // A caller that reports no catalogue observation at all is not an observation,
+  // so it leaves the signal untouched rather than clearing it.
   registry.recordHealthCheck(target, { ok: true, status: 200 }, 3000);
-  assert.equal(registry.ensureTarget(target).modelListed, false);
+  assert.equal(registry.ensureTarget(target).modelListed, null);
+  assert.equal(registry.ensureTarget(target).modelListedAt, new Date(2000).toISOString());
 });
 
 test("modelListed is kept while a target is cooling down, because it describes the catalogue and not the health", () => {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
-import { stripApiVersion } from "./url-utils.js";
+import { stripApiVersion, openAiSuffixPath } from "./url-utils.js";
 
 export function providerProtocols(provider) {
   if (provider === "agentrouter") return ["anthropic", "openai-chat", "openai-responses"];
@@ -42,11 +42,11 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
     headers["anthropic-version"] = incomingHeaders["anthropic-version"] || "2023-06-01";
     if (incomingHeaders["anthropic-beta"]) headers["anthropic-beta"] = incomingHeaders["anthropic-beta"];
   } else if (protocol === "openai-responses") {
-    url = joinUrl(base, /\/v\d+$/i.test(base) ? "responses" : "v1/responses");
+    url = joinUrl(base, openAiSuffixPath(base, "responses"));
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
   } else if (protocol === "openai-chat") {
-    url = joinUrl(base, /\/v\d+$/i.test(base) ? "chat/completions" : "v1/chat/completions");
+    url = joinUrl(base, openAiSuffixPath(base, "chat/completions"));
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
   } else if (protocol === "gemini") {
