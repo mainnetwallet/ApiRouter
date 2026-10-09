@@ -1254,3 +1254,114 @@ test("a persisted key index the provider no longer has fails closed and is repor
     await router.close(); await groq.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Agentrouter: a budget-pool 402 is one model's problem, not the key's
+// ---------------------------------------------------------------------------
+
+const BUDGET_POOL_402 = "Budget pool quota has been exhausted. Please ask an administrator to increase the limit or select another budget pool.";
+const AGENT_MODELS = ["gpt-6-astra", "claude-opus-5", "claude-opus-4-8", "deepseek-v4-flash"];
+const bodyModel = (record) => record.body?.model;
+const postModels = (mock) => mock.requests.filter((record) => record.method === "POST").map(bodyModel);
+
+/** One Agentrouter key shared by four models, as in production. */
+async function startAgentRouter(script) {
+  const agent = await startMockUpstream(script);
+  const router = await startRouter({
+    AGENTROUTER_API_KEYS: "k0",
+    AGENTROUTER_MODELS: AGENT_MODELS.join(","),
+    AGENTROUTER_BASE_URL: `${agent.baseUrl}/v1`
+  });
+  assert.equal((await saveChain(router, "text", AGENT_MODELS.map((model) => ({ provider: "agentrouter", model })))).status, 200);
+  return { router, agent };
+}
+
+const attemptTrail = async (router) => {
+  const log = await router.request("/api/requests?limit=10&attemptLimit=50").then(json);
+  // Oldest first, for the request just made.
+  return [...log.attempts].sort((a, b) => a.startedAt - b.startedAt || (a.callIndex ?? 0) - (b.callIndex ?? 0));
+};
+/** The finished request's own walk, newest request first: real attempts AND skipped targets, in order. */
+const requestWalk = async (router) => {
+  const log = await router.request("/api/requests?limit=10").then(json);
+  return log.entries[0].attempts;
+};
+const modelStates = (router) => router.request("/health").then(json)
+  .then((health) => Object.fromEntries(health.pools.text.health.map((entry) => [entry.model, entry])));
+
+test("agentrouter: a budget-pool 402 cools only that model and the same request is served by the next one", async () => {
+  const { router, agent } = await startAgentRouter((record) => (
+    bodyModel(record) === "gpt-6-astra"
+      ? { status: 402, body: { error: { message: BUDGET_POOL_402 } } }
+      : ok(bodyModel(record))
+  ));
+  try {
+    const response = await chat(router);
+    assert.equal(response.status, 200, "the request is served, not failed");
+    assert.deepEqual(postModels(agent), ["gpt-6-astra", "claude-opus-5"], "fallback continued to the next model");
+
+    // Live Logs: every real attempt is recorded, in the order it was made.
+    const trail = (await attemptTrail(router)).filter((a) => !a.skipped);
+    assert.deepEqual(trail.map((a) => a.model), ["gpt-6-astra", "claude-opus-5"]);
+    assert.deepEqual(trail.map((a) => a.status), [402, 200]);
+    assert.deepEqual(trail.map((a) => a.ok), [false, true]);
+    assert.deepEqual((await requestWalk(router)).map((a) => a.model), ["gpt-6-astra", "claude-opus-5"], "the request's own record lists nothing else");
+
+    // Models page: only the failed model is cooling; no sibling is.
+    const states = await modelStates(router);
+    assert.equal(states["gpt-6-astra"].status, "cooldown");
+    assert.match(states["gpt-6-astra"].lastReason, /budget pool exhausted/);
+    for (const model of ["claude-opus-5", "claude-opus-4-8", "deepseek-v4-flash"]) {
+      assert.notEqual(states[model].status, "cooldown", `${model} must not be cooling`);
+    }
+
+    // The next request does not 503: gpt-6-astra is skipped, the others serve.
+    const next = await chat(router);
+    assert.equal(next.status, 200, "no 'No routing targets are currently available'");
+    assert.deepEqual(postModels(agent), ["gpt-6-astra", "claude-opus-5", "claude-opus-5"]);
+  } finally {
+    await router.close(); await agent.close();
+  }
+});
+
+test("agentrouter: when every model's budget pool is exhausted all are tried in order and the client gets a 502", async () => {
+  const { router, agent } = await startAgentRouter(() => ({ status: 402, body: { error: { message: BUDGET_POOL_402 } } }));
+  try {
+    const response = await chat(router);
+    assert.equal(response.status, 502, "all targets failed — not a 503");
+    assert.deepEqual(postModels(agent), AGENT_MODELS, "every configured model was attempted, in chain order");
+
+    const trail = (await attemptTrail(router)).filter((a) => !a.skipped);
+    assert.deepEqual(trail.map((a) => a.model), AGENT_MODELS);
+    assert.ok(trail.every((a) => a.status === 402 && a.ok === false));
+
+    // Each model failed for itself, so the next request is the legitimate 503.
+    assert.equal((await chat(router)).status, 503);
+    assert.equal(postModels(agent).length, AGENT_MODELS.length, "nothing is called while every target is cooling");
+  } finally {
+    await router.close(); await agent.close();
+  }
+});
+
+test("agentrouter: a genuinely shared account failure is not retried on the sibling models", async () => {
+  const { router, agent } = await startAgentRouter(() => ({ status: 402, body: { error: { message: "Insufficient balance. Please top up your account." } } }));
+  try {
+    const response = await chat(router);
+    assert.equal(response.status, 502);
+    assert.deepEqual(postModels(agent), ["gpt-6-astra"], "the siblings share the dead account and are not called");
+
+    const states = await modelStates(router);
+    for (const model of AGENT_MODELS) assert.equal(states[model].status, "cooldown", `${model} shares the key`);
+
+    // The walk's own record shows the siblings as skipped, never as attempted.
+    const walk = await requestWalk(router);
+    assert.deepEqual(walk.map((a) => [a.model, a.skipped === true, a.skipReason ?? null]), [
+      ["gpt-6-astra", false, null],
+      ["claude-opus-5", true, "cooldown"],
+      ["claude-opus-4-8", true, "cooldown"],
+      ["deepseek-v4-flash", true, "cooldown"]
+    ]);
+  } finally {
+    await router.close(); await agent.close();
+  }
+});

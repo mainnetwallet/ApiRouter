@@ -8,6 +8,7 @@ import {
   RouteSession,
   SessionStore,
   classifyFailure,
+  describeFailure,
   isRetryableStatus,
   withFallback
 } from "../src/router.js";
@@ -137,6 +138,131 @@ test("classifyFailure reads the status, and an explicit scope wins", () => {
   assert.equal(classifyFailure(500, { scope: FAILURE_SCOPE.KEY }), FAILURE_SCOPE.KEY);
   assert.equal(classifyFailure(400, { scope: FAILURE_SCOPE.PROVIDER }), FAILURE_SCOPE.PROVIDER);
   assert.equal(classifyFailure(500, { scope: "nonsense" }), FAILURE_SCOPE.TARGET);
+});
+
+// The exact upstream text Agentrouter returned in production.
+const BUDGET_POOL_402 = "Budget pool quota has been exhausted. Please ask an administrator to increase the limit or select another budget pool.";
+
+test("an Agentrouter budget-pool 402 is target-scoped, while a bare or account-level 402 stays key-level", () => {
+  const pool = fail(402, { message: BUDGET_POOL_402 });
+  assert.equal(classifyFailure(402, pool), FAILURE_SCOPE.TARGET);
+  assert.equal(describeFailure(402, pool).kind, "budget pool exhausted");
+
+  // Genuinely shared account / credential failures keep their key scope.
+  for (const message of [
+    "Insufficient balance. Please top up your account.",
+    "Your account balance is too low",
+    "Billing issue: payment required",
+    "Account suspended"
+  ]) {
+    assert.equal(classifyFailure(402, fail(402, { message })), FAILURE_SCOPE.KEY, message);
+  }
+  assert.equal(classifyFailure(402), FAILURE_SCOPE.KEY, "no message: existing behaviour is kept");
+  assert.equal(classifyFailure(402, fail(402, { message: "" })), FAILURE_SCOPE.KEY);
+  assert.equal(describeFailure(402, fail(402, { message: "Insufficient balance" })).kind, null);
+
+  // A message that mentions both an account problem and a pool is not narrowed.
+  assert.equal(classifyFailure(402, fail(402, { message: `Account suspended. ${BUDGET_POOL_402}` })), FAILURE_SCOPE.KEY);
+});
+
+test("401 is always the credential, and a 403 is narrowed only by an explicit model message", () => {
+  // Even text that names a budget pool or a model cannot narrow a 401.
+  assert.equal(classifyFailure(401, fail(401, { message: BUDGET_POOL_402 })), FAILURE_SCOPE.KEY);
+  assert.equal(classifyFailure(401, fail(401, { message: "model not allowed" })), FAILURE_SCOPE.KEY);
+  assert.equal(classifyFailure(403, fail(403, { message: "Forbidden" })), FAILURE_SCOPE.KEY);
+  assert.equal(classifyFailure(403, fail(403, { message: "Invalid API key" })), FAILURE_SCOPE.KEY);
+  assert.equal(classifyFailure(403, fail(403, { message: "Your account does not have access to model gpt-6-astra" })), FAILURE_SCOPE.TARGET);
+  // An explicit scope from the provider adapter still wins over the message.
+  assert.equal(classifyFailure(402, fail(402, { message: BUDGET_POOL_402, scope: FAILURE_SCOPE.KEY })), FAILURE_SCOPE.KEY);
+  assert.equal(classifyFailure(402, fail(402, { message: BUDGET_POOL_402, scope: FAILURE_SCOPE.PROVIDER })), FAILURE_SCOPE.PROVIDER);
+});
+
+// All four models share provider "agentrouter" and key index 0, as in production.
+const agent = (model) => ({ provider: "agentrouter", model, keyIndex: 0, pool: "text", protocols: ["openai-chat"] });
+const agentModels = ["gpt-6-astra", "claude-opus-5", "claude-opus-4-8", "deepseek-v4-flash"];
+const agentTargets = agentModels.map(agent);
+const agentWalk = (invoke, health, cacheKey) => withFallback(
+  agentTargets, invoke, new Set([401, 402, 403, 429, 500]), new RouteSession(), health,
+  { plan: buildRoutePlan({ targets: agentTargets, chain: entries(...agentModels.map((m) => ["agentrouter", m])), cacheKey }).steps }
+);
+
+test("a budget-pool 402 on the first model cools only that model and the walk continues", async () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  const calls = [];
+  const result = await agentWalk(async (target) => {
+    calls.push(target.model);
+    if (target.model === "gpt-6-astra") throw fail(402, { message: BUDGET_POOL_402 });
+    return target.model;
+  }, health, "agent-pool-402");
+
+  assert.equal(result, "claude-opus-5");
+  assert.deepEqual(calls, ["gpt-6-astra", "claude-opus-5"]);
+  assert.ok(!health.isAvailable(agent("gpt-6-astra")), "the failed target is cooling down");
+  assert.equal(health.get(targetId(agent("gpt-6-astra"))).lastStatus, 402);
+  assert.equal(health.get(targetId(agent("gpt-6-astra"))).lastReason, "402 budget pool exhausted on gpt-6-astra");
+  assert.ok(!health.get(targetId(agent("gpt-6-astra"))).lastReason.includes("increase the limit"), "upstream text never reaches the reason");
+  for (const model of ["claude-opus-4-8", "deepseek-v4-flash"]) {
+    assert.ok(health.isAvailable(agent(model)), `${model} was never touched`);
+    assert.equal(health.get(targetId(agent(model))).status, "unknown");
+  }
+  assert.equal(health.get(targetId(agent("claude-opus-5"))).status, "healthy");
+});
+
+test("when every model hits its own budget pool the walk tries all of them, in order, and ends in a 502", async () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  const calls = [];
+  await assert.rejects(agentWalk(async (target) => {
+    calls.push(target.model);
+    throw fail(402, { message: BUDGET_POOL_402 });
+  }, health, "agent-pool-all"), (error) => {
+    assert.equal(error.status, 502, "all targets failed — not a 503");
+    assert.deepEqual(error.failures.map((f) => f.model ?? f.target.model), agentModels);
+    return true;
+  });
+  assert.deepEqual(calls, agentModels);
+});
+
+test("the request after a lone budget-pool failure is served, not answered with a 503", async () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  // First request: the budget pool 402 on gpt-6-astra, served by the next model.
+  await agentWalk(async (target) => {
+    if (target.model === "gpt-6-astra") throw fail(402, { message: BUDGET_POOL_402 });
+    return "ok";
+  }, health, "agent-next-1");
+
+  // Second request: the cooling target is skipped, its siblings are not.
+  const calls = [];
+  const result = await agentWalk(async (target) => { calls.push(target.model); return target.model; }, health, "agent-next-2");
+  assert.equal(result, "claude-opus-5");
+  assert.deepEqual(calls, ["claude-opus-5"]);
+  assert.equal(health.rank(agentTargets).length, 3, "three of four models remain routable");
+});
+
+test("a genuinely shared credential failure still cools every model on the key and stops the walk", async () => {
+  for (const [status, message] of [[401, "Invalid API key"], [402, "Insufficient balance. Please top up your account."], [403, "Forbidden"]]) {
+    resetAutomaticOrderCache();
+    const health = new HealthRegistry();
+    const calls = [];
+    await assert.rejects(agentWalk(async (target) => {
+      calls.push(target.model);
+      throw fail(status, { message });
+    }, health, `agent-shared-${status}`), (error) => {
+      assert.equal(error.status, 502);
+      return true;
+    });
+    assert.deepEqual(calls, ["gpt-6-astra"], `${status}: siblings are known-unusable and must not be retried`);
+    for (const model of agentModels) assert.ok(!health.isAvailable(agent(model)), `${status}: ${model} is cooling`);
+    assert.match(health.get(targetId(agent("claude-opus-5"))).lastReason, /applies to the whole key/);
+
+    // With every sibling correctly cooled, the next request fails closed.
+    await assert.rejects(agentWalk(async () => "never", health, `agent-shared-next-${status}`), (error) => {
+      assert.equal(error.status, 503);
+      return true;
+    });
+  }
 });
 
 test("a model-specific failure never cools down the model's siblings on the same key", async () => {

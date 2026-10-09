@@ -32,24 +32,66 @@ const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 // other models on the same key.
 const MODEL_LEVEL_STATUS_CODES = new Set([400, 404, 413, 422]);
 
+// Wording that says the shared credential or account itself is the problem. It
+// is checked first, so a message that mentions both an account problem and a
+// model/pool never gets narrowed to one target.
+const SHARED_CREDENTIAL_MESSAGE = /\b(invalid|incorrect|expired|revoked|missing|disabled|suspended|banned|deactivated)\b[^.\n]{0,40}\b(api[ _-]?key|token|credential|account)\b|\b(api[ _-]?key|token|credential|account)\b[^.\n]{0,40}\b(invalid|incorrect|expired|revoked|disabled|suspended|banned|deactivated)\b|\binsufficient\b[^.\n]{0,30}\b(balance|credits?|funds)\b|\b(account|credit) balance\b|\bbilling\b/i;
+
+// Wording that says the limit belongs to one budget pool or one model rather
+// than to the whole key: a pool is selected per model, so another model on the
+// same key can still be served from a different pool.
+const TARGET_SCOPED_MESSAGE = [
+  [/\bbudget pools?\b/i, "budget pool exhausted"],
+  [/\b(do(?:es)? not|don't|doesn't|no) (?:have )?(?:access|permission)[^.\n]{0,30}\bmodel\b/i, "no access to this model"],
+  [/\bmodel\b[^.\n]{0,60}\b(?:not (?:allowed|available|enabled|permitted|authori[sz]ed)|restricted|forbidden)\b/i, "model not permitted"],
+  [/\b(?:quota|limit|budget)\b[^.\n]{0,40}\b(?:for|on) (?:the |this |requested )*model\b/i, "model quota exhausted"]
+];
+
+// Only these statuses are ever narrowed by message. 401 is always the
+// credential, whatever the text says.
+const MESSAGE_NARROWABLE_STATUS_CODES = new Set([402, 403]);
+
+/**
+ * Classifies a failed attempt and says why, from the metadata available.
+ *
+ * Returns `{ scope, kind }`; `kind` is a short fixed label (never upstream text,
+ * which can carry anything and must not reach `/health`) set only when the
+ * message was positive evidence that narrowed a key-level status to one target.
+ */
+export function describeFailure(status, error = null) {
+  const explicit = error?.scope;
+  if (explicit === FAILURE_SCOPE.KEY || explicit === FAILURE_SCOPE.PROVIDER || explicit === FAILURE_SCOPE.TARGET) {
+    return { scope: explicit, kind: null };
+  }
+  const code = Number(status);
+  if (KEY_LEVEL_STATUS_CODES.has(code)) {
+    if (MESSAGE_NARROWABLE_STATUS_CODES.has(code) && typeof error?.message === "string") {
+      const text = error.message;
+      if (!SHARED_CREDENTIAL_MESSAGE.test(text)) {
+        for (const [pattern, kind] of TARGET_SCOPED_MESSAGE) {
+          if (pattern.test(text)) return { scope: FAILURE_SCOPE.TARGET, kind };
+        }
+      }
+    }
+    return { scope: FAILURE_SCOPE.KEY, kind: null };
+  }
+  return { scope: FAILURE_SCOPE.TARGET, kind: null };
+}
+
 /**
  * Classifies a failed attempt from the metadata actually available.
  *
  * A provider adapter that can read the upstream error body may state the scope
  * outright (`error.scope`); that wins, because it is the provider's own account
- * of what went wrong. Otherwise the status code decides, and anything
- * unrecognised is treated as target-scoped — the narrow answer, which can only
- * cost a retry, never a needlessly disabled model.
+ * of what went wrong. Otherwise the status code decides — except that a 402/403
+ * whose message shows the limit is a budget pool's or a model's, not the key's,
+ * is target-scoped. Anything unrecognised is treated as target-scoped — the
+ * narrow answer, which can only cost a retry, never a needlessly disabled model
+ * — except the credential statuses (401/402/403), which stay key-level unless
+ * the message positively says otherwise.
  */
 export function classifyFailure(status, error = null) {
-  const explicit = error?.scope;
-  if (explicit === FAILURE_SCOPE.KEY || explicit === FAILURE_SCOPE.PROVIDER || explicit === FAILURE_SCOPE.TARGET) {
-    return explicit;
-  }
-  const code = Number(status);
-  if (KEY_LEVEL_STATUS_CODES.has(code)) return FAILURE_SCOPE.KEY;
-  if (MODEL_LEVEL_STATUS_CODES.has(code)) return FAILURE_SCOPE.TARGET;
-  return FAILURE_SCOPE.TARGET;
+  return describeFailure(status, error).scope;
 }
 
 const SIZE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
@@ -240,9 +282,13 @@ export async function withFallback(
       // cannot carry, say — is not unhealthy, so it is not cooled down.
       if (error?.skipCooldown) continue;
 
-      health.markFailure(target, status, cooldownOptions(status));
-
-      const scope = classifyFailure(status, error);
+      const { scope, kind } = describeFailure(status, error);
+      // A failure narrowed to this target by its message carries a fixed,
+      // non-upstream reason so the Models page can say why it is cooling down.
+      health.markFailure(target, status, {
+        ...cooldownOptions(status),
+        ...(kind ? { reason: `${status} ${kind} on ${target.model}` } : {})
+      });
       if (scope === FAILURE_SCOPE.TARGET) continue;
 
       // Key- and account-level failures describe the credential, so the sibling
