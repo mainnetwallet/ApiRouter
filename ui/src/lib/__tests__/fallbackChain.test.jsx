@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  addEntry, chainSummary, entryId, entryState, filterCatalogue, indexCatalogue, isUnusableKeys,
+  addEntry, chainSummary, eligibleKeys, entryId, entryState, filterCatalogue, indexCatalogue,
   keysLabel, latencyOf, moveEntry, phaseLabel, removeEntry, sameChain, setKeys, toEntry, toggleEnabled
 } from "../fallbackChain.js";
 
@@ -108,9 +108,37 @@ describe("fallback chain presentation", () => {
     const unusable = entryState({ ...toEntry(a), keys: [] }, a);
     expect(unusable.key).toBe("unusable");
     expect(unusable.tone).toBe("danger");
-    expect(isUnusableKeys([])).toBe(true);
-    expect(isUnusableKeys(null)).toBe(false);
-    expect(isUnusableKeys([0])).toBe(false);
+  });
+
+  it("reports a selected key the provider no longer has as unusable, not Active", () => {
+    // The selection is non-empty, so a length check would call it a restriction
+    // and report a healthy entry — but `a` has only keys 0 and 1, so key 5
+    // matches nothing, the planner resolves the entry to zero targets, and the
+    // pool fails closed. The panel must not promise that routing.
+    const stale = { ...toEntry(a), keys: [5] };
+    expect(eligibleKeys(stale, a)).toEqual([]);
+    const state = entryState(stale, a);
+    expect(state.key).toBe("unusable");
+    expect(state.key).not.toBe("active");
+    expect(state.label).toMatch(/none of the selected keys exist/);
+    expect(keysLabel(stale, a)).toBe("no eligible key selected");
+
+    // A partly stale selection keeps the keys that DO exist.
+    expect(eligibleKeys({ ...toEntry(a), keys: [1, 5] }, a)).toEqual([1]);
+    expect(entryState({ ...toEntry(a), keys: [1, 5] }, a).key).toBe("active");
+  });
+
+  it("resolves eligibility from the provider inventory, not from the selection alone", () => {
+    // null is unrestricted: every key the provider has.
+    expect(eligibleKeys(toEntry(a), a)).toEqual([0, 1]);
+    expect(eligibleKeys({ ...toEntry(a), keys: null }, a)).toEqual([0, 1]);
+    // An explicit selection is intersected with that inventory.
+    expect(eligibleKeys({ ...toEntry(a), keys: [0] }, a)).toEqual([0]);
+    // [] and a stale index both resolve to nothing.
+    expect(eligibleKeys({ ...toEntry(a), keys: [] }, a)).toEqual([]);
+    expect(eligibleKeys({ ...toEntry(a), keys: [5] }, a)).toEqual([]);
+    // A model with no inventory can permit nothing, however the entry is written.
+    expect(eligibleKeys(toEntry(a), { ...a, keyIndexes: [] })).toEqual([]);
   });
 
   it("describes the key selection in words, not just a count", () => {
@@ -160,6 +188,23 @@ describe("fallback chain presentation", () => {
     const recovered = chainSummary([{ ...toEntry(a), keys: [] }, toEntry(a)], [a], "fixed");
     expect(recovered.failClosed).toBe(false);
     expect(recovered.count).toBe(1);
+
+    // A non-empty selection naming only keys the provider no longer has is the
+    // same situation: zero eligible keys, so the chain cannot serve.
+    const stale = chainSummary([{ ...toEntry(a), keys: [5] }], [a], "fixed");
+    expect(stale.failClosed).toBe(true);
+    expect(stale.resolved ?? stale.count).toBe(0);
+    expect(stale.source).toBe("fail-closed");
+
+    // A mixed chain stays usable while ANY enabled entry has an eligible key.
+    const mixed = chainSummary([{ ...toEntry(a), keys: [5] }, toEntry(b)], [a, b], "fixed");
+    expect(mixed.failClosed).toBe(false);
+    expect(mixed.count).toBe(1);
+    expect(mixed.source).toBe("chain");
+
+    // A valid restriction is eligible, and a disabled entry never counts.
+    expect(chainSummary([{ ...toEntry(a), keys: [1] }], [a], "fixed").failClosed).toBe(false);
+    expect(chainSummary([{ ...toEntry(a), keys: [1], enabled: false }], [a], "fixed").failClosed).toBe(true);
   });
 
   it("uses one vocabulary for the routing phases", () => {

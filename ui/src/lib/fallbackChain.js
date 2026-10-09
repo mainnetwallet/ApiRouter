@@ -85,9 +85,28 @@ export function setKeys(list, index, keys) {
  */
 const keySet = (value) => (Array.isArray(value) ? [...value].sort((a, b) => a - b) : null);
 
-/** An entry whose restriction permits no key, so it can never be routed to. */
-export function isUnusableKeys(keys) {
-  return Array.isArray(keys) && keys.length === 0;
+/**
+ * The key indexes an entry may actually use, given what the provider has now.
+ *
+ * The entry names a subset; the catalogue group reports which indexes exist.
+ * Only the intersection can be routed to, so this — not the length of the
+ * entry's own list — is the only correct basis for calling an entry usable:
+ *
+ *   keys: null    -> every index the provider has
+ *   keys: [0, 2]  -> those of them the provider still has
+ *   keys: []      -> none
+ *   keys: [5]     -> none, when the provider has only 0 and 1
+ *
+ * The last case is the one worth stating: the selection is non-empty, so a
+ * length check calls it a restriction, but it matches nothing, so the planner
+ * resolves the entry to zero eligible keys and the pool fails closed. The UI
+ * has to reach the same conclusion from the same intersection.
+ */
+export function eligibleKeys(entry, group) {
+  const available = Array.isArray(group?.keyIndexes) ? group.keyIndexes : [];
+  if (!Array.isArray(entry?.keys)) return available;
+  const chosen = new Set(entry.keys);
+  return available.filter((key) => chosen.has(key));
 }
 
 /** True when two chains would be sent identically, so the panel can spot a no-op save. */
@@ -120,7 +139,7 @@ export function keysLabel(entry, group) {
   const available = Array.isArray(group?.keyIndexes) ? group.keyIndexes : [];
   if (available.length === 0) return "no keys configured";
   if (!Array.isArray(entry?.keys)) return available.length === 1 ? "1 key" : `all ${available.length} keys`;
-  const chosen = entry.keys.filter((key) => available.includes(key));
+  const chosen = eligibleKeys(entry, group);
   return chosen.length === 0 ? "no eligible key selected" : `keys ${chosen.join(", ")}`;
 }
 
@@ -144,11 +163,19 @@ export function latencyOf(group) {
 export function entryState(entry, group) {
   if (!group) return { key: "missing", label: "Not configured in this pool", tone: "danger" };
   if (entry.enabled === false) return { key: "disabled", label: "Disabled — keeps its place, not routed to", tone: "muted" };
-  // An unreadable key restriction permits nothing, so the entry is unusable
-  // however healthy the provider is. Saying "Active" here would promise a
-  // routing the gateway will refuse.
-  if (isUnusableKeys(entry.keys)) {
-    return { key: "unusable", label: "No eligible key — this entry cannot be used", tone: "danger" };
+  // Usable only if the selection intersects what the provider actually has. A
+  // non-empty selection that matches nothing is exactly as unroutable as an
+  // empty one, so neither may be reported as Active: the gateway would refuse
+  // the routing this page promised.
+  if (eligibleKeys(entry, group).length === 0) {
+    const stale = Array.isArray(entry.keys) && entry.keys.length > 0;
+    return {
+      key: "unusable",
+      label: stale
+        ? "No eligible key — none of the selected keys exist on this provider"
+        : "No eligible key — this entry cannot be used",
+      tone: "danger"
+    };
   }
   if (group.available === false) return { key: "cooldown", label: "Cooling down — skipped until it recovers", tone: "warn" };
   return { key: "active", label: "Active", tone: group.status === "healthy" ? "ok" : "neutral" };
@@ -180,9 +207,17 @@ export function chainSummary(entries, catalogue = [], mode) {
     };
   }
 
-  const usable = saved.filter((entry) => (
-    entry.enabled !== false && !isUnusableKeys(entry.keys) && index.has(entryId(entry))
-  ));
+  // Usable means: enabled, its model is still in this pool, AND at least one of
+  // the keys it selects still exists on that provider. Checking only that the
+  // selection is non-empty would count a stale index — one the provider no
+  // longer has — as a working entry, while the planner resolves it to zero
+  // targets and the pool fails closed. An explicit `keys: []` falls out of the
+  // same intersection: it permits no key either.
+  const usable = saved.filter((entry) => {
+    if (entry.enabled === false) return false;
+    const group = index.get(entryId(entry));
+    return Boolean(group) && eligibleKeys(entry, group).length > 0;
+  });
   if (usable.length === 0) {
     return {
       source: "fail-closed",

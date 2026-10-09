@@ -315,10 +315,13 @@ export function createApi({
   /**
    * Validates one entry's `keys` exactly as the operator sent it.
    *
-   * `keys` is the one field where a lenient reading is dangerous. Anything not
-   * understood here would be normalized to `null`, which means EVERY key, so a
-   * typo — or a value that merely coerces to an index, like `true` or `"1"` —
-   * would silently widen the restriction instead of failing.
+   * `keys` is the one field where a lenient reading is dangerous: `null` means
+   * EVERY key, so mistaking an unusable restriction for "no restriction" can
+   * only widen routing. The store no longer makes that mistake on its own — an
+   * unreadable persisted value normalizes to an empty restriction that permits
+   * nothing — and this is the boundary that stops such a value being written in
+   * the first place. A restriction that cannot be honoured is a 400, rather
+   * than a chain that silently routes nowhere.
    *
    * Absent and explicit `null` still mean every key: that is the documented way
    * to say it, and it is what the panel sends for an unrestricted model.
@@ -647,9 +650,12 @@ export function createApi({
             keyIndexes.get(id).add(target.keyIndex);
           }
 
-          // Checked against what was SENT, not the normalized form: a key
-          // restriction the store would quietly discard is read as "every key",
-          // so anything malformed here must be refused rather than widened.
+          // Checked against what was SENT, not the normalized form. The store
+          // reads a file on disk forgivingly on purpose — a malformed
+          // restriction becomes an unusable one (permitting nothing) and a stale
+          // index becomes one that matches no key — but neither is something an
+          // operator should be able to save from here, so a write that cannot be
+          // honoured is refused rather than stored.
           const unknown = [];
           const badKeys = [];
           for (const raw of body.entries) {

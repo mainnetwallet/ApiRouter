@@ -1212,3 +1212,45 @@ test("a persisted null key restriction still means every configured key", async 
     await router.close(); await groq.close();
   }
 });
+
+test("a persisted key index the provider no longer has fails closed and is reported as such", async () => {
+  // Well-formed but STALE: key 5 was configured once, and is not any more. The
+  // file keeps it; nothing may route through it, and the panel must not call
+  // this entry Active.
+  const dir = tmpDir("stale-index");
+  const chainFile = path.join(dir, "chain.json");
+  fs.writeFileSync(chainFile, JSON.stringify({
+    version: 2,
+    mode: "fixed",
+    text: [{ provider: "groq", model: "m1", keys: [5], enabled: true }],
+    vision: []
+  }));
+
+  const groq = await startMockUpstream(() => ok("m1"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    FALLBACK_CHAIN_FILE: chainFile,
+    MANUAL_SELECTION_FILE: path.join(dir, "manual.json")
+  });
+  try {
+    // The restriction is preserved exactly as written, so the panel can show
+    // the operator what it is up against...
+    const state = await getFallback(router);
+    assert.deepEqual(state.chain.text, [{ provider: "groq", model: "m1", keys: [5], enabled: true }]);
+    // ...alongside the inventory it has to be intersected with.
+    assert.deepEqual(state.catalogue.text[0].keyIndexes, [0, 1]);
+
+    // Nothing can serve, and no key is touched.
+    const response = await chat(router);
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.type, "fallback_chain_unusable");
+    assert.deepEqual(posts(groq), []);
+
+    // And /health agrees the chain, not the provider, is at fault.
+    const payload = await healthPayload(router);
+    assert.equal(payload.fallback.pools.text.failClosed, true);
+    assert.equal(payload.fallback.pools.text.resolved, 1);
+  } finally {
+    await router.close(); await groq.close();
+  }
+});
