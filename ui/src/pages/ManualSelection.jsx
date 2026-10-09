@@ -117,7 +117,7 @@ export default function ManualSelection() {
             {draft.length === 0 ? (
               <EmptyState title="Nothing selected">Existing routing is used unchanged.</EmptyState>
             ) : (
-              <ol style={{ margin: 0, paddingLeft: "var(--sp-5)" }}>
+              <ol style={{ margin: 0, paddingLeft: "var(--sp-5)", maxHeight: 420, overflow: "auto" }}>
                 {draft.map((entry, index) => (
                   <li key={entryId(entry)} draggable
                     onDragStart={() => setDragFrom(index)}

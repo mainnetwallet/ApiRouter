@@ -217,6 +217,9 @@
 .split--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .split--sidebar { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
 
+/* Long model lists scroll inside their own box instead of stretching the page. */
+.scroll-list { max-height: min(60vh, 520px); overflow-y: auto; overscroll-behavior: contain; }
+
 /* Fallback page: each pool is a half-width column, so its inner sidebar split stacks. */
 .fallback-pools { align-items: start; }
 .fallback-pools .split--sidebar { grid-template-columns: minmax(0, 1fr); }

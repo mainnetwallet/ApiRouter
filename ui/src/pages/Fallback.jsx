@@ -273,7 +273,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
                 <span className="tiny dim">fixed route order</span>
               </div>
             </div>
-            <div className="panel__body">
+            <div className="panel__body scroll-list">
               {preview.error ? (
                 <ErrorState error={preview.error} onRetry={preview.reload} compact />
               ) : preview.loading && !preview.data ? (
@@ -292,7 +292,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
             <div className="panel__header">
               <span className="panel__title">Skipped {pool} targets</span>
             </div>
-            <div className="panel__body">
+            <div className="panel__body scroll-list">
               {unavailable.length === 0 ? (
                 <span className="dim small">Every compatible target is eligible.</span>
               ) : (
@@ -348,7 +348,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
                 </div>
               ) : null}
             </div>
-            <div className="panel__body">
+            <div className="panel__body scroll-list">
               {selected ? (
                 <FallbackTraceAnimation attempts={selected.attempts} outcome={selected.outcome} />
               ) : (
