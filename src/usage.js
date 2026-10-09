@@ -7,7 +7,7 @@
  * Shapes understood (the ones this gateway speaks):
  *   OpenAI chat       usage.prompt_tokens / completion_tokens / total_tokens
  *   OpenAI Responses  usage.input_tokens  / output_tokens     / total_tokens
- *   Anthropic         usage.input_tokens  / output_tokens
+ *   Anthropic         usage.input_tokens + cache_creation/cache_read_input_tokens / output_tokens
  *   Gemini            usageMetadata.promptTokenCount / candidatesTokenCount + thoughtsTokenCount / totalTokenCount
  *
  * `tokens` is the provider's own total when it reports one; otherwise it is
@@ -42,6 +42,20 @@ export function normalizeUsage(raw) {
 }
 
 /**
+ * Anthropic `input_tokens` counts only the tokens after the last cache breakpoint.
+ * Tokens written to or read from the prompt cache are reported separately, and
+ * Anthropic's formula for the real input is the sum of all three. OpenAI and Gemini
+ * have no such fields (their prompt counts already include cached tokens), so this
+ * adds nothing for them. Null when `input_tokens` is absent.
+ */
+function anthropicInput(u) {
+  if (!isCount(u.input_tokens)) return null;
+  return [u.cache_creation_input_tokens, u.cache_read_input_tokens]
+    .filter(isCount)
+    .reduce((sum, value) => sum + value, u.input_tokens);
+}
+
+/**
  * Gemini output = response candidates + thinking tokens. Google defines
  * `totalTokenCount` as prompt + thoughts + candidates and bills thinking as output,
  * so leaving `thoughtsTokenCount` out would make input + output fall short of the total.
@@ -56,7 +70,7 @@ function geminiOutput(u) {
 function fromUsageObject(u) {
   if (!u || typeof u !== "object") return null;
   const found = {
-    inputTokens: firstCount(u.prompt_tokens, u.input_tokens, u.promptTokenCount),
+    inputTokens: firstCount(u.prompt_tokens, anthropicInput(u), u.promptTokenCount),
     outputTokens: firstCount(u.completion_tokens, u.output_tokens, geminiOutput(u)),
     tokens: firstCount(u.total_tokens, u.totalTokenCount)
   };
