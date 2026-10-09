@@ -8,7 +8,7 @@
  *   OpenAI chat       usage.prompt_tokens / completion_tokens / total_tokens
  *   OpenAI Responses  usage.input_tokens  / output_tokens     / total_tokens
  *   Anthropic         usage.input_tokens  / output_tokens
- *   Gemini            usageMetadata.promptTokenCount / candidatesTokenCount / totalTokenCount
+ *   Gemini            usageMetadata.promptTokenCount / candidatesTokenCount + thoughtsTokenCount / totalTokenCount
  *
  * `tokens` is the provider's own total when it reports one; otherwise it is
  * input + output, and only when BOTH are known.
@@ -41,12 +41,23 @@ export function normalizeUsage(raw) {
   return { inputTokens, outputTokens, tokens };
 }
 
+/**
+ * Gemini output = response candidates + thinking tokens. Google defines
+ * `totalTokenCount` as prompt + thoughts + candidates and bills thinking as output,
+ * so leaving `thoughtsTokenCount` out would make input + output fall short of the total.
+ * Null when the object reports neither.
+ */
+function geminiOutput(u) {
+  const parts = [u.candidatesTokenCount, u.thoughtsTokenCount].filter(isCount);
+  return parts.length > 0 ? parts.reduce((sum, value) => sum + value, 0) : null;
+}
+
 /** One provider `usage` / `usageMetadata` object, or null when it reports nothing. */
 function fromUsageObject(u) {
   if (!u || typeof u !== "object") return null;
   const found = {
     inputTokens: firstCount(u.prompt_tokens, u.input_tokens, u.promptTokenCount),
-    outputTokens: firstCount(u.completion_tokens, u.output_tokens, u.candidatesTokenCount),
+    outputTokens: firstCount(u.completion_tokens, u.output_tokens, geminiOutput(u)),
     tokens: firstCount(u.total_tokens, u.totalTokenCount)
   };
   return hasUsage(found) ? found : null;
