@@ -154,10 +154,21 @@ test("has_more without a followable cursor is indeterminate, not an absence clai
 test("nextPageOf handles malformed pagination metadata without inventing a request", () => {
   assert.deepEqual(nextPageOf({ nextPageToken: "t" }), { token: "t", more: true });
   assert.deepEqual(nextPageOf({ next_page_token: "t" }), { token: "t", more: true });
-  // Empty / non-string tokens are not cursors.
+  // An empty token is the documented end of a Google list, not a malformed one.
   assert.deepEqual(nextPageOf({ nextPageToken: "" }), { token: null, more: false });
-  assert.deepEqual(nextPageOf({ nextPageToken: 42 }), { token: null, more: false });
-  assert.deepEqual(nextPageOf({ nextPageToken: {} }), { token: null, more: false });
+  assert.deepEqual(nextPageOf({ nextPageToken: null }), { token: null, more: false });
+  // Present but UNUSABLE still means the provider was signalling further pages.
+  // Reading that as "no more pages" is what produced a false missing-model
+  // result, so anything non-string must report `more`.
+  assert.deepEqual(nextPageOf({ nextPageToken: 42 }), { token: null, more: true });
+  assert.deepEqual(nextPageOf({ nextPageToken: {} }), { token: null, more: true });
+  assert.deepEqual(nextPageOf({ nextPageToken: [] }), { token: null, more: true });
+  assert.deepEqual(nextPageOf({ next_page_token: 7 }), { token: null, more: true });
+  // A non-boolean has_more is as unusable as a malformed cursor.
+  assert.deepEqual(nextPageOf({ has_more: "true" }), { token: null, more: true });
+  assert.deepEqual(nextPageOf({ has_more: 1 }), { token: null, more: true });
+  // Only an explicit false ends the catalogue.
+  assert.deepEqual(nextPageOf({ has_more: false }), { token: null, more: false });
   assert.deepEqual(nextPageOf({ has_more: true }), { token: null, more: true });
   assert.deepEqual(nextPageOf({}), { token: null, more: false });
   assert.deepEqual(nextPageOf(null), { token: null, more: false });
@@ -503,4 +514,163 @@ test("a probe result with no catalogue field at all records an indeterminate obs
   const state = healthRegistry.ensureTarget(t);
   assert.equal(state.modelListed, null);
   assert.equal(state.modelListedConfirmed, false, "the earlier confirmation is still available");
+});
+
+// ============================================ follow-up page authentication
+
+/**
+ * Regression: the follow-up request was built with `page.headers` — the RESPONSE
+ * headers — instead of the request headers. The credential therefore never
+ * reached any page after the first, so a paginated catalogue always ended
+ * "unauthorized" and the walk could never confirm anything.
+ */
+
+const geminiTarget = (model = "wanted") => ({
+  provider: "gemini",
+  model,
+  baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+  apiKey: "secret-gemini-key",
+  protocols: ["gemini"],
+  keyIndex: 0
+});
+
+test("a follow-up page request carries the REQUEST headers, including the credential", async () => {
+  const seen = [];
+  const fetchImpl = async (url, options) => {
+    seen.push({ url, options });
+    const first = seen.length === 1;
+    return {
+      status: 200,
+      // Deliberately response-shaped headers, to prove they are not recycled.
+      headers: { get: (name) => (String(name).toLowerCase() === "content-type" ? "application/json" : null) },
+      text: async () => (first
+        ? json({ models: [{ name: "models/other" }], nextPageToken: "page-2" })
+        : json({ models: [{ name: "models/wanted" }] })),
+      body: { cancel: async () => {} }
+    };
+  };
+
+  const result = await probeTargetHealth(geminiTarget(), { fetchImpl, timeoutMs: 500 });
+  assert.equal(result.modelListed, true, "the page-2 model must be reachable");
+  assert.equal(seen.length, 2);
+
+  // The probe's own request headers, verbatim, on BOTH pages.
+  assert.equal(seen[1].options.headers["x-goog-api-key"], "secret-gemini-key", "the follow-up page was sent unauthenticated");
+  assert.equal(seen[1].options.headers, seen[0].options.headers, "the follow-up did not reuse the probe's request headers");
+  assert.equal(seen[1].options.method, "GET");
+  assert.equal(seen[1].options.signal, seen[0].options.signal, "the follow-up must share the probe signal so the timeout bounds it");
+});
+
+test("the follow-up URL carries the cursor and keeps the original path", async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(url);
+    const first = seen.length === 1;
+    return {
+      status: 200,
+      headers: { get: () => null },
+      text: async () => (first ? json({ models: [{ name: "models/a" }], nextPageToken: "tok/with+chars" }) : json({ models: [{ name: "models/wanted" }] })),
+      body: { cancel: async () => {} }
+    };
+  };
+  await probeTargetHealth(geminiTarget(), { fetchImpl, timeoutMs: 500 });
+  const followUp = new URL(seen[1]);
+  assert.equal(followUp.pathname, "/v1beta/models", "the endpoint path must survive pagination");
+  assert.equal(followUp.searchParams.get("pageToken"), "tok/with+chars", "the cursor must be encoded as a query parameter");
+});
+
+test("a follow-up that the provider rejects as unauthorized is indeterminate, never a false absence", async () => {
+  // This is exactly what the bug produced: an unauthenticated second page.
+  const fetchImpl = pages(
+    streamed(json({ models: [{ name: "models/a" }], nextPageToken: "p2" })),
+    plain(401, json({ error: { message: "API key not valid" } }))
+  );
+  assert.equal((await probe("wanted", fetchImpl)).modelListed, null);
+});
+
+// ============================================ malformed pagination metadata
+
+test("an unusable cursor on the page yields null, not a missing-model result", async () => {
+  // Present but non-string: the provider was pointing at further pages this
+  // router cannot request. That is unverifiable, not proof of absence.
+  for (const token of [42, {}, [], true]) {
+    const fetchImpl = pages(plain(200, json({ models: [{ name: "models/a" }], nextPageToken: token })));
+    const result = await probe("wanted", fetchImpl);
+    assert.equal(result.modelListed, null, `nextPageToken=${JSON.stringify(token)} produced ${result.modelListed}`);
+    assert.equal(result.ok, true, "an unreadable catalogue is not a provider failure");
+    assert.equal(fetchImpl.calls.length, 1, "no request may be invented from a malformed cursor");
+  }
+});
+
+test("a non-boolean has_more yields null, not a missing-model result", async () => {
+  for (const hint of ["true", 1, "yes", {}]) {
+    const fetchImpl = pages(plain(200, json({ data: [{ id: "a" }], has_more: hint })));
+    assert.equal((await probe("wanted", fetchImpl)).modelListed, null, `has_more=${JSON.stringify(hint)}`);
+  }
+});
+
+test("an explicitly false has_more with no cursor is a genuine end-of-catalogue", async () => {
+  const fetchImpl = pages(plain(200, json({ data: [{ id: "a" }], has_more: false })));
+  assert.equal((await probe("wanted", fetchImpl)).modelListed, false);
+});
+
+test("an empty cursor is a genuine end-of-catalogue, not malformed", async () => {
+  // Google documents an empty nextPageToken as the end of the list.
+  const fetchImpl = pages(plain(200, json({ models: [{ name: "models/a" }], nextPageToken: "" })));
+  assert.equal((await probe("wanted", fetchImpl)).modelListed, false);
+});
+
+test("malformed metadata on a LATER page also yields null rather than false", async () => {
+  const fetchImpl = pages(
+    streamed(json({ models: [{ name: "models/a" }], nextPageToken: "p2" })),
+    streamed(json({ models: [{ name: "models/b" }], nextPageToken: { nested: "nonsense" } }))
+  );
+  assert.equal((await probe("wanted", fetchImpl)).modelListed, null);
+});
+
+test("a malformed cursor never becomes a stale `confirmed` value either", async () => {
+  const registry = new HealthRegistry();
+  const t = target("wanted");
+  // A malformed catalogue is an indeterminate observation, so it must not
+  // refresh (or be recorded as) a confirmation.
+  registry.recordHealthCheck(t, { ok: true, status: 200, modelListed: null }, 2000);
+  const state = registry.ensureTarget(t);
+  assert.equal(state.modelListed, null);
+  assert.equal(state.modelListedConfirmed, null);
+});
+
+// ============================================ bounds stay correct across pages
+
+test("a follow-up page that never answers is bounded by the probe timeout", async () => {
+  let first = true;
+  const fetchImpl = (url, options) => {
+    if (first) {
+      first = false;
+      return Promise.resolve(streamed(json({ models: [{ name: "models/a" }], nextPageToken: "p2" })));
+    }
+    // Never answers, but honours the signal the way the platform does.
+    return new Promise((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+    });
+  };
+
+  const started = Date.now();
+  const result = await probeTargetHealth(geminiTarget(), { fetchImpl, timeoutMs: 80 });
+  assert.ok(Date.now() - started < 3000, "a stalled follow-up page must not hang the probe");
+  assert.equal(result.modelListed, null);
+  assert.equal(result.ok, true, "the first page answered, so the endpoint is healthy");
+});
+
+test("the byte budget is TOTAL across pages: an oversized follow-up page is cancelled", async () => {
+  const big = json({ models: [{ name: "models/b" }], pad: "x".repeat(MAX_MODEL_LIST_BYTES * 2) });
+  const second = streamed(big);
+  let call = 0;
+  const fetchImpl = async () => (++call === 1
+    ? streamed(json({ models: [{ name: "models/a" }], nextPageToken: "p2" }))
+    : second);
+
+  const result = await probeTargetHealth(geminiTarget(), { fetchImpl, timeoutMs: 500 });
+  assert.equal(result.modelListed, null);
+  assert.equal(second.state.cancelled, true, "the oversized follow-up body was not cancelled");
+  assert.ok(second.state.offset < Buffer.byteLength(big), "the oversized follow-up body was buffered whole");
 });

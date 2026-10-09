@@ -152,15 +152,36 @@ export function modelInCatalogue(ids, model) {
  * `token` is a page this probe can actually request (`nextPageToken`, the
  * documented cursor on Gemini's `models.list`). `more` is true whenever the page
  * says further models exist — including a shape whose cursor this router cannot
- * follow, such as OpenAI's `has_more` without a token. A page that reports
- * `more` without a usable `token` is not proof that the model is absent, so it
- * is reported as "cannot tell" rather than "missing".
+ * follow, such as a malformed token or OpenAI's `has_more` without one. A page
+ * that reports `more` without a usable `token` is not proof that the model is
+ * absent, so it is reported as "cannot tell" rather than "missing".
+ *
+ * The rule for anything present but unusable is deliberately `more: true`. A
+ * provider that was trying to tell us about further pages must never be read as
+ * having told us there are none.
  */
 export function nextPageOf(body) {
   if (!body || typeof body !== "object") return { token: null, more: false };
-  const token = body.nextPageToken ?? body.next_page_token;
-  if (typeof token === "string" && token) return { token, more: true };
-  return { token: null, more: body.has_more === true };
+
+  // `undefined` and `null` both mean the field was not set. An empty string is
+  // the documented end of a Google list, not a malformed cursor, so it is
+  // treated as absent too and the `has_more` hint below still gets a say.
+  const raw = body.nextPageToken ?? body.next_page_token;
+  if (raw !== undefined && raw !== null && raw !== "") {
+    // Present but not a string: the provider signalled further pages in a form
+    // this router cannot follow, so the catalogue's completeness is unverified.
+    if (typeof raw !== "string") return { token: null, more: true };
+    return { token: raw, more: true };
+  }
+
+  // The OpenAI-style hint carries no way to ask for the next page, and a
+  // non-boolean value is as unusable as a malformed cursor. Only an explicit
+  // `false` is evidence that the catalogue ended.
+  if (body.has_more !== undefined && body.has_more !== null) {
+    return { token: null, more: body.has_more !== false };
+  }
+
+  return { token: null, more: false };
 }
 
 /** The probe URL for a follow-up page, or null when the URL cannot be extended. */
@@ -235,6 +256,8 @@ async function readBoundedBody(response, limit) {
  *
  *   - the first page is unreadable, oversized, non-200 or not a known shape;
  *   - a later page cannot be fetched, is not OK, or fails to parse;
+ *   - a page advertises further pages in a form this router cannot follow
+ *     (a malformed cursor, or `has_more` with no token);
  *   - the page budget is exhausted, or the remaining byte budget is gone, while
  *     the provider is still advertising further pages.
  *
@@ -242,8 +265,8 @@ async function readBoundedBody(response, limit) {
  * it" — never "the model was not on the first page". Gemini serves 50 models per
  * page by default, so a busy account routinely has more.
  *
- * Follow-up pages reuse the probe's own `fetchImpl` and `signal`, so the probe
- * timeout bounds the whole walk.
+ * Follow-up pages reuse the probe's own `fetchImpl`, `headers` and `signal`, so
+ * the request stays authenticated and the probe timeout bounds the whole walk.
  */
 async function readModelListing(response, model, { url, headers, fetchImpl, signal } = {}) {
   if (Number(response?.status) !== 200) return null;
@@ -283,7 +306,12 @@ async function readModelListing(response, model, { url, headers, fetchImpl, sign
 
     let nextResponse;
     try {
-      nextResponse = await fetchImpl(nextUrl, { method: "GET", headers: page.headers, signal });
+      // The REQUEST headers, not `page.headers`: `page` is the response, so its
+      // `headers` are the provider's own response headers. Sending those would
+      // drop the credential (`x-goog-api-key` / `Authorization`) and hand the
+      // provider its own `content-type`, `date` and `server` back as request
+      // headers — so every follow-up page failed as unauthorized.
+      nextResponse = await fetchImpl(nextUrl, { method: "GET", headers, signal });
     } catch {
       return null;
     }
