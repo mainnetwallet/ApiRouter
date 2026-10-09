@@ -412,7 +412,14 @@ describe("rendering safety", () => {
 describe("the card", () => {
   it("shows the time, state, pool, call number, request id, then the model and the key/status/time", () => {
     const html = render(rowsOf(attempt(1, { keyIndex: 3, callIndex: 2 })));
-    expect(html).toContain("14:02:12".slice(0, 3)); // a clock is present
+    // The clock is local wall-clock time, so the expected value is derived from
+    // the attempt's own start rather than written as a literal: "14:02:12" is
+    // T0 in UTC, and asserting it only passes on a machine running in UTC.
+    const started = new Date(T0 + 1000);
+    const pad = (value) => String(value).padStart(2, "0");
+    expect(html).toContain(
+      `${pad(started.getHours())}:${pad(started.getMinutes())}:${pad(started.getSeconds())}`
+    );
     expect(html).toContain("SUCCESS");
     expect(html).toContain("TEXT");
     expect(html).toContain("Call #2");
