@@ -115,9 +115,11 @@ MANUAL (UI order)  ->  PRIORITY (env)  ->  NORMAL fallback
 - After all manual candidates fail the existing priority and normal fallback
   continue (targets already tried are skipped).
 - Empty list = no manual phase and unchanged routing. While a manual list is
-  active it leads in its exact order, so the sticky target is not placed ahead
-  of it (sticky works as before when manual selection is empty). Pinned
-  requests stay strict and ignore it.
+  active it leads priority and normal fallback in its exact order. Sticky still
+  applies, but only inside the selection: the last good manual target (then the
+  other keys of its model) is tried first and the saved order continues. A
+  sticky target outside the selection is ignored. Pinned requests stay strict
+  and ignore it.
 - API: `GET/PUT /api/manual-selection`, `DELETE /api/manual-selection?pool=`.
   `/api/router/preview` shows the real order (phase `manual`).
 
@@ -267,7 +269,7 @@ If absent, the router creates a UUID and returns:
 x-multi-ai-session-id: <session-id>
 ```
 
-A successful target becomes the session's sticky target for 20 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, the other keys of the same provider/model are tried next (key order), then the priority models listed after the sticky model (priority resumes there and never goes back to earlier entries; with no priority sticky, the whole list applies), then the normal fallback. Requests without the header share one default session per protocol and pool. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders the priority list or the normal fallback list.
+A successful target becomes the session's sticky target for 20 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, the other keys of the same provider/model are tried next (key order), then the priority models (when the sticky model is a priority entry, the entries ranked above it are tried first, so a recovered higher-priority model takes traffic back once its cooldown ends; the entries below it follow; with no priority sticky, the whole list applies), then the normal fallback. Requests without the header share one default session per protocol and pool. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders the priority list or the normal fallback list.
 
 ## Security
 

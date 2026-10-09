@@ -154,7 +154,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
       key: "ranking",
       label: "Route order",
       detail: plan.manualCount > 0
-        ? `${plan.manualCount} manually selected model(s) first, in saved order (every eligible key of a model before the next); then ${plan.priorityCount} priority model(s), then Provider -> Key -> Models. Sticky is not applied while manual selection is active`
+        ? `${plan.manualCount} manually selected model(s) first, in saved order (every eligible key of a model before the next); then ${plan.priorityCount} priority model(s), then Provider -> Key -> Models. Sticky only reorders inside the manual selection`
         : plan.priorityCount > 0
         ? `${plan.priorityCount} priority target(s) first, in TEXT_/VISION_PRIORITY_MODELS order; then Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets`
         : "no priority configured; Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets",
@@ -165,7 +165,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
       key: "sticky",
       label: "Session preference",
       detail: plan.manualCount > 0
-        ? "manual selection is active, so it leads in its saved order and sticky is not applied"
+        ? "manual selection is active and leads in its saved order; a valid sticky target inside it is tried first"
         : plan.sticky
         ? "valid sticky target (20-minute TTL) is the first phase; priority and normal fallback follow unchanged"
         : stickyTargetId

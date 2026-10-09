@@ -10,7 +10,9 @@ import { targetId } from "./health.js";
  * applied while the plan is walked, against the one shared HealthRegistry.
  *
  *   MANUAL phase     operator-selected models (UI), exact saved order, optional; when
- *                    present it leads everything and sticky is not applied
+ *                    present it leads priority/fallback. Sticky still applies but only
+ *                    inside the selection: the last good manual target (then the other
+ *                    keys of its model) is tried first, then the saved order continues.
  *   PRIORITY phase   TEXT_/VISION_PRIORITY_MODELS entries, in exactly the configured order
  *   FALLBACK phase   Provider -> Key -> Models (config order) -> next Key
  *                    -> next Provider. Each key restarts at its own first model.
@@ -18,8 +20,10 @@ import { targetId } from "./health.js";
  *   STICKY phase    the session's last good target, then the OTHER keys of that same
  *                   provider/model (key order), only while its TTL is valid.
  *                   When the sticky model is itself a priority entry, the priority
- *                   phase then CONTINUES from it (A,B,C,D with sticky B -> C, D);
- *                   priority entries listed before it are not revisited.
+ *                   entries ranked ABOVE it are still tried first (A,B,C,D with
+ *                   sticky B -> A, B, C, D), so a recovered higher-priority model
+ *                   takes traffic back as soon as its cooldown ends; while it is
+ *                   cooling down the walker simply skips it.
  *
  * The normal fallback list is fully deterministic. Health, latency and
  * previous successes never reorder it. Sticky is a separate leading phase and
@@ -172,16 +176,28 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
 
   // Manual selection: each entry is one provider/model group, every eligible key
   // in key order, entries in saved order. It deliberately ignores the client's
-  // requested model (the operator's explicit order wins) and leads the plan, so
-  // sticky is not applied while it is active. Later appearances of the same
-  // targets in priority/normal are skipped by the walker as already attempted.
+  // requested model (the operator's explicit order wins) and leads priority and
+  // fallback. Sticky only reorders WITHIN the selection (see below). Later
+  // appearances of the same targets in priority/normal are skipped by the
+  // walker as already attempted.
   const manualEntries = resolvePriorityTargets(all, manual);
   const manualActive = manualEntries.length > 0;
 
+  // Sticky also works under manual selection, but only INSIDE the operator's
+  // selection: the last good manual target (and the other keys of its model)
+  // leads, then the saved order continues. A sticky target that is not one of
+  // the selected models (e.g. recorded before manual mode was switched on) is
+  // ignored, so the operator's explicit choice is never bypassed.
   let sticky = null;
-  if (stickyTargetId && !manualActive) {
+  if (stickyTargetId) {
     const candidate = all.find((target) => targetId(target) === stickyTargetId) ?? null;
-    if (candidate && (!modelConfigured || candidate.model === named)) sticky = candidate;
+    if (candidate) {
+      if (manualActive) {
+        if (manualEntries.some(({ target }) => targetId(target) === targetId(candidate))) sticky = candidate;
+      } else if (!modelConfigured || candidate.model === named) {
+        sticky = candidate;
+      }
+    }
   }
 
   // The sticky model is exhausted before anything else is tried: after the
@@ -196,21 +212,29 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
     : [];
 
   const stickyGroupId = sticky ? `${sticky.provider}/${sticky.model}` : null;
-  const stickyIsPriority = Boolean(sticky) && priorityEntries.some(({ group }) => group === stickyGroupId);
+  const stickyIsPriority = !manualActive && Boolean(sticky) && priorityEntries.some(({ group }) => group === stickyGroupId);
 
-  // Priority CONTINUES from the sticky model, it never goes back. With priority
-  // A -> B -> C -> D and sticky on B, once B (every eligible key) is exhausted
-  // the priority phase proceeds C -> D and then the normal fallback; A is not
-  // part of this request's priority phase. A sticky target that is not a
-  // priority model has no position in the list, so the full list still applies.
-  // (The groups are contiguous and in configured order, so "from the sticky
-  // group on" is a straight slice.)
+  // Priority entries ranked ABOVE the sticky model are tried first. With
+  // priority A -> B -> C -> D and sticky on B (because A failed earlier), A
+  // leads the plan again: while A is cooling down the walker skips it for free,
+  // and once the cooldown ends A is retried, so a recovered higher-priority
+  // model takes traffic back. If it fails it cools down again and B (sticky)
+  // answers. Entries below the sticky model (C, D) follow the sticky model's
+  // own keys, then the normal fallback. A sticky target that is not a priority
+  // model has no position in the list, so the full list still applies.
+  // (The groups are contiguous and in configured order, so "above/below the
+  // sticky group" is a straight split.)
   const groupOrder = [...new Set(priorityEntries.map(({ group }) => group))];
-  const resumeAt = stickyIsPriority ? groupOrder.indexOf(stickyGroupId) : 0;
-  const priorityPhase = priorityEntries.filter(({ group }) => groupOrder.indexOf(group) >= resumeAt);
+  const stickyIndex = stickyIsPriority ? groupOrder.indexOf(stickyGroupId) : -1;
+  const higherPriority = stickyIsPriority
+    ? priorityEntries.filter(({ group }) => groupOrder.indexOf(group) < stickyIndex)
+    : [];
+  const priorityPhase = stickyIsPriority
+    ? priorityEntries.filter(({ group }) => groupOrder.indexOf(group) > stickyIndex)
+    : priorityEntries;
 
   const steps = [
-    ...manualEntries.map(({ target, group }) => ({ target, phase: PHASES.MANUAL, group })),
+    ...higherPriority.map(({ target, group }) => ({ target, phase: PHASES.PRIORITY, group })),
     ...(sticky ? [{ target: sticky, phase: PHASES.STICKY }] : []),
     // Labelled for what they are in the timeline: the other keys of a configured
     // priority entry are priority attempts; for any other sticky model they are
@@ -221,6 +245,7 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
       phase: stickyIsPriority ? PHASES.PRIORITY : PHASES.STICKY,
       group: `${sticky.provider}/${sticky.model}`
     })),
+    ...manualEntries.map(({ target, group }) => ({ target, phase: PHASES.MANUAL, group })),
     ...priorityPhase.map(({ target, group }) => ({ target, phase: PHASES.PRIORITY, group })),
     ...normal.map((target) => ({ target, phase: PHASES.FALLBACK }))
   ];
