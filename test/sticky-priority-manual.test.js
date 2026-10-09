@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildRoutePlan } from "../src/routing-plan.js";
+import { buildRoutePlan, readPriority } from "../src/routing-plan.js";
 import { HealthRegistry } from "../src/health.js";
 import { RouteSession, withFallback } from "../src/router.js";
 
@@ -146,4 +146,13 @@ test("cooldown: every retryable failure except 400/408/413 cools the target down
     const cooldown = health.ensureTarget(target).cooldownUntil - before;
     assert.ok(cooldown >= TWENTY && cooldown < TWENTY + 1000, `status ${status}: cooldown ${cooldown}ms`);
   }
+});
+
+test("text and vision priority lists are independent", () => {
+  const env = { TEXT_PRIORITY_MODELS: "a/A,b/B", VISION_PRIORITY_MODELS: "" };
+  assert.deepEqual(readPriority(env, "text"), pri(["a", "A"], ["b", "B"]));
+  // An empty vision list means no vision priority; it never inherits the text list.
+  assert.deepEqual(readPriority(env, "vision"), []);
+  assert.deepEqual(readPriority({ VISION_PRIORITY_MODELS: "c/C" }, "text"), []);
+  assert.deepEqual(readPriority({ VISION_PRIORITY_MODELS: "c/C" }, "vision"), pri(["c", "C"]));
 });

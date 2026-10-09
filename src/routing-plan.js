@@ -67,18 +67,14 @@ export function parsePriorityModels(value) {
 
 /**
  * Priority list for one pool: TEXT_PRIORITY_MODELS for the text pool,
- * VISION_PRIORITY_MODELS for the vision pool. An empty/unset
- * VISION_PRIORITY_MODELS inherits TEXT_PRIORITY_MODELS, so both pools use the
- * same priority models in the same order unless vision is configured on its
- * own. An entry only ever matches targets of the pool being routed, so it can
- * never pull a request across pools (a text-only entry matches nothing in the
- * vision pool and is simply absent there).
+ * VISION_PRIORITY_MODELS for the vision pool. The two pools are fully
+ * independent: an empty/unset VISION_PRIORITY_MODELS means the vision pool has
+ * NO priority phase (plain Provider -> Key -> Models fallback); it never falls
+ * back to the text list. An entry only ever matches targets of the pool being
+ * routed, so it can never pull a request across pools.
  */
 export function readPriority(env, pool = "text") {
-  const text = parsePriorityModels(env.TEXT_PRIORITY_MODELS);
-  if (pool !== "vision") return text;
-  const vision = parsePriorityModels(env.VISION_PRIORITY_MODELS);
-  return vision.length > 0 ? vision : text;
+  return parsePriorityModels(pool === "vision" ? env.VISION_PRIORITY_MODELS : env.TEXT_PRIORITY_MODELS);
 }
 
 /** Providers in first-appearance (configuration) order, then keys, then models. */
