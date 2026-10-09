@@ -169,12 +169,20 @@ export class HealthRegistry {
    *
    * `ok: null` (or absent) is a passive observation: the probe could not
    * determine health, so the previous state is preserved untouched.
+   *
+   * A target that is cooling down after a routing failure keeps exactly that
+   * cooldown: a probe neither ends it early (success) nor stretches it (failure).
+   * The target is retried when its own cooldown runs out, not when a probe says so.
    */
   recordHealthCheck(
     target,
     { ok = null, status = null, latencyMs = null, reason = null } = {},
     now = Date.now()
   ) {
+    if ((ok === true || ok === false) && Number(this.ensureTarget(target).cooldownUntil) > now) {
+      return this.ensureTarget(target);
+    }
+
     if (ok === true) {
       return this.markSuccess(
         target,

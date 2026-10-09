@@ -109,3 +109,24 @@ test("manual: the last successful manual model is reused on the next request", a
   assert.equal(await run(), "B");
   assert.deepEqual(calls, ["B"]);
 });
+
+test("cooldown: a health probe neither ends a failed target's cooldown early nor extends it", () => {
+  const health = new HealthRegistry();
+  const target = t("a", "A");
+  const start = 1_000_000;
+  health.markFailure(target, 500, {}, start);
+  const until = health.ensureTarget(target).cooldownUntil;
+  assert.equal(until, start + 20 * 60 * 1000);
+
+  // Probe success 15 minutes in (the monitor interval): still cooling down.
+  health.recordHealthCheck(target, { ok: true, status: 200 }, start + 15 * 60 * 1000);
+  assert.equal(health.isAvailable(target, start + 15 * 60 * 1000), false);
+  assert.equal(health.ensureTarget(target).cooldownUntil, until);
+
+  // Probe failure inside the cooldown does not push the deadline out.
+  health.recordHealthCheck(target, { ok: false, status: 503 }, start + 16 * 60 * 1000);
+  assert.equal(health.ensureTarget(target).cooldownUntil, until);
+
+  // Exactly when the 20 minutes are up, the target is tried again.
+  assert.equal(health.isAvailable(target, until), true);
+});
