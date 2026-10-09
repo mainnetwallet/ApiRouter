@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini } from "./anthropic-bridge.js";
+import { toolCallKey } from "./bridge-utils.js";
 
 function id(prefix) {
   return prefix + "_" + randomUUID().replace(/-/g, "").slice(0, 24);
@@ -162,7 +163,8 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
   const generation = body?.generationConfig || {};
   const out = { model, messages };
   if (tools.length) out.tools = tools;
-  if (stream) out.stream = true;
+  // Without this an OpenAI-compatible upstream sends no usage in a stream.
+  if (stream) { out.stream = true; out.stream_options = { include_usage: true }; }
 
   const mode = body?.toolConfig?.functionCallingConfig;
   const declaredNames = new Set(tools.map((tool) => tool.function.name));
@@ -326,6 +328,9 @@ const sseData = (payload) => "data: " + JSON.stringify(payload) + "\n\n";
 export async function* streamToGemini(events) {
   const pending = new Map();
   const order = [];
+  const keyState = { last: null };
+  let held = null;
+  let usageMetadata = null;
 
   const drainCalls = () => {
     const parts = order.map((key) => {
@@ -348,8 +353,18 @@ export async function* streamToGemini(events) {
     let parsed;
     try { parsed = JSON.parse(data); } catch { continue; }
     if (parsed?.error) {
+      // An upstream error ends the stream: nothing after it is a valid continuation.
       yield sseData(parsed);
-      continue;
+      return;
+    }
+
+    const u = parsed.usage;
+    if (u && typeof u === "object") {
+      usageMetadata = {
+        promptTokenCount: Number(u.prompt_tokens) || 0,
+        candidatesTokenCount: Number(u.completion_tokens) || 0,
+        totalTokenCount: Number(u.total_tokens) || 0
+      };
     }
 
     const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
@@ -360,7 +375,7 @@ export async function* streamToGemini(events) {
 
       const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
       for (const call of fragments) {
-        const key = call.index ?? call.id ?? order.length;
+        const key = toolCallKey(call, keyState);
         let entry = pending.get(key);
         if (!entry) {
           entry = { id: null, name: "", arguments: "" };
@@ -376,25 +391,34 @@ export async function* streamToGemini(events) {
       if (finishing) parts.push(...drainCalls());
 
       if (!parts.length && !finishing) continue;
-      yield sseData({
-        candidates: [{
-          content: { role: "model", parts },
-          finishReason: finishReason(choice.finish_reason, parts.some((part) => part.functionCall)),
-          index: 0
-        }]
-      });
+
+      // A chunk that is not the last must not carry a finishReason: Gemini
+      // clients read it as the end of the response.
+      const candidate = { content: { role: "model", parts }, index: 0 };
+      if (finishing) {
+        candidate.finishReason = finishReason(choice.finish_reason, parts.some((part) => part.functionCall));
+        // The upstream's usage chunk arrives after the finish chunk, so the
+        // last chunk is held until the stream ends and the usage is known.
+        held = { candidates: [candidate] };
+      } else {
+        yield sseData({ candidates: [candidate] });
+      }
     }
   }
 
   // A stream cut off before any finish reason still owes the client its calls.
   const remaining = drainCalls();
   if (remaining.length) {
-    yield sseData({
-      candidates: [{
-        content: { role: "model", parts: remaining },
-        finishReason: "STOP",
-        index: 0
-      }]
-    });
+    if (held) {
+      // Calls that arrived after the held finish chunk belong in it.
+      held.candidates[0].content.parts.push(...remaining);
+    } else {
+      held = { candidates: [{ content: { role: "model", parts: remaining }, finishReason: "STOP", index: 0 }] };
+    }
+  }
+
+  if (held) {
+    if (usageMetadata) held.usageMetadata = usageMetadata;
+    yield sseData(held);
   }
 }

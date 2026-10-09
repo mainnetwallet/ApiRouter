@@ -211,3 +211,54 @@ test("a complete Gemini tool call still reports tool_use even at MAX_TOKENS", as
   const out = await collect(streamToAnthropic("gemini", gen([json]), "m"));
   assert.match(out, /"stop_reason":"tool_use"/);
 });
+
+// ---- gemini stream (chat upstream -> Gemini client)
+
+import { streamToGemini } from "../src/gemini-bridge.js";
+
+const geminiEvents = async (events) => (await collect(streamToGemini(gen(events))))
+  .split("\n\n").filter(Boolean).map((chunk) => JSON.parse(chunk.replace(/^data: /, "")));
+
+test("gemini stream: only the last chunk carries finishReason, and it carries usage", async () => {
+  const chunks = await geminiEvents([
+    { choices: [{ delta: { role: "assistant", content: "hel" } }] },
+    { choices: [{ delta: { content: "lo" } }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
+    { choices: [], usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 } },
+    "[DONE]"
+  ].map((item) => item));
+  assert.equal(chunks.length, 3);
+  assert.equal(chunks[0].candidates[0].finishReason, undefined);
+  assert.equal(chunks[1].candidates[0].finishReason, undefined);
+  assert.equal(chunks[2].candidates[0].finishReason, "STOP");
+  assert.deepEqual(chunks[2].usageMetadata, { promptTokenCount: 7, candidatesTokenCount: 3, totalTokenCount: 10 });
+});
+
+test("gemini stream: fragmented and index-less tool calls assemble into separate functionCalls", async () => {
+  const chunks = await geminiEvents([
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "a", function: { name: "read", arguments: '{"p"' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ":1}" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ id: "b", function: { name: "write", arguments: '{"q":2}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] }
+  ]);
+  const calls = chunks.flatMap((c) => c.candidates[0].content.parts).filter((p) => p.functionCall).map((p) => p.functionCall);
+  assert.deepEqual(calls.map((c) => [c.name, c.args]), [["read", { p: 1 }], ["write", { q: 2 }]]);
+  assert.equal(chunks.at(-1).candidates[0].finishReason, "STOP");
+});
+
+test("gemini stream: an upstream error ends the stream and nothing follows it", async () => {
+  const chunks = await geminiEvents([
+    { choices: [{ delta: { content: "hi" } }] },
+    { error: { message: "boom" } },
+    { choices: [{ delta: {}, finish_reason: "stop" }] }
+  ]);
+  assert.equal(chunks.at(-1).error.message, "boom");
+  assert.ok(!chunks.some((c) => c.candidates?.[0]?.finishReason));
+});
+
+test("gemini request: a streaming call asks the chat upstream for usage", () => {
+  const out = toChatFromGemini({ contents: [{ role: "user", parts: [{ text: "hi" }] }] }, "m", { stream: true });
+  assert.deepEqual(out.stream_options, { include_usage: true });
+  const plain = toChatFromGemini({ contents: [{ role: "user", parts: [{ text: "hi" }] }] }, "m");
+  assert.equal(plain.stream_options, undefined);
+});
