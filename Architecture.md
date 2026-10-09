@@ -262,7 +262,6 @@ Real credentials must stay in `.env` and must not be committed.
 ```text
 Node.js >= 20
 npm start
-npm test
 ```
 
 ## Source Architecture
