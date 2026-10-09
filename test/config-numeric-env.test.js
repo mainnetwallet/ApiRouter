@@ -103,7 +103,7 @@ test("valid REQUEST_TIMEOUT_MS=30000 starts normally and a body within the limit
   } }));
   const router = await startRouter({
     GROQ_API_KEYS: "k1", GROQ_MODELS: "m", GROQ_BASE_URL: upstream.baseUrl,
-    REQUEST_TIMEOUT_MS: "30000", MAX_REQUEST_BODY_MB: "1"
+    REQUEST_TIMEOUT_MS: "30000", MAX_REQUEST_BODY_BYTES: String(1024 * 1024)
   });
   t.after(async () => { await router.close(); await upstream.close(); });
 

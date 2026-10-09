@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildTargets, loadConfig, VISION_POOL } from "../src/config.js";
 import { HealthRegistry } from "../src/health.js";
-import { RouteSession, withFallback } from "../src/router.js";
+import { RouteSession, STICKY_TTL_MS, withFallback } from "../src/router.js";
 import { buildRoutePlan, parsePriorityModels, readPriority, routeOrderByPool } from "../src/routing-plan.js";
 
 const provider = (keys, models, extra = {}) => ({ apiKeys: keys, models, baseUrl: "http://x", ...extra });
@@ -420,21 +420,21 @@ test("A: sticky success - the next request attempts that target first", async ()
   assert.deepEqual(second.calls, ["sticky:groq/GR3/k1"], "sticky first, and it succeeds, so nothing else is called");
 });
 
-test("B: sticky lasts 15 minutes from the success, then priority starts first", async () => {
+test("B: sticky lasts its TTL from the success, then priority starts first", async () => {
   const session = new RouteSession();
   stick(session, pick("groq", "GR3"), T0);
-  assert.equal(session.expiresAt, T0 + 15 * MIN);
+  assert.equal(session.expiresAt, T0 + STICKY_TTL_MS);
 
-  const within = await request(session, { now: T0 + 15 * MIN - 1, priority: PRIO });
+  const within = await request(session, { now: T0 + STICKY_TTL_MS - 1, priority: PRIO });
   assert.equal(within.calls[0], "sticky:groq/GR3/k1");
 
   // (fresh session: a success inside the TTL window legitimately refreshes it)
   const expired = new RouteSession();
   stick(expired, pick("groq", "GR3"), T0);
-  const after = await request(expired, { now: T0 + 15 * MIN, priority: PRIO, fail: () => true });
+  const after = await request(expired, { now: T0 + STICKY_TTL_MS, priority: PRIO, fail: () => true });
   assert.ok(!after.calls.some((c) => c.startsWith("sticky:")), "expired sticky is never called");
   assert.equal(after.calls[0], "priority:gemini/G1/k1", "priority is the first phase after expiry");
-  assert.equal(expired.validTargetId(T0 + 15 * MIN), null, "expired sticky is cleared");
+  assert.equal(expired.validTargetId(T0 + STICKY_TTL_MS), null, "expired sticky is cleared");
 });
 
 test("C: sticky fails -> priority 1 -> priority 2 -> normal fallback, with no repeats", async () => {
@@ -454,7 +454,7 @@ test("C: sticky fails -> priority 1 -> priority 2 -> normal fallback, with no re
   assert.ok(skips.includes("fallback:groq/GR3/k1:already_attempted"), "failed sticky is not retried in the same request");
 });
 
-test("D: a new success becomes sticky with a fresh 15-minute TTL", async () => {
+test("D: a new success becomes sticky with a fresh TTL", async () => {
   const session = new RouteSession();
   stick(session, pick("gemini", "G2"), T0);
   const later = T0 + 10 * MIN;
@@ -466,7 +466,7 @@ test("D: a new success becomes sticky with a fresh 15-minute TTL", async () => {
   assert.equal(label(result), "groq/GR1/k1");
   // withFallback stamps the real clock, so assert against it.
   assert.equal(session.targetId, new HealthRegistry().key(result));
-  assert.ok(session.expiresAt - Date.now() <= 15 * MIN && session.expiresAt - Date.now() > 15 * MIN - 5000);
+  assert.ok(session.expiresAt - Date.now() <= STICKY_TTL_MS && session.expiresAt - Date.now() > STICKY_TTL_MS - 5000);
 });
 
 test("E: a sticky key in cooldown is not called; the sticky model's next key runs, then priority", async () => {
@@ -521,7 +521,7 @@ test("G: text and vision stickies are isolated", async () => {
 test("H: after sticky expiry priority is NOT skipped: P1 -> P2 -> normal", async () => {
   const session = new RouteSession();
   stick(session, pick("groq", "GR3"), T0);
-  const { calls } = await request(session, { now: T0 + 16 * MIN, priority: PRIO, fail: () => true });
+  const { calls } = await request(session, { now: T0 + STICKY_TTL_MS + MIN, priority: PRIO, fail: () => true });
   assert.deepEqual(calls.slice(0, 6), [
     "priority:gemini/G1/k1", "priority:gemini/G1/k2", "priority:gemini/G1/k3",
     "priority:groq/GR2/k1", "priority:groq/GR2/k2", "priority:groq/GR2/k3"
@@ -555,9 +555,9 @@ test("RouteSession TTL: timestamp based, no timer, refreshed by each success", (
   const t = pick("gemini", "G1");
   assert.equal(s.validTargetId(T0), null);
   s.saveSuccess(t, h, T0);
-  assert.equal(s.validTargetId(T0 + 14 * MIN), h.key(t));
-  s.saveSuccess(t, h, T0 + 14 * MIN);                         // refresh
-  assert.equal(s.validTargetId(T0 + 28 * MIN), h.key(t), "TTL restarted from the latest success");
-  assert.equal(s.validTargetId(T0 + 29 * MIN), null);
+  assert.equal(s.validTargetId(T0 + STICKY_TTL_MS - MIN), h.key(t));
+  s.saveSuccess(t, h, T0 + STICKY_TTL_MS - MIN);                         // refresh
+  assert.equal(s.validTargetId(T0 + 2 * STICKY_TTL_MS - 2 * MIN), h.key(t), "TTL restarted from the latest success");
+  assert.equal(s.validTargetId(T0 + 2 * STICKY_TTL_MS - MIN), null);
   assert.equal(new RouteSession({ targetId: "x" }).validTargetId(T0), null, "an un-timestamped sticky is not trusted");
 });

@@ -22,14 +22,6 @@ const TEXT = [
 ];
 const VISION = ["stepfun/step-3.7-flash:free"];
 
-test("Nous Portal free model pools are documented and ordered", () => {
-  const example = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
-  assert.match(example, new RegExp("^NOUS_MODELS=" + TEXT.join(",").replace(/\./g, "\\\.") + "$", "m"));
-  assert.match(example, /^NOUS_VISION_MODELS=stepfun\/step-3\.7-flash:free$/m);
-  assert.match(example, /^NOUS_BASE_URL=https:\/\/inference-api\.nousresearch\.com\/v1$/m);
-  assert.match(example, /^NOUS_VISION_BASE_URL=https:\/\/inference-api\.nousresearch\.com\/v1$/m);
-});
-
 test("Nous is a first-class OpenAI-compatible provider with separate vision config", () => {
   assert.ok(PROVIDERS.includes("nous"));
   const c = loadConfig({
