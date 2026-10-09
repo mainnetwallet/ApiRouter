@@ -273,19 +273,58 @@ test("Remember Last Successful leads with the remembered target, then the chain 
   assert.equal(sticky.model, "B");
 });
 
-test("Fixed Order ignores a remembered target entirely", () => {
+test("Fixed Order uses a remembered key only inside its own model's position", () => {
   resetAutomaticOrderCache();
   const chain = entries(["a", "A"], ["b", "B"]);
-  const { steps, sticky } = buildRoutePlan({
+  const { steps, sticky, rememberedKey } = buildRoutePlan({
     targets: twoKeyTargets,
     chain,
     mode: FALLBACK_MODES.FIXED,
     stickyTargetId: "b:B:key-1",
-    cacheKey: "fixed-ignores"
+    cacheKey: "fixed-in-place"
   });
-  assert.equal(sticky, null);
+  assert.equal(sticky, null, "the remembered target never leads the walk in Fixed Order");
+  assert.equal(rememberedKey.keyIndex, 1);
   assert.equal(steps[0].phase, PHASES.CHAIN);
+  // Model A is still first and fully exhausted; only B's own key order changed.
+  assert.deepEqual(labels(steps), ["chain:a/A#0", "chain:a/A#1", "chain:b/B#1", "chain:b/B#0"]);
+});
+
+test("Fixed Order ignores a remembered target the chain no longer allows", () => {
+  resetAutomaticOrderCache();
+  const plain = ["chain:a/A#0", "chain:a/A#1", "chain:b/B#0", "chain:b/B#1"];
+  for (const [label, chain, stickyTargetId] of [
+    ["not in the chain", entries(["a", "A"]), "b:B:key-1"],
+    ["model disabled", entries(["a", "A"], ["b", "B", { enabled: false }]), "b:B:key-1"],
+    ["key restricted away", entries(["a", "A"], ["b", "B", { keys: [0] }]), "b:B:key-1"]
+  ]) {
+    const { steps, rememberedKey } = buildRoutePlan({
+      targets: twoKeyTargets, chain, mode: FALLBACK_MODES.FIXED, stickyTargetId, cacheKey: `fixed-stale-${label}`
+    });
+    assert.equal(rememberedKey, null, label);
+    assert.deepEqual(labels(steps), plain.filter((item) => labels(steps).includes(item)), label);
+  }
+});
+
+test("Fixed Order with no remembered key is the plain configured order", () => {
+  resetAutomaticOrderCache();
+  const { steps, rememberedKey } = buildRoutePlan({
+    targets: twoKeyTargets, chain: entries(["a", "A"], ["b", "B"]), mode: FALLBACK_MODES.FIXED, cacheKey: "fixed-none"
+  });
+  assert.equal(rememberedKey, null);
   assert.deepEqual(labels(steps), ["chain:a/A#0", "chain:a/A#1", "chain:b/B#0", "chain:b/B#1"]);
+});
+
+test("Last Success and Auto keep a remembered target leading the walk", () => {
+  resetAutomaticOrderCache();
+  for (const mode of [FALLBACK_MODES.LAST_SUCCESS, FALLBACK_MODES.AUTO]) {
+    const { steps, sticky } = buildRoutePlan({
+      targets: twoKeyTargets, chain: entries(["a", "A"], ["b", "B"]), mode, stickyTargetId: "b:B:key-1", cacheKey: `ls-${mode}`
+    });
+    assert.equal(sticky.keyIndex, 1, mode);
+    assert.equal(steps[0].phase, PHASES.STICKY, mode);
+    assert.equal(labels(steps)[0], "sticky:b/B#1", mode);
+  }
 });
 
 test("a remembered target the chain no longer contains is ignored", () => {

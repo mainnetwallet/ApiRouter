@@ -254,6 +254,18 @@ export function buildRoutePlan({
     source = PLAN_SOURCE.CHAIN;
   }
 
+  // Fixed Order remembers a success too, but only to choose WHICH KEY of that
+  // model is tried first. The model keeps the position the operator gave it, so
+  // the remembered target can never move ahead of an earlier configured model.
+  let rememberedKey = null;
+  if (!pinned && useChain && source === PLAN_SOURCE.CHAIN && mode === FALLBACK_MODES.FIXED) {
+    const placed = placeRememberedKey(ordered, stickyTargetId);
+    if (placed) {
+      ordered = placed.groups;
+      rememberedKey = placed.target;
+    }
+  }
+
   const phase = source === PLAN_SOURCE.AUTO ? PHASES.AUTO : PHASES.CHAIN;
   const base = toSteps(ordered, phase);
 
@@ -274,7 +286,7 @@ export function buildRoutePlan({
 
   const sticky = resolveSticky({ stickyTargetId, ordered, mode, pinned });
   if (!sticky) {
-    return { steps: base, sticky: null, ...meta };
+    return { steps: base, sticky: null, rememberedKey, ...meta };
   }
 
   // The remembered target leads, and the rest of its own model is exhausted
@@ -297,8 +309,34 @@ export function buildRoutePlan({
       ...base
     ],
     sticky: sticky.target,
+    rememberedKey: null,
     ...meta
   };
+}
+
+/**
+ * Fixed Order's use of a remembered success: the remembered key is tried first
+ * WITHIN its own model, and the model's other keys follow in key order.
+ *
+ * Groups are never reordered — this returns the same groups in the same
+ * positions, with only the remembered group's key order changed. The search runs
+ * over the groups as the configuration narrowed them, so a key the operator has
+ * since excluded (or a model they have since disabled) is simply not found and
+ * the plan is the plain configured order.
+ */
+function placeRememberedKey(groups, stickyTargetId) {
+  if (!stickyTargetId) return null;
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index];
+    const target = group.targets.find((item) => targetId(item) === stickyTargetId);
+    if (!target) continue;
+    if (group.targets[0] === target) return { groups, target };
+    const rest = group.targets.filter((item) => item !== target);
+    const next = groups.slice();
+    next[index] = { ...group, targets: [target, ...rest] };
+    return { groups: next, target };
+  }
+  return null;
 }
 
 function automaticGroupsOrder(groups, { cacheKey, health, now }) {

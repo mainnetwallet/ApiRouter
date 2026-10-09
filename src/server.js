@@ -709,7 +709,10 @@ async function proxy(req, res, protocol, pathname) {
         // Fixed Order never remembers a success: every request starts at the
         // chain's first target, which is what makes the mode (and its Reset)
         // mean what it says. A pin is equally stateless.
-        remember: !pinned.pinned && remembersSuccess(fallbackChain.mode),
+        // Every mode records its success. Remember Last Successful and Automatic
+        // let it lead the next request; Fixed Order only uses it to pick which
+        // key of that model goes first, never to move the model.
+        remember: !pinned.pinned,
         // A skipped target never reaches the network, but it is still shown
         // in the timeline so the walk is explained, not guessed at.
         onSkip: (target, { phase, reason }) => {

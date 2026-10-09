@@ -152,7 +152,7 @@ test("a chain that fails falls through to the next model, which retries its own 
 // Operating modes and Reset
 // ---------------------------------------------------------------------------
 
-test("Fixed Order remembers nothing; Remember Last Successful does", async () => {
+test("Fixed Order never lets a remembered target lead; Remember Last Successful does", async () => {
   // groq is down on BOTH keys, so the walk really does reach mistral.
   const groq = await startMockUpstream(() => down);
   const mistral = await startMockUpstream(() => ok("m2"));
@@ -166,13 +166,14 @@ test("Fixed Order remembers nothing; Remember Last Successful does", async () =>
       { provider: "mistral", model: "m2" }
     ]);
 
-    // Fixed Order (the default): groq fails over to mistral, and nothing is remembered.
+    // Fixed Order (the default): groq fails over to mistral. The success is recorded,
+    // but in Fixed Order it never leads the next request (see the in-place tests below).
     assert.equal((await chat(router)).status, 200);
     assert.deepEqual(posts(mistral), ["s0"]);
     let state = await getFallback(router);
     assert.equal(state.mode, "fixed");
-    assert.equal(state.remembersSuccess, false);
-    assert.deepEqual(state.remembered.remembered.text, [], "Fixed Order must not remember a success");
+    assert.equal(state.remembersSuccess, false, "a remembered target does not lead in Fixed Order");
+    assert.equal(state.remembered.remembered.text.length, 1, "Fixed Order records the success to prefer its key in place");
 
     // Remember Last Successful: the same request now records the target that answered.
     assert.equal((await saveMode(router, "last-success")).status, 200);
@@ -1034,8 +1035,8 @@ test("a pinned request pins one key and ignores the configured key restrictions"
 
     // And it is strict: no fallback to another model, and no target remembered.
     assert.deepEqual(posts(mistral), []);
-    assert.deepEqual((await getFallback(router)).remembered.remembered.text, [],
-      "a pinned request must not remember a target");
+    assert.deepEqual((await getFallback(router)).remembered.remembered.text.map((item) => item.targetId), ["groq:m1:key-1"],
+      "a pinned request must not remember a target: only the ordinary request's key is still remembered");
   } finally {
     await router.close(); await groq.close(); await mistral.close();
   }
@@ -1584,19 +1585,120 @@ test("Reset Fallback clears the remembered target, keeps the chain and cooldowns
   }
 });
 
-test("Fixed Order never remembers, before or after a chain edit", async () => {
-  const { router, groq, mistral } = await startRememberRouter();
-  try {
-    await putChain(router, "text", [MISTRAL_M2]);
-    assert.equal((await getFallback(router)).mode, "fixed");
-    assert.equal((await chat(router)).status, 200);
-    assert.deepEqual(await rememberedIds(router), []);
+// ---------------------------------------------------------------------------
+// Fixed Order: several models per provider, several keys per model
+// ---------------------------------------------------------------------------
 
-    await putChain(router, "text", [GROQ_M1, MISTRAL_M2]);
-    assert.equal((await chat(router)).status, 200);
-    assert.deepEqual(postModels(groq), ["m1"], "Fixed Order starts at the chain's first target");
-    assert.deepEqual(await rememberedIds(router), [], "and still remembers nothing");
+const modelKey = (record) => `${bodyModel(record)}:${bearer(record)}`;
+const modelPosts = (mock) => mock.requests.filter((record) => record.method === "POST").map(modelKey);
+const chatAs = (router, sessionId) => router.request("/v1/chat/completions", postJson(
+  { model: "anything", messages: [{ role: "user", content: "hello" }] }, { "x-multi-ai-session-id": sessionId }
+));
+
+/** groq: m1 and m3 on three keys; mistral: m2 on two keys. `groqScript` decides what groq answers. */
+async function startFixedRouter(groqScript, env = {}) {
+  const groq = await startMockUpstream(groqScript);
+  const mistral = await startMockUpstream((record) => ok(bodyModel(record)));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1,g2", GROQ_MODELS: "m1,m3", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    MISTRAL_API_KEYS: "s0,s1", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`,
+    ...env
+  });
+  assert.equal((await saveChain(router, "text", [
+    { provider: "groq", model: "m1" }, { provider: "groq", model: "m3" }, { provider: "mistral", model: "m2" }
+  ])).status, 200);
+  assert.equal((await getFallback(router)).mode, "fixed");
+  return { router, groq, mistral };
+}
+
+test("Fixed Order exhausts a model's keys, then the provider's models, before the next provider", async () => {
+  const { router, groq, mistral } = await startFixedRouter(() => down);
+  try {
+    assert.equal((await chat(router)).status, 200, "mistral finally answers");
+    assert.deepEqual(modelPosts(groq), ["m1:g0", "m1:g1", "m1:g2", "m3:g0", "m3:g1", "m3:g2"],
+      "every key of m1, then every key of m3 — in key order — before any other provider");
+    assert.deepEqual(modelPosts(mistral), ["m2:s0"], "the next provider is reached only after groq was exhausted");
+
+    // Live Logs holds the same walk, in order.
+    const walk = await requestWalk(router);
+    assert.deepEqual(walk.filter((a) => !a.skipped).map((a) => `${a.provider}/${a.model}#${a.keyIndex}`), [
+      "groq/m1#0", "groq/m1#1", "groq/m1#2", "groq/m3#0", "groq/m3#1", "groq/m3#2", "mistral/m2#0"
+    ]);
   } finally {
     await closeAll(router, groq, mistral);
+  }
+});
+
+test("Fixed Order records every success, keeps strict order, and a Reset clears only the memory", async () => {
+  // groq's first key fails once and is cooling; its second key answers.
+  const { router, groq, mistral } = await startFixedRouter((record) => (bearer(record) === "g0" ? down : ok(bodyModel(record))));
+  try {
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(modelPosts(groq), ["m1:g0", "m1:g1"]);
+    assert.deepEqual(await rememberedIds(router), ["groq:m1:key-1"], "the success is remembered");
+
+    // The next request goes straight to the remembered key of the FIRST model; no other model is touched.
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(modelPosts(groq), ["m1:g0", "m1:g1", "m1:g1"]);
+    assert.deepEqual(modelPosts(mistral), []);
+    assert.deepEqual(await rememberedIds(router), ["groq:m1:key-1"]);
+
+    const before = await getFallback(router);
+    const health = await router.request("/api/health").then(json);
+    const cooling = health.targets.filter((target) => target.cooldownUntil > Date.now()).map((target) => [target.id, target.cooldownUntil]);
+    assert.equal(cooling.length, 1);
+
+    const reset = await resetFallback(router);
+    assert.equal(reset.ok, true);
+    assert.deepEqual(await rememberedIds(router), [], "Reset clears the remembered key");
+    const after = await getFallback(router);
+    assert.deepEqual(after.chain, before.chain, "the configured chain is unchanged");
+    assert.equal(after.mode, "fixed");
+    const healthAfter = await router.request("/api/health").then(json);
+    assert.deepEqual(
+      healthAfter.targets.filter((target) => target.cooldownUntil > Date.now()).map((target) => [target.id, target.cooldownUntil]),
+      cooling, "health and the genuine cooldown are untouched"
+    );
+
+    // The next request starts at the first eligible target of the chain and is remembered again.
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(modelPosts(groq).slice(3), ["m1:g1"], "the cooling g0 is skipped, g1 is the first eligible key");
+    assert.deepEqual(await rememberedIds(router), ["groq:m1:key-1"]);
+  } finally {
+    await closeAll(router, groq, mistral);
+  }
+});
+
+test("Fixed Order keeps sessions apart, and the text and vision pools apart", async () => {
+  const groq = await startMockUpstream((record) => ok(bodyModel(record)));
+  const router = await startRouter({
+    GROQ_API_KEYS: "t0,t1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    GROQ_VISION_API_KEYS: "v0,v1", GROQ_VISION_MODELS: "vm1", GROQ_VISION_BASE_URL: `${groq.baseUrl}/v1`
+  });
+  try {
+    await putChain(router, "text", [{ provider: "groq", model: "m1" }]);
+    await putChain(router, "vision", [{ provider: "groq", model: "vm1" }]);
+    assert.equal((await getFallback(router)).mode, "fixed");
+
+    assert.equal((await chatAs(router, "alice")).status, 200);
+    let remembered = (await getFallback(router)).remembered.remembered;
+    assert.deepEqual(remembered.text.map((item) => item.sessionId), ["alice"]);
+    assert.deepEqual(remembered.vision, [], "a text success is not a vision preference");
+
+    assert.equal((await chatAs(router, "bob")).status, 200);
+    assert.equal((await chatImage(router)).status, 200);
+    remembered = (await getFallback(router)).remembered.remembered;
+    assert.deepEqual(remembered.text.map((item) => item.sessionId).sort(), ["alice", "bob"], "each session has its own memory");
+    assert.equal(remembered.vision.length, 1);
+    assert.match(remembered.vision[0].targetId, /^vision:groq:vm1:key-0$/);
+    assert.ok(remembered.text.every((item) => /^groq:m1:key-\d$/.test(item.targetId)), "no vision target sits in a text session");
+
+    // A text chain edit drops the text memory only.
+    await putChain(router, "text", [{ provider: "groq", model: "m1", keys: [1] }]);
+    remembered = (await getFallback(router)).remembered.remembered;
+    assert.deepEqual(remembered.text, []);
+    assert.equal(remembered.vision.length, 1);
+  } finally {
+    await closeAll(router, groq);
   }
 });

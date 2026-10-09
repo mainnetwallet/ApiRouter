@@ -43,7 +43,7 @@ export const FALLBACK_MODE_INFO = Object.freeze([
   {
     id: FALLBACK_MODES.FIXED,
     label: "Fixed Order",
-    detail: "Every request starts at the first model in the chain and its first eligible key. A success never changes what is tried next."
+    detail: "The chain is always walked in its saved order, and every eligible key of a model is tried before the next model. The key that last answered is tried first within its own model, but a success never moves a model ahead of an earlier one."
   },
   {
     id: FALLBACK_MODES.LAST_SUCCESS,

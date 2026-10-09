@@ -451,3 +451,189 @@ test("the session store is bounded and can enumerate what it holds", () => {
   assert.equal(store.get("a"), null, "the oldest session is evicted first");
   assert.deepEqual(store.values().map((entry) => entry.id).sort(), ["b", "c", "d"]);
 });
+
+// ---------------------------------------------------------------------------
+// Fixed Order: a remembered key is preferred only inside its own model's place
+// ---------------------------------------------------------------------------
+
+// provider p1 serves two models, M1 with three keys and M2 with two; provider p2
+// serves N1 with two keys. The chain is p1/M1, p1/M2, p2/N1, in that order.
+const fx = (provider, model, keyIndex, pool = "text") => ({
+  provider, model, keyIndex, pool, protocols: ["openai-chat"],
+  ...(pool === "vision" ? { id: `vision:${provider}:${model}:key-${keyIndex}` } : {})
+});
+const fixedTargets = [
+  fx("p1", "M1", 0), fx("p1", "M1", 1), fx("p1", "M1", 2),
+  fx("p1", "M2", 0), fx("p1", "M2", 1),
+  fx("p2", "N1", 0), fx("p2", "N1", 1)
+];
+const fixedChain = entries(["p1", "M1"], ["p1", "M2"], ["p2", "N1"]);
+const lbl = (target) => `${target.provider}/${target.model}#${target.keyIndex}`;
+const FIXED_ORDER = ["p1/M1#0", "p1/M1#1", "p1/M1#2", "p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"];
+
+/**
+ * One request exactly as the server makes it: the plan is built from the
+ * session's remembered target, and the walk records its success on the session.
+ */
+async function fixedRequest(invoke, {
+  health = new HealthRegistry(),
+  session = new RouteSession(),
+  chain = fixedChain,
+  pool = fixedTargets,
+  mode = FALLBACK_MODES.FIXED,
+  cacheKey = `fixed-${Math.random()}`
+} = {}) {
+  const plan = buildRoutePlan({ targets: pool, chain, mode, health, stickyTargetId: session.validTargetId(), cacheKey });
+  // The server refuses a chain it cannot honour before any walk starts; an empty
+  // plan handed to the walker would otherwise widen to every target.
+  if (plan.failClosed) throw Object.assign(new Error("the saved chain cannot serve this request"), { status: 503 });
+  return withFallback(pool, invoke, new Set([500]), session, health, { plan: plan.steps, remember: true });
+}
+const remember = (session, target) => session.saveSuccess(target, new HealthRegistry());
+
+test("Fixed Order exhausts every key of a model, then every model of a provider, before the next provider", async () => {
+  resetAutomaticOrderCache();
+  const calls = [];
+  await assert.rejects(fixedRequest(async (target) => {
+    calls.push(lbl(target));
+    throw fail(500);
+  }), (error) => {
+    assert.equal(error.status, 502);
+    return true;
+  });
+  assert.deepEqual(calls, FIXED_ORDER);
+  // p2 is reached only after BOTH of p1's models were exhausted.
+  assert.ok(calls.indexOf("p2/N1#0") > calls.lastIndexOf("p1/M2#1"));
+});
+
+test("the remembered key is tried first on the next request, then the model's remaining keys in key order", async () => {
+  resetAutomaticOrderCache();
+  const session = new RouteSession();
+  remember(session, fx("p1", "M1", 2));
+
+  // The remembered key answers: nothing else is called.
+  let calls = [];
+  assert.equal(await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session }), "ok");
+  assert.deepEqual(calls, ["p1/M1#2"]);
+  assert.equal(session.targetId, "p1:M1:key-2", "the success is remembered again");
+
+  // It fails: the model's other keys follow in the existing key order, all before M2.
+  calls = [];
+  await fixedRequest(async (target) => {
+    calls.push(lbl(target));
+    if (calls.length <= 3) throw fail(500);
+    return "ok";
+  }, { session });
+  assert.deepEqual(calls, ["p1/M1#2", "p1/M1#0", "p1/M1#1", "p1/M2#0"]);
+  assert.equal(session.targetId, "p1:M2:key-0", "every success updates the remembered target");
+});
+
+test("a remembered model later in the chain never lets the walk skip an earlier model", async () => {
+  resetAutomaticOrderCache();
+  const session = new RouteSession();
+  remember(session, fx("p2", "N1", 1));
+
+  // Everything is healthy: the first configured model still answers first.
+  let calls = [];
+  assert.equal(await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session }), "ok");
+  assert.deepEqual(calls, ["p1/M1#0"], "the earlier model is tried before the remembered later one");
+  assert.equal(session.targetId, "p1:M1:key-0");
+
+  // Earlier models fail: the walk reaches the remembered model only after exhausting them,
+  // and inside that model the remembered key goes first.
+  remember(session, fx("p2", "N1", 1));
+  calls = [];
+  await fixedRequest(async (target) => {
+    calls.push(lbl(target));
+    if (target.provider === "p1") throw fail(500);
+    return "ok";
+  }, { session });
+  assert.deepEqual(calls, ["p1/M1#0", "p1/M1#1", "p1/M1#2", "p1/M2#0", "p1/M2#1", "p2/N1#1"]);
+});
+
+test("a remembered key that is cooling down is skipped without disturbing the order", async () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  const session = new RouteSession();
+  remember(session, fx("p1", "M1", 1));
+  health.markFailure(fx("p1", "M1", 1), 500);
+
+  const calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session, health });
+  assert.deepEqual(calls, ["p1/M1#0"], "the cooling remembered key is skipped; the model's next key answers");
+});
+
+test("Fixed Order still honours disabled models and key restrictions over a remembered key", async () => {
+  resetAutomaticOrderCache();
+  const session = new RouteSession();
+  remember(session, fx("p1", "M1", 2));
+
+  // The remembered key is no longer allowed by the entry: it is not tried, and the model keeps its place.
+  let calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); throw fail(500); }, {
+    session,
+    chain: entries(["p1", "M1", { keys: [0, 1] }], ["p1", "M2"], ["p2", "N1"])
+  }).catch(() => {});
+  assert.deepEqual(calls, ["p1/M1#0", "p1/M1#1", "p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"]);
+
+  // A disabled model is never walked, remembered or not.
+  calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); throw fail(500); }, {
+    session,
+    chain: entries(["p1", "M1", { enabled: false }], ["p1", "M2"], ["p2", "N1"])
+  }).catch(() => {});
+  assert.deepEqual(calls, ["p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"]);
+
+  // A chain whose entries all exclude every key still fails closed: nothing is called.
+  calls = [];
+  await assert.rejects(fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, {
+    session, chain: entries(["p1", "M1", { keys: [9] }])
+  }));
+  assert.deepEqual(calls, []);
+});
+
+test("Reset clears the remembered key and nothing else; sessions and pools stay isolated", async () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  health.markFailure(fx("p1", "M2", 0), 500);
+  const a = new RouteSession();
+  const b = new RouteSession();
+  remember(a, fx("p1", "M1", 2));
+
+  // Session b never saw a success, so it is unaffected by a's.
+  let calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session: b, health });
+  assert.deepEqual(calls, ["p1/M1#0"]);
+  assert.equal(a.targetId, "p1:M1:key-2", "b's success did not overwrite a's");
+
+  // A text target remembered by a vision-pool session cannot leak into the text pool.
+  const visionTargets = [fx("p1", "M1", 0, "vision"), fx("p1", "M1", 1, "vision")];
+  const visionSession = new RouteSession();
+  calls = [];
+  await fixedRequest(async (target) => { calls.push(`${target.pool}:${lbl(target)}`); return "ok"; }, {
+    session: visionSession, pool: visionTargets, chain: entries(["p1", "M1"])
+  });
+  assert.deepEqual(calls, ["vision:p1/M1#0"]);
+  assert.equal(visionSession.targetId, "vision:p1:M1:key-0");
+  assert.equal(b.targetId, "p1:M1:key-0", "the text session is untouched by the vision walk");
+
+  // Reset: a's remembered key is gone, the walk is the plain order again, and health is intact.
+  a.clear();
+  assert.equal(a.validTargetId(), null);
+  calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session: a, health });
+  assert.deepEqual(calls, ["p1/M1#0"]);
+  assert.ok(!health.isAvailable(fx("p1", "M2", 0)), "a genuine cooldown is not part of what Reset clears");
+  assert.equal(b.targetId, "p1:M1:key-0", "resetting one session leaves another alone");
+});
+
+test("Last Success and Auto still let a remembered later model lead the walk", async () => {
+  resetAutomaticOrderCache();
+  for (const mode of [FALLBACK_MODES.LAST_SUCCESS, FALLBACK_MODES.AUTO]) {
+    const session = new RouteSession();
+    remember(session, fx("p2", "N1", 1));
+    const calls = [];
+    await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session, mode, cacheKey: `unchanged-${mode}` });
+    assert.deepEqual(calls, ["p2/N1#1"], `${mode}: unchanged — the remembered target leads`);
+  }
+});

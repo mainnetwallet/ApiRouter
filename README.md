@@ -182,7 +182,7 @@ Fallback**. Text and Vision are ordered separately, from their own measurements.
 
 | Mode | Behaviour |
 |---|---|
-| **Fixed Order** (default) | Every request starts at the first model of the chain and its first eligible key. A success never changes what is tried next. |
+| **Fixed Order** (default) | The chain is always walked in its saved order, and every eligible key of a model is tried before the next model. The key that last answered is tried first within its own model, but a success never moves a model ahead of an earlier one. |
 | **Remember Last Successful** | The model and key that last answered are tried first. If they fail or are cooling down, the chain continues in its saved order. The saved order is never modified. |
 | **Automatic Health-Based Fallback** | The chain is re-ordered from measured health and latency on each cycle. Selecting this mode is what allows re-sorting. |
 
