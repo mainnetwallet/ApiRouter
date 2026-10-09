@@ -110,7 +110,8 @@ export function createApi({
   refreshHealth,
   fallbackChain = null,
   resetFallbackState = null,
-  describeFallbackState = null
+  describeFallbackState = null,
+  clearRememberedTargets = null
 }) {
   const liveStreams = new Set();
 
@@ -703,6 +704,10 @@ export function createApi({
         // A mode and a chain arriving together go through ONE persisted update:
         // writing them separately could land the mode and then fail on the
         // chain, leaving a half-applied configuration behind.
+        // What this pool's chain was, so a save that changes nothing (an
+        // identical chain, or a mode-only save) can be told from one that
+        // reorders, adds, removes, enables, disables or re-restricts a model.
+        const chainBefore = hasPool ? JSON.stringify(fallbackChain.get(pool)) : null;
         try {
           fallbackChain.update({
             ...(hasMode ? { mode } : {}),
@@ -710,6 +715,14 @@ export function createApi({
           });
         } catch {
           return fail(req, res, 500, "Could not save the fallback configuration", "server_error");
+        }
+        // A remembered target is only a preference over the chain that was in
+        // force when it succeeded. Once this pool's chain has really changed it
+        // must not override the new order, so that pool's remembered targets
+        // are dropped — and only that pool's, and only after the write above
+        // succeeded. Health and cooldowns are deliberately left alone.
+        if (hasPool && typeof clearRememberedTargets === "function" && JSON.stringify(fallbackChain.get(pool)) !== chainBefore) {
+          try { clearRememberedTargets(pool); } catch { /* the chain is saved; a stale preference is not worth failing the save */ }
         }
         // The saved configuration is live from this moment. Invalidated only
         // after the writes succeeded, so a rejected save cannot disturb the

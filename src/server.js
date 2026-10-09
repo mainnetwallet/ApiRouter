@@ -931,6 +931,18 @@ const handleApi = createApi({
     resetAutomaticOrderCache();
     return { clearedSessions: cleared, sessions: sessions.size };
   },
+  // A chain edit invalidates what was remembered for THAT pool only: a text
+  // edit never disturbs the vision pool's preference, or the reverse. Sessions
+  // are kept (only their remembered target goes), and health is not touched.
+  clearRememberedTargets: (pool) => {
+    let cleared = 0;
+    for (const entry of sessions.values()) {
+      if ((entry?.pool ?? TEXT_POOL) !== pool) continue;
+      if (entry?.session?.targetId) cleared += 1;
+      entry?.session?.clear?.();
+    }
+    return { pool, clearedSessions: cleared };
+  },
   // What is remembered right now, per pool. Read as the router reads it, so an
   // expired target is reported as absent rather than as still preferred.
   describeFallbackState: () => {
