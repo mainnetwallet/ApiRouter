@@ -130,3 +130,20 @@ test("cooldown: a health probe neither ends a failed target's cooldown early nor
   // Exactly when the 20 minutes are up, the target is tried again.
   assert.equal(health.isAvailable(target, until), true);
 });
+
+test("cooldown: every retryable failure except 400/408/413 cools the target down for 20 minutes", async () => {
+  const TWENTY = 20 * 60 * 1000;
+  const statuses = [401, 402, 403, 404, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529, 0];
+  for (const status of statuses) {
+    const health = new HealthRegistry();
+    const target = t("a", "A");
+    const only = [target];
+    const before = Date.now();
+    await assert.rejects(withFallback(only, async () => {
+      // status 0 = transport failure (no HTTP status), which the server marks retryable.
+      throw Object.assign(new Error("fail"), status ? { status } : { retryable: true });
+    }, undefined, new RouteSession(), health, { plan: buildRoutePlan({ targets: only }).steps }));
+    const cooldown = health.ensureTarget(target).cooldownUntil - before;
+    assert.ok(cooldown >= TWENTY && cooldown < TWENTY + 1000, `status ${status}: cooldown ${cooldown}ms`);
+  }
+});
