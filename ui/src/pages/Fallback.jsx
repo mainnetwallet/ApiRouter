@@ -115,17 +115,20 @@ export default function Fallback() {
         </button>
       </div>
 
-      {POOL_ORDER.map((pool) => (
-        <PoolFallbackSection
-          key={pool}
-          pool={pool}
-          tab={tab}
-          tick={tick}
-          targets={poolTargets[pool]}
-          recent={recent[pool]}
-          fallbackRequests={fallbackRequests[pool]}
-        />
-      ))}
+      {/* Text on the left, Vision on the right; stacks on narrow screens. */}
+      <div className="split split--2 fallback-pools">
+        {POOL_ORDER.map((pool) => (
+          <PoolFallbackSection
+            key={pool}
+            pool={pool}
+            tab={tab}
+            tick={tick}
+            targets={poolTargets[pool]}
+            recent={recent[pool]}
+            fallbackRequests={fallbackRequests[pool]}
+          />
+        ))}
+      </div>
 
       {tab === "planned" ? <HowFallbackWorks /> : null}
     </div>

@@ -217,6 +217,13 @@
 .split--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .split--sidebar { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
 
+/* Fallback page: each pool is a half-width column, so its inner sidebar split stacks. */
+.fallback-pools { align-items: start; }
+.fallback-pools .split--sidebar { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 1100px) {
+  .fallback-pools.split--2 { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* --- Mobile navigation ---------------------------------------------------- */
 
 .mobile-bar {
