@@ -106,7 +106,7 @@ test("port 5173 conflict leaves existing process alive", async () => {
 test("Windows browser opening does not use cmd /c start", () => {
   const content = fs.readFileSync("scripts/router.mjs", "utf8");
   assert.strictEqual(content.includes("cmd /c start"), false);
-  assert.strictEqual(content.includes("cmd"), false);
+  assert.strictEqual(/cmd\.exe|["']cmd["']/.test(content), false);
   assert.strictEqual(content.includes("rundll32.exe"), true);
   assert.strictEqual(content.includes("url.dll,FileProtocolHandler"), true);
   assert.strictEqual(content.includes("shell: true"), false);

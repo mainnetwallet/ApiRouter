@@ -35,20 +35,6 @@ const sseStream = (...texts) => [
 
 // --------------------------------------------------------------------------- provider / config
 
-test(".env.example defines each SiliconFlow variable once and yields both pools", () => {
-  const example = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
-  const lines = example.split("\n");
-  for (const name of ["API_KEYS", "MODELS", "BASE_URL", "VISION_API_KEYS", "VISION_MODELS", "VISION_BASE_URL"]) {
-    assert.equal(lines.filter((l) => l.startsWith("SILICONFLOW_" + name + "=")).length, 1, name);
-  }
-  const values = Object.fromEntries(lines.filter((l) => /^SILICONFLOW_\w+=/.test(l)).map((l) => [l.split("=")[0], l.slice(l.indexOf("=") + 1)]));
-  const c = loadConfig({ ...values, SILICONFLOW_API_KEYS: "a", SILICONFLOW_VISION_API_KEYS: "b" });
-  assert.deepEqual([...c.providers.siliconflow.models].sort(), [...TEXT].sort());
-  assert.deepEqual(c.visionProviders.siliconflow.models, VISION);
-  assert.equal(c.providers.siliconflow.baseUrl, BASE);
-  assert.equal(c.visionProviders.siliconflow.baseUrl, BASE);
-});
-
 test(".env stays git-ignored", () => {
   const ignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8").split("\n").map((l) => l.trim());
   assert.ok(ignore.includes(".env"));

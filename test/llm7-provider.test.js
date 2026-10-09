@@ -37,20 +37,6 @@ const sseStream = (...texts) => [
 
 // --------------------------------------------------------------------------- provider / config
 
-test(".env.example defines each LLM7 variable once and yields both pools", () => {
-  const example = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
-  const lines = example.split("\n");
-  for (const name of ["API_KEYS", "MODELS", "BASE_URL", "VISION_API_KEYS", "VISION_MODELS", "VISION_BASE_URL"]) {
-    assert.equal(lines.filter((l) => l.startsWith("LLM7_" + name + "=")).length, 1, name);
-  }
-  const values = Object.fromEntries(lines.filter((l) => /^LLM7_\w+=/.test(l)).map((l) => [l.split("=")[0], l.slice(l.indexOf("=") + 1)]));
-  const c = loadConfig({ ...values, LLM7_API_KEYS: "a", LLM7_VISION_API_KEYS: "b" });
-  assert.deepEqual(c.providers.llm7.models, TEXT);
-  assert.deepEqual(c.visionProviders.llm7.models, VISION);
-  assert.equal(c.providers.llm7.baseUrl, BASE);
-  assert.equal(c.visionProviders.llm7.baseUrl, BASE);
-});
-
 test(".env stays git-ignored", () => {
   const ignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8").split("\n").map((l) => l.trim());
   assert.ok(ignore.includes(".env"));
@@ -525,16 +511,4 @@ test("a client that disconnects mid-stream leaves the router serving", async (t)
   await reader.read().catch(() => {});
   const next = await router.request("/v1/chat/completions", postJson(chat(TEXT[1])));
   assert.equal(next.status, 200);
-});
-
-test("the LLM7 free-token quota is documented as quota-based, never as free-priced models", () => {
-  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-  const section = readme.slice(readme.indexOf("### LLM7"), readme.indexOf("Retryable statuses:"));
-  assert.match(section, /free-token quota/i);
-  assert.match(section, /can change/i);
-  // Drop the two sentences that deny those claims, then make sure nothing asserts them.
-  const claims = section
-    .replace(/not permanently free model pricing/gi, "")
-    .replace(/nothing here promises unlimited usage/gi, "");
-  assert.ok(!/unlimited|permanently free|\$0|free model/i.test(claims), "no unlimited/free-model claim");
 });

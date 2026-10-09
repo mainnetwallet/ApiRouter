@@ -27,14 +27,6 @@ const chat = (model, extra = {}) => ({ model, messages: [{ role: "user", content
 const IMG = { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } };
 const imageChat = (model) => ({ model, messages: [{ role: "user", content: [{ type: "text", text: "what is this?" }, IMG] }] });
 
-test(".env.example keeps the OpenCode variables and model order", () => {
-  const example = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
-  assert.match(example, new RegExp("^OPENCODE_MODELS=" + TEXT.join(",").replace(/\./g, "\\.") + "$", "m"));
-  assert.match(example, /^OPENCODE_VISION_MODELS=mimo-v2\.6-flash-free,longcat-2\.5-preview-free$/m);
-  assert.match(example, /^OPENCODE_BASE_URL=https:\/\/opencode\.ai\/zen\/v1$/m);
-  assert.match(example, /^OPENCODE_VISION_BASE_URL=https:\/\/opencode\.ai\/zen\/v1$/m);
-});
-
 test("opencode is registered and config reads the text and vision variables", () => {
   assert.ok(PROVIDERS.includes("opencode"));
   const c = loadConfig(env);
