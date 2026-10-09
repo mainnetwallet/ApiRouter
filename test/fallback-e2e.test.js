@@ -883,37 +883,62 @@ test("/health keeps failClosed false when a configured chain is merely unavailab
 // Key-index validation
 // ---------------------------------------------------------------------------
 
-test("PUT /api/fallback rejects key indexes the provider does not have", async () => {
+test("PUT /api/fallback rejects key restrictions the provider cannot honour", async () => {
   const { router, groq, mistral } = await startTwoProviderRouter();
   try {
-    const put = (body) => router.request("/api/fallback", {
-      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+    const put = (entries) => router.request("/api/fallback", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ pool: "text", entries })
     });
+    const entry = (keys) => [{ provider: "groq", model: "m1", keys }];
+    const saved = async () => (await getFallback(router)).chain.text;
 
     // groq/m1 is configured with keys 0 and 1 only.
-    const response = await put({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: [0, 5] }] });
+    const response = await put(entry([0, 5]));
     assert.equal(response.status, 400);
     const body = await response.json();
-    assert.match(body.error.message, /key indexes/);
+    assert.match(body.error.message, /key restrictions/);
     assert.deepEqual(body.error.details.keys, [
-      { provider: "groq", model: "m1", keys: [5], available: [0, 1] }
+      { provider: "groq", model: "m1", reason: "keys_not_configured", keys: [5], available: [0, 1] }
     ]);
-    assert.deepEqual((await getFallback(router)).chain.text, [], "a rejected request must save nothing");
+    assert.deepEqual(await saved(), [], "a rejected request must save nothing");
 
-    // A value that is not a usable index at all is refused the same way, rather
-    // than being normalized away into "every key".
-    assert.equal((await put({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: ["nonsense"] }] })).status, 400);
-    assert.equal((await put({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: [64] }] })).status, 400);
+    // Everything that is not a real, configured index is refused rather than
+    // normalized to null — which means EVERY key, and would silently widen the
+    // restriction the operator was trying to state.
+    const malformed = [
+      [true], [false], ["1"], [""], [null], [1.5], [-1], [64], [{}], [[]], [0, "1"], [0, true],
+      "1", 1, true, false, {}, 0, ""
+    ];
+    for (const keys of malformed) {
+      const refused = await put(entry(keys));
+      assert.equal(refused.status, 400, `keys ${JSON.stringify(keys)} must be refused`);
+      const detail = (await refused.json()).error.details.keys[0];
+      assert.ok(
+        ["keys_not_an_array", "keys_not_configured"].includes(detail.reason),
+        `keys ${JSON.stringify(keys)} reported reason ${detail.reason}`
+      );
+    }
+    assert.deepEqual(await saved(), [], "no malformed restriction may be saved");
 
-    // Real indexes are still accepted.
-    assert.equal((await put({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: [1] }] })).status, 200);
-    assert.deepEqual((await getFallback(router)).chain.text, [
-      { provider: "groq", model: "m1", keys: [1], enabled: true }
-    ]);
+    // An explicitly empty array would also normalize to "every key", so it is
+    // refused. Saying "every key" is done by omitting the field or sending null.
+    const empty = await put(entry([]));
+    assert.equal(empty.status, 400);
+    assert.equal((await empty.json()).error.details.keys[0].reason, "keys_empty");
 
-    // And a request honours the saved subset.
+    // Omitted and explicit null keep their meaning: every key.
+    for (const keys of [undefined, null]) {
+      assert.equal((await put(entry(keys))).status, 200, `keys ${String(keys)} means every key`);
+      assert.deepEqual(await saved(), [{ provider: "groq", model: "m1", keys: null, enabled: true }]);
+    }
+
+    // Real numeric indexes still work, whatever order they arrive in.
+    assert.equal((await put(entry([1, 0]))).status, 200);
+    assert.deepEqual(await saved(), [{ provider: "groq", model: "m1", keys: [0, 1], enabled: true }]);
+
+    // And a request walks exactly the keys that were allowed.
     assert.equal((await chat(router)).status, 200);
-    assert.deepEqual(posts(groq), ["g1"], "only the allowed key is called");
+    assert.deepEqual(posts(groq), ["g0", "g1"]);
   } finally {
     await router.close(); await groq.close(); await mistral.close();
   }
@@ -1026,5 +1051,50 @@ test("a pin naming nothing configured is still a 404, whatever the chain says", 
     assert.deepEqual(posts(mistral), []);
   } finally {
     await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Atomic combined saves
+// ---------------------------------------------------------------------------
+
+test("a combined mode + pool save that cannot be persisted applies neither change", async () => {
+  const dir = tmpDir("persist-fail");
+  const groq = await startMockUpstream(() => ok("m1"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    FALLBACK_CHAIN_FILE: path.join(dir, "chain.json"),
+    MANUAL_SELECTION_FILE: path.join(dir, "manual.json")
+  });
+  try {
+    const put = (body) => router.request("/api/fallback", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+    });
+
+    // A good combined save first, so there is real state to protect.
+    assert.equal((await put({
+      mode: "last-success", pool: "text", entries: [{ provider: "groq", model: "m1" }]
+    })).status, 200);
+    const before = await getFallback(router);
+    assert.equal(before.mode, "last-success");
+
+    // Now break persistence: the configuration directory is replaced by a
+    // regular file, so no write to it can succeed.
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.writeFileSync(dir, "not a directory");
+
+    const failed = await put({
+      mode: "auto", pool: "text", entries: [{ provider: "groq", model: "m1", keys: [0] }]
+    });
+    assert.equal(failed.status, 500, "a save that cannot be persisted must fail loudly");
+
+    // Both halves must be untouched: a request that changes two things changes
+    // both or neither.
+    const after = await getFallback(router);
+    assert.equal(after.mode, "last-success", "the mode must not be half-applied");
+    assert.deepEqual(after.chain, before.chain, "nor the chain");
+    assert.equal(after.chain.text[0].keys, null, "the previously saved chain is still the one in force");
+  } finally {
+    await router.close(); await groq.close();
   }
 });

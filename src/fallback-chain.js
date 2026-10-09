@@ -69,7 +69,12 @@ export function remembersSuccess(mode) {
 }
 
 const MAX_ENTRIES = 200;
-const MAX_KEYS = 64;
+/**
+ * The highest key index a chain entry may name. Exported so the API boundary
+ * rejects an out-of-range index with the same number the store normalizes
+ * against, rather than a second copy of it that could drift.
+ */
+export const MAX_KEYS = 64;
 
 export function normalizeMode(value) {
   const text = typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -80,17 +85,23 @@ export function normalizeMode(value) {
  * `keys` accepts `null`/absent (every configured key) or an array of key
  * indexes. Anything else is treated as "every key": a malformed key list must
  * not silently narrow a model to a subset the operator never chose.
+ *
+ * This is the defensive reader for a file on disk, so it stays forgiving. It
+ * will not, however, INVENT an index from a value that is not one: `true` and
+ * `"1"` both coerce to 1 under `Number()`, and reading a boolean as "key 1"
+ * would be a restriction nobody wrote. Callers that take input from a person
+ * should reject such values outright instead of relying on this — see the
+ * key-restriction validation in `api.js`.
  */
 function normalizeKeys(value) {
   if (!Array.isArray(value)) return null;
   const keys = [];
   const seen = new Set();
   for (const raw of value) {
-    const index = Number(raw);
-    if (!Number.isInteger(index) || index < 0 || index >= MAX_KEYS) continue;
-    if (seen.has(index)) continue;
-    seen.add(index);
-    keys.push(index);
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw >= MAX_KEYS) continue;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    keys.push(raw);
   }
   keys.sort((a, b) => a - b);
   // An empty array is indistinguishable from "no restriction was intended".
@@ -230,12 +241,35 @@ export class FallbackChainStore {
     return { mode: this.mode, text: this.get("text"), vision: this.get("vision") };
   }
 
+  /**
+   * Applies a mode change and/or one pool's chain as ONE persisted update.
+   *
+   * The two used to be written separately, so a request carrying both could
+   * persist the mode and then fail on the chain — a half-applied configuration
+   * that the next start would load, and that the running process would disagree
+   * with. Here the next state is computed first, persisted exactly once, and
+   * only adopted in memory once the write has landed. A failure at any point
+   * leaves both the file and the running configuration as they were.
+   *
+   * `mode: undefined` leaves the mode alone; `pool: null` leaves both chains
+   * alone, so either can be updated without touching the other.
+   */
+  update({ mode, pool = null, entries = null } = {}) {
+    if (pool !== null && !FALLBACK_POOLS.includes(pool)) throw new Error(`unknown pool "${pool}"`);
+    const nextMode = mode === undefined ? this.mode : normalizeMode(mode);
+    const nextByPool = pool === null ? this.byPool : { ...this.byPool, [pool]: normalizeEntries(entries) };
+
+    // Durable state first: nothing in memory moves unless the write succeeds.
+    this.persist({ ...nextByPool, mode: nextMode });
+
+    this.mode = nextMode;
+    this.byPool = nextByPool;
+    return this.snapshot();
+  }
+
   /** Replaces one pool's chain (an empty array clears it) and persists atomically. */
   set(pool, entries) {
-    if (!FALLBACK_POOLS.includes(pool)) throw new Error(`unknown pool "${pool}"`);
-    const next = normalizeEntries(entries);
-    this.persist({ ...this.byPool, [pool]: next });
-    this.byPool[pool] = next;
+    this.update({ pool, entries });
     return this.get(pool);
   }
 
@@ -244,9 +278,7 @@ export class FallbackChainStore {
   }
 
   setMode(mode) {
-    const next = normalizeMode(mode);
-    this.persist({ ...this.byPool, mode: next });
-    this.mode = next;
+    this.update({ mode });
     return this.mode;
   }
 

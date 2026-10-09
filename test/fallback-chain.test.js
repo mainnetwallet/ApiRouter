@@ -213,3 +213,116 @@ test("hasLegacyConfig sees both legacy sources", () => {
   fs.writeFileSync(manualFile, JSON.stringify({ text: [] }));
   assert.equal(hasLegacyConfig({ manualFile, env: {} }), false);
 });
+
+// ---------------------------------------------------------------------------
+// Atomic combined updates
+// ---------------------------------------------------------------------------
+
+/** A store whose persistence always fails: its parent path is a regular file. */
+function unwritableStore() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chain-blocked-"));
+  const blocker = path.join(dir, "blocker");
+  fs.writeFileSync(blocker, "not a directory");
+  return new FallbackChainStore({ file: path.join(blocker, "chain.json") });
+}
+
+test("a combined mode + pool update is persisted in a single write", () => {
+  const file = tmp("chain-atomic-");
+  const store = new FallbackChainStore({ file });
+  const writes = [];
+  const persist = store.persist.bind(store);
+  store.persist = (data) => { writes.push(data); return persist(data); };
+
+  store.update({ mode: FALLBACK_MODES.AUTO, pool: "text", entries: [{ provider: "a", model: "A" }] });
+
+  // One write, carrying BOTH changes. Writing them separately is what could
+  // leave the mode on disk and the chain missing.
+  assert.equal(writes.length, 1, "a combined update must persist exactly once");
+  assert.equal(writes[0].mode, FALLBACK_MODES.AUTO);
+  assert.deepEqual(writes[0].text.map(entryId), ["a/A"]);
+
+  // And the file agrees with memory.
+  const reloaded = new FallbackChainStore({ file });
+  assert.equal(reloaded.mode, FALLBACK_MODES.AUTO);
+  assert.deepEqual(reloaded.get("text").map(entryId), ["a/A"]);
+});
+
+test("either half of a combined update can be left alone", () => {
+  const store = new FallbackChainStore({ file: tmp("chain-halves-") });
+  store.update({ mode: FALLBACK_MODES.LAST_SUCCESS, pool: "text", entries: [{ provider: "a", model: "A" }] });
+
+  // mode only: the chain is untouched.
+  store.update({ mode: FALLBACK_MODES.AUTO });
+  assert.equal(store.mode, FALLBACK_MODES.AUTO);
+  assert.deepEqual(store.get("text").map(entryId), ["a/A"]);
+
+  // pool only: the mode is untouched.
+  store.update({ pool: "vision", entries: [{ provider: "b", model: "B" }] });
+  assert.equal(store.mode, FALLBACK_MODES.AUTO);
+  assert.deepEqual(store.get("vision").map(entryId), ["b/B"]);
+  assert.deepEqual(store.get("text").map(entryId), ["a/A"]);
+});
+
+test("a failed persistence changes neither memory nor the file", () => {
+  const store = unwritableStore();
+  const before = store.snapshot();
+  assert.deepEqual(before, { mode: FALLBACK_MODES.FIXED, text: [], vision: [] });
+
+  // Asserts a FILESYSTEM failure, not merely "something threw": a missing or
+  // broken update method would also throw, and would look like a pass.
+  let thrown = null;
+  try {
+    store.update({ mode: FALLBACK_MODES.AUTO, pool: "text", entries: [{ provider: "a", model: "A" }] });
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown, "the write failure must surface");
+  assert.equal(typeof thrown.code, "string", `expected a filesystem error, got ${thrown.name}: ${thrown.message}`);
+
+  // Neither half may be applied: not the mode, not the chain.
+  assert.deepEqual(store.snapshot(), before, "memory must be exactly as it was");
+  assert.equal(store.mode, FALLBACK_MODES.FIXED);
+  assert.deepEqual(store.get("text"), []);
+});
+
+test("a failed persistence leaves a previously saved file untouched", () => {
+  const file = tmp("chain-keep-");
+  const store = new FallbackChainStore({ file });
+  store.update({ mode: FALLBACK_MODES.LAST_SUCCESS, pool: "text", entries: [{ provider: "a", model: "A" }] });
+  const onDisk = fs.readFileSync(file, "utf8");
+
+  // Break persistence, then attempt a combined update.
+  store.file = path.join(path.dirname(file), "blocker", "chain.json");
+  fs.writeFileSync(path.join(path.dirname(file), "blocker"), "not a directory");
+  assert.throws(() => store.update({ mode: FALLBACK_MODES.AUTO, pool: "text", entries: [{ provider: "c", model: "C" }] }));
+
+  assert.equal(store.mode, FALLBACK_MODES.LAST_SUCCESS, "in-memory mode unchanged");
+  assert.deepEqual(store.get("text").map(entryId), ["a/A"], "in-memory chain unchanged");
+  assert.equal(fs.readFileSync(file, "utf8"), onDisk, "the saved file is byte-for-byte unchanged");
+});
+
+test("set and setMode still work, and still go through the same single write", () => {
+  const file = tmp("chain-single-");
+  const store = new FallbackChainStore({ file });
+  const writes = [];
+  const persist = store.persist.bind(store);
+  store.persist = (data) => { writes.push(data); return persist(data); };
+
+  store.set("text", [{ provider: "a", model: "A" }]);
+  store.setMode(FALLBACK_MODES.AUTO);
+  store.clear("text");
+
+  assert.equal(writes.length, 3, "one write per call");
+  assert.deepEqual(store.get("text"), []);
+  assert.equal(store.mode, FALLBACK_MODES.AUTO);
+  assert.deepEqual(new FallbackChainStore({ file }).snapshot(), { mode: FALLBACK_MODES.AUTO, text: [], vision: [] });
+});
+
+test("a key list never invents an index from a value that is not one", () => {
+  // `Number(true)` is 1 and `Number("1")` is 1; reading either as "key 1" would
+  // be a restriction nobody wrote. The reader refuses to coerce.
+  assert.deepEqual(normalizeEntry({ provider: "a", model: "A", keys: [true, "1", 0] }).keys, [0]);
+  assert.deepEqual(normalizeEntry({ provider: "a", model: "A", keys: [1, false, "0"] }).keys, [1]);
+  // Values that were never indexes at all still fall back to "every key".
+  assert.equal(normalizeEntry({ provider: "a", model: "A", keys: [true, "1"] }).keys, null);
+});

@@ -5,6 +5,7 @@ import {
   FALLBACK_MODE_INFO,
   FALLBACK_MODES,
   FALLBACK_POOLS,
+  MAX_KEYS,
   normalizeEntries,
   normalizeMode,
   remembersSuccess
@@ -309,6 +310,34 @@ export function createApi({
       },
       summary: summarizeHealth(entries)
     };
+  }
+
+  /**
+   * Validates one entry's `keys` exactly as the operator sent it.
+   *
+   * `keys` is the one field where a lenient reading is dangerous. Anything not
+   * understood here would be normalized to `null`, which means EVERY key, so a
+   * typo — or a value that merely coerces to an index, like `true` or `"1"` —
+   * would silently widen the restriction instead of failing.
+   *
+   * Absent and explicit `null` still mean every key: that is the documented way
+   * to say it, and it is what the panel sends for an unrestricted model.
+   * Everything else must be an array of real integers this provider has.
+   *
+   * Returns null when the restriction is valid, or a machine-readable reason.
+   */
+  function keyRestrictionProblem(keys, available) {
+    if (keys === undefined || keys === null) return null;
+    if (!Array.isArray(keys)) return { reason: "keys_not_an_array", keys };
+    if (keys.length === 0) return { reason: "keys_empty", keys };
+    const offending = [...new Set(keys.filter((value) => (
+      typeof value !== "number"
+      || !Number.isInteger(value)
+      || value < 0
+      || value >= MAX_KEYS
+      || !available.has(value)
+    )))];
+    return offending.length > 0 ? { reason: "keys_not_configured", keys: offending } : null;
   }
 
   // --- /api/fallback -----------------------------------------------------
@@ -618,10 +647,9 @@ export function createApi({
             keyIndexes.get(id).add(target.keyIndex);
           }
 
-          // Checked against what was SENT, not the normalized form: a key index
-          // that normalization would quietly discard (a nonsense value, or one
-          // past its sanity bound) must be refused rather than read as "every
-          // key", which would widen a restriction the operator tried to state.
+          // Checked against what was SENT, not the normalized form: a key
+          // restriction the store would quietly discard is read as "every key",
+          // so anything malformed here must be refused rather than widened.
           const unknown = [];
           const badKeys = [];
           for (const raw of body.entries) {
@@ -635,13 +663,13 @@ export function createApi({
               unknown.push(id);
               continue;
             }
-            if (!Array.isArray(raw?.keys)) continue;
-            const offending = [...new Set(raw.keys.filter((value) => {
-              const index = Number(value);
-              return !Number.isInteger(index) || index < 0 || !available.has(index);
-            }))];
-            if (offending.length > 0) {
-              badKeys.push({ provider, model, keys: offending, available: [...available].sort((a, b) => a - b) });
+            const problem = keyRestrictionProblem(raw?.keys, available);
+            if (problem) {
+              badKeys.push({
+                provider, model,
+                ...problem,
+                available: [...available].sort((a, b) => a - b)
+              });
             }
           }
 
@@ -656,7 +684,7 @@ export function createApi({
           if (badKeys.length > 0) {
             return fail(
               req, res, 400,
-              "entries contains key indexes that are not configured for this pool",
+              "entries contains key restrictions that are not valid for this pool",
               "invalid_request",
               { pool, keys: badKeys }
             );
@@ -666,9 +694,14 @@ export function createApi({
         }
 
         // Nothing above failed, so this is the only place anything is written.
+        // A mode and a chain arriving together go through ONE persisted update:
+        // writing them separately could land the mode and then fail on the
+        // chain, leaving a half-applied configuration behind.
         try {
-          if (hasMode) fallbackChain.setMode(mode);
-          if (hasPool) fallbackChain.set(pool, entries);
+          fallbackChain.update({
+            ...(hasMode ? { mode } : {}),
+            ...(hasPool ? { pool, entries } : {})
+          });
         } catch {
           return fail(req, res, 500, "Could not save the fallback configuration", "server_error");
         }
