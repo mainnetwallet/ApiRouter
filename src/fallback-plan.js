@@ -11,6 +11,13 @@ import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId }
  *   AUTO    the same entries (or every configured target when the chain is
  *           empty) ordered by measured health and latency
  *
+ * Manual Model Selection (mode `manual`) is the one mode that walks three
+ * phases in a single plan:
+ *
+ *   MANUAL        the operator's selected entries, in exactly the saved order
+ *   HEALTH        every reachable model that is NOT one of those entries, by health
+ *   MANUAL_RETRY  one final pass over the selected entries, same order
+ *
  * There is no priority phase and no separate normal-fallback phase any more:
  * the configured chain IS the order, and the automatic order is what takes over
  * when the operator has configured nothing. Nothing here re-ranks a configured
@@ -24,12 +31,16 @@ import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId }
 export const PHASES = Object.freeze({
   STICKY: "sticky",
   CHAIN: "chain",
-  AUTO: "auto"
+  AUTO: "auto",
+  MANUAL: "manual-selection",
+  HEALTH: "health-fallback",
+  MANUAL_RETRY: "manual-retry"
 });
 
 export const PLAN_SOURCE = Object.freeze({
   CHAIN: "chain",
-  AUTO: "auto"
+  AUTO: "auto",
+  MANUAL: "manual"
 });
 
 /** Modes in which a success is remembered and leads the next request. */
@@ -196,9 +207,72 @@ export function automaticGroupIds({ cacheKey, groups, health, now, bucketMs = AU
   return ids;
 }
 
-function toSteps(groups, phase) {
-  return groups.flatMap((group) =>
-    group.targets.map((target) => ({ target, phase, group: group.id })));
+function toSteps(groups, phase, extra = {}) {
+  // A target appears once per phase: two list entries naming the same
+  // provider/model/key must not become two calls.
+  const seen = new Set();
+  const steps = [];
+  for (const group of groups) {
+    for (const target of group.targets) {
+      const id = targetId(target);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      steps.push({ target, phase, group: group.id, ...extra });
+    }
+  }
+  return steps;
+}
+
+/**
+ * Manual Model Selection: three phases in one plan.
+ *
+ *   1. MANUAL        the saved entries, in the exact order saved. Interleaved
+ *                    providers stay interleaved (gemini A, groq B, gemini C ...):
+ *                    nothing here groups or sorts by provider, because groups
+ *                    are keyed by provider/model and walked in `configured` order.
+ *   2. HEALTH        every reachable target whose provider/model is not one of
+ *                    the saved entries, ordered by the existing health + latency
+ *                    ordering. "Saved" includes parked (disabled) entries — an
+ *                    operator who parked a model did not ask for it as a fallback
+ *                    — and entries whose key subset narrowed to nothing, so a
+ *                    restriction can never leak a model's other keys into this
+ *                    phase. Exclusion is by MODEL, never by provider: an unselected
+ *                    model of a provider that appears in the selection stays here.
+ *   3. MANUAL_RETRY  the same entries and keys as phase 1, in the same order,
+ *                    flagged `retry` so the walker treats them as the one
+ *                    bounded second pass rather than as duplicates.
+ *
+ * Fail closed: when the selection itself has nothing walkable for this request,
+ * the plan is empty. Phase 2 exists to catch FAILURES of the operator's order,
+ * not to substitute for an order that cannot be honoured at all.
+ */
+function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now }) {
+  const selected = new Set(savedEntries.map((entry) => entryId(entry)));
+  const phase1 = toSteps(configured, PHASES.MANUAL);
+  const meta = {
+    source: PLAN_SOURCE.MANUAL,
+    mode: FALLBACK_MODES.MANUAL,
+    configured: configured.length,
+    entries: savedEntries.length,
+    sticky: null,
+    rememberedKey: null
+  };
+
+  if (phase1.length === 0) {
+    return { steps: [], groups: configured, failClosed: true, ...meta };
+  }
+
+  const others = [...grouped.values()].filter((group) => !selected.has(group.id));
+  const fallbackGroups = automaticGroupsOrder(others, { cacheKey: `${cacheKey}|manual-fallback`, health, now });
+  const phase2 = toSteps(fallbackGroups, PHASES.HEALTH);
+  const phase3 = toSteps(configured, PHASES.MANUAL_RETRY, { retry: true });
+
+  return {
+    steps: [...phase1, ...phase2, ...phase3],
+    groups: [...configured, ...fallbackGroups],
+    failClosed: false,
+    ...meta
+  };
 }
 
 /**
@@ -236,6 +310,12 @@ export function buildRoutePlan({
    */
   const savedEntries = allEntries(chain);
   const useChain = !pinned && savedEntries.length > 0;
+
+  // Manual Model Selection has its own three-phase plan; every other mode, and
+  // every pinned request, takes the paths below untouched.
+  if (useChain && mode === FALLBACK_MODES.MANUAL) {
+    return buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now });
+  }
 
   let ordered;
   let source;

@@ -308,14 +308,16 @@ Every observation carries the timestamp at which it was taken. An observation is
 Default failed-target cooldown:
 
 ```text
-20 minutes
+12 minutes
 ```
 
 Default health refresh interval:
 
 ```text
-15 minutes
+12 minutes
 ```
+
+The two are independent. The cooldown is how long a *failed* target is skipped by routing; the interval is how often probes run. Status-specific cooldowns are unchanged: HTTP 400 puts a target on an 8-minute cooldown, an HTTP 408 timeout on a 1-minute cooldown, and a 413 on 5 minutes. The remembered-session TTL (20 minutes) is a separate setting and is not affected.
 
 The server starts the health monitor at startup and stops it cleanly on SIGINT/SIGTERM. Refresh cycles never overlap, run with bounded concurrency (4 probes at a time) so one slow provider cannot stall the cycle, and a failing provider never prevents the others from being checked.
 
@@ -364,6 +366,39 @@ the header share one default session per protocol and pool.
 
 In the `fixed` mode nothing is remembered at all: every request starts at the
 first model of the chain and its first eligible key.
+
+
+### Manual Model Selection (three phases)
+
+`manual` is a fourth fallback mode. It is the only mode whose plan has more than
+one source, and it is built by `buildManualPlan` in `fallback-plan.js`:
+
+1. **`manual-selection`** — the saved entries in exactly the saved order. Groups
+   are keyed by provider/model, so an interleaved selection (provider P model A,
+   provider Q model B, provider P model C) stays interleaved; nothing groups or
+   sorts by provider. Every eligible key of a model is tried before the next.
+2. **`health-fallback`** — every reachable model that is *not* a saved entry,
+   ordered by the existing health/latency ordering. Exclusion is by model, so an
+   unselected model of a provider that appears in the selection stays eligible.
+   Parked (disabled) entries and entries narrowed to no keys are excluded too,
+   so a restriction can never leak a model's other keys into this phase.
+3. **`manual-retry`** — the same entries and keys as phase 1, in the same order,
+   flagged `retry`. This is one pass; the plan has no fourth phase.
+
+The per-request "a target is invoked at most once" rule is unchanged for every
+other step. A `retry` step is the one bounded exception (`withFallback` in
+`router.js`): each target is retried at most once; a cooldown that existed when
+the request reached the target is never overridden; a credential-level or
+non-transient failure (400/401/402/403/404/413/422) is never retried; and the one
+cooldown the pass looks past is the one *this request* set through a transient,
+target-scoped failure (timeout, 429, 5xx, transport error), and only while it is
+still exactly that cooldown. Without that, every target that failed in phase 1
+would already be cooling down from that failure and phase 3 could retry nothing.
+
+If the selection itself has nothing walkable for a request, the plan is empty and
+the request fails closed (`fallback_chain_unusable`): phase 2 catches failures of
+the operator's order, it does not stand in for an order that cannot be honoured.
+Manual mode remembers nothing. A pinned request never uses any of this.
 
 ## Security
 
@@ -421,7 +456,7 @@ The gateway is self-describing. `/api/*` exposes the state a browser needs, and
 the panel is served from the same origin — no separate service, no CORS shim.
 
 The API layer is strictly read-only apart from `POST /api/health/refresh`, which
-does nothing the 15-minute timer would not do anyway. It cannot alter routing,
+does nothing the 12-minute timer would not do anyway. It cannot alter routing,
 health, provider configuration or the proxy path.
 
 ### Representing the routing decision

@@ -42,7 +42,7 @@ const MAX_PENDING = 200;
  * fallback-plan.js by value; a phase that is not listed here is stored as null,
  * so the two must be changed together.
  */
-const PHASES = ["sticky", "chain", "auto"];
+const PHASES = ["sticky", "chain", "auto", "manual-selection", "health-fallback", "manual-retry"];
 const pad = (value) => String(value).padStart(6, "0");
 
 /**
@@ -54,7 +54,7 @@ function plainAttempt(attempt, index) {
   return {
     index: index + 1,
     attemptId: typeof attempt?.attemptId === "string" && attempt.attemptId ? attempt.attemptId : null,
-    // "sticky" | "chain" | "auto" | null (older callers); and whether this row was
+    // "sticky" | "chain" | "auto" | "manual-selection" | "health-fallback" | "manual-retry" | null (older callers); and whether this row was
     // skipped without a network call (cooldown / already attempted).
     phase: PHASES.includes(attempt?.phase) ? attempt.phase : null,
     skipped: attempt?.skipped === true,

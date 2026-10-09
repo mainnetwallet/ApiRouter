@@ -113,7 +113,7 @@ const sessions = new SessionStore();
  * Mirrors the default in `src/health.js`. Passed explicitly so the value the
  * system page reports is the value the monitor is actually running on.
  */
-const HEALTH_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+const HEALTH_CHECK_INTERVAL_MS = 12 * 60 * 1000;
 
 /** Built control panel. Absent until `npm run ui:build` has run. */
 const staticFiles = createStaticHandler({

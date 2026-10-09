@@ -94,11 +94,23 @@ export function classifyFailure(status, error = null) {
   return describeFailure(status, error).scope;
 }
 
+/**
+ * A failure that says "not right now" rather than "not this request / not this
+ * credential": a timeout, rate limit, server error, or a call that never got an
+ * HTTP answer at all. Only these are worth a second look in the final manual
+ * pass. Everything else (400/404/413/422 about the request or model, 401/402/403
+ * about the credential) would simply fail the same way again.
+ */
+function isTransientStatus(status) {
+  const code = Number(status) || 0;
+  return code === 0 || code === 408 || code === 425 || code === 429 || code >= 500;
+}
+
 const SIZE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 
 // A 408 is a timeout (this router's own, or an upstream's). It says the call was
 // slow right now, not that the provider is down, so cool the target down
-// briefly instead of for the full 20 minutes. Otherwise one slow network
+// briefly instead of for the full 12 minute default. Otherwise one slow network
 // moment puts every provider and model into cooldown at once.
 const TIMEOUT_COOLDOWN_MS = 60 * 1000;
 
@@ -209,7 +221,26 @@ export class RouteSession {
  *
  * Per request, a target (pool + provider + model + keyIndex) is invoked at most
  * once; a repeat is reported through `onSkip`, never called. Targets cooling
- * down in the shared health registry are skipped the same way. Every success is
+ * down in the shared health registry are skipped the same way.
+ *
+ * The one exception is a step flagged `retry` (the final pass of Manual Model
+ * Selection, see fallback-plan.js). It is the single, bounded second look at a
+ * target, with these rules:
+ *
+ *   - each target is retried at most once, however often the plan lists it;
+ *   - a target already cooling down when this request reached it, and a target
+ *     cooled by a credential-level or non-transient failure (401/402/403, 400,
+ *     404, 413, 422 ...), is NEVER retried: that cooldown is a real health
+ *     verdict, and the pass does not override it;
+ *   - the one cooldown the pass looks past is the one THIS request put on a
+ *     target through a transient, target-scoped failure (timeout, 429, 5xx,
+ *     transport error), and only while nobody else has refreshed it since.
+ *     Without this every target that failed in the first pass would be sitting
+ *     in the cooldown that failure just created, and the final pass could never
+ *     retry anything. A retry success clears the cooldown; a retry failure
+ *     starts a fresh one.
+ *
+ * Every success is
  * recorded on the session as its remembered target when the selected mode
  * remembers one — the walker never edits the configured order, and the record
  * is per session, never global.
@@ -233,6 +264,10 @@ export async function withFallback(
   }
 
   const attempted = new Set();
+  // Final-pass bookkeeping (see the `retry` rules above).
+  const retried = new Set();
+  // target id -> the cooldownUntil THIS request set through a transient failure.
+  const ownTransientCooldown = new Map();
   const cooldownReported = new Set();
   const failures = [];
   // Unique targets only: a target can appear in more than one phase, and a
@@ -248,11 +283,17 @@ export async function withFallback(
     const target = step.target;
     const id = health.key(target);
 
-    if (attempted.has(id)) {
-      skip(step, "already_attempted");
+    const isRetry = step.retry === true;
+    if (isRetry ? retried.has(id) : attempted.has(id)) {
+      skip(step, isRetry ? "already_retried" : "already_attempted");
       continue;
     }
-    if (!health.isAvailable(target)) {
+    // The cooldown this request itself created by a transient failure does not
+    // block the final pass, as long as it is still exactly that cooldown.
+    const ownCooldown = isRetry
+      && ownTransientCooldown.has(id)
+      && Number(health.get(id)?.cooldownUntil) === ownTransientCooldown.get(id);
+    if (!ownCooldown && !health.isAvailable(target)) {
       // A cooling target is skipped here; it may appear again later in the
       // plan, which is the same skip, not a retry.
       if (!cooldownReported.has(id)) {
@@ -264,6 +305,8 @@ export async function withFallback(
 
     eligible += 1;
     attempted.add(id);
+    if (isRetry) retried.add(id);
+    ownTransientCooldown.delete(id);
     const startedAt = Date.now();
 
     try {
@@ -289,7 +332,12 @@ export async function withFallback(
         ...cooldownOptions(status),
         ...(kind ? { reason: `${status} ${kind} on ${target.model}` } : {})
       });
-      if (scope === FAILURE_SCOPE.TARGET) continue;
+      if (scope === FAILURE_SCOPE.TARGET) {
+        if (isTransientStatus(status)) {
+          ownTransientCooldown.set(id, Number(health.get(id)?.cooldownUntil) || 0);
+        }
+        continue;
+      }
 
       // Key- and account-level failures describe the credential, so the sibling
       // models sharing it are cooled down too and this request stops burning

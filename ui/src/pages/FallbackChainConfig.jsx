@@ -163,7 +163,9 @@ export default function FallbackChainConfig() {
                 <span className="tiny dim">
                   {data.mode === "fixed"
                     ? "Every request starts at the first model of the chain."
-                    : "A success is remembered and tried first on the next request."}
+                    : data.mode === "manual"
+                      ? "Your selection first, then every other model by health, then one final pass over your selection."
+                      : "A success is remembered and tried first on the next request."}
                 </span>
               </div>
             </div>

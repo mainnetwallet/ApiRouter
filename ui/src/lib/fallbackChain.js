@@ -13,7 +13,10 @@ export const POOL_LABEL = { text: "Text", vision: "Vision" };
 export const PHASE_LABEL = {
   sticky: "Remembered",
   chain: "Fallback chain",
-  auto: "Automatic (health + latency)"
+  auto: "Automatic (health + latency)",
+  "manual-selection": "Manual selection",
+  "health-fallback": "Health-based fallback",
+  "manual-retry": "Final manual retry"
 };
 
 export function phaseLabel(phase) {

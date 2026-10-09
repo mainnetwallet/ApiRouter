@@ -185,6 +185,14 @@ Fallback**. Text and Vision are ordered separately, from their own measurements.
 | **Fixed Order** (default) | The chain is always walked in its saved order, and every eligible key of a model is tried before the next model. The key that last answered is tried first within its own model, but a success never moves a model ahead of an earlier one. |
 | **Remember Last Successful** | The model and key that last answered are tried first. If they fail or are cooling down, the chain continues in its saved order. The saved order is never modified. |
 | **Automatic Health-Based Fallback** | The chain is re-ordered from measured health and latency on each cycle. Selecting this mode is what allows re-sorting. |
+| **Manual Model Selection** | Three phases, in one request. **1.** Your selected models, in exactly the saved order (interleaved providers stay interleaved), every eligible key of a model before the next. **2.** If all of them fail, every model you did *not* select, ordered by measured health and latency. **3.** One final pass over your selected models in their original order. See below. |
+
+#### Manual Model Selection in detail
+
+- **Exclusion is by model, not provider.** With Gemini A, Groq B, Gemini C selected, an unselected Gemini B is still a phase-2 fallback. Parked (disabled) entries and models narrowed to no keys are *not* used as fallbacks.
+- **Phase 3 is one bounded pass.** Each target is retried at most once. A target that was already cooling down, or was cooled by a credential-level or non-transient failure (400/401/402/403/404/413/422), is never retried. The only cooldown phase 3 looks past is the one *this request* put on a target through a transient failure (timeout, 429, 5xx, transport error) — otherwise every target that failed in phase 1 would be sitting in the cooldown that failure just created and the final pass could never retry anything.
+- **Fails closed.** If none of the selected models can serve the request (wrong protocol, no matching key), the request fails rather than substituting other models. Pinned requests never use any of this.
+- Live Logs / request timelines label each attempt `manual-selection`, `health-fallback` or `manual-retry`.
 
 **Reset Fallback** clears the remembered model/key preferences immediately, with
 no restart. It never deletes the saved chain, the selected mode, the providers,

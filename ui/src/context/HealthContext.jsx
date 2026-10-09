@@ -11,7 +11,7 @@ import { useToast } from "./ToastContext.jsx";
  * whole application: only components that call `useHealth()` re-render when a
  * poll lands. The shell, the sidebar and unrelated pages are untouched.
  *
- * Health moves on a 15-minute monitor cycle by default, so polling faster than
+ * Health moves on a 12-minute monitor cycle by default, so polling faster than
  * 10s would only burn requests — and conditional ETags mean an unchanged poll
  * costs a 304 and produces no state update at all.
  */

@@ -180,6 +180,8 @@ export function describeRouting({
         // an automatic order the router will not actually use.
         ? `The saved Fallback Chain holds ${plan.entries} entr${plan.entries === 1 ? "y" : "ies"} but no target it names can serve this request, so nothing is walked. `
           + "The router will not substitute a model outside the chain — clear the chain to hand routing back to the automatic order"
+        : plan.source === "manual"
+        ? `Manual Model Selection: your ${plan.configured} selected model(s) in the saved order, then every model you did not select ordered by measured health and latency, then one final pass over your selection in its original order. Every eligible key of a model is tried before the next model`
         : automatic
         ? plan.configured > 0
           ? `Automatic Health-Based Fallback: the ${plan.configured} configured model(s) are ordered by measured health and latency (lower measured latency first; unmeasured models keep a stable configured order). Every eligible key of a model is tried before the next model`
@@ -191,7 +193,9 @@ export function describeRouting({
     {
       key: "remembered",
       label: "Remembered target",
-      detail: mode === FALLBACK_MODES.FIXED
+      detail: mode === FALLBACK_MODES.MANUAL
+        ? `Manual Model Selection: nothing is remembered; every request starts at the first selected model and its first eligible key (mode: ${fallbackModeLabel(mode)})`
+        : mode === FALLBACK_MODES.FIXED
         ? `Fixed Order: every request starts at the first model of the chain and its first eligible key. Nothing is remembered (mode: ${fallbackModeLabel(mode)})`
         : plan.sticky
           ? `the target that last answered (20-minute TTL) is tried first, then the chain resumes in its saved order (mode: ${fallbackModeLabel(mode)})`
