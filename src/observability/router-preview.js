@@ -175,13 +175,18 @@ export function describeRouting({
     {
       key: "ranking",
       label: "Route order",
-      detail: automatic
+      detail: plan.failClosed
+        // The chain exists and permits nothing. Say that, rather than describing
+        // an automatic order the router will not actually use.
+        ? `The saved Fallback Chain holds ${plan.entries} entr${plan.entries === 1 ? "y" : "ies"} but no target it names can serve this request, so nothing is walked. `
+          + "The router will not substitute a model outside the chain — clear the chain to hand routing back to the automatic order"
+        : automatic
         ? plan.configured > 0
           ? `Automatic Health-Based Fallback: the ${plan.configured} configured model(s) are ordered by measured health and latency (lower measured latency first; unmeasured models keep a stable configured order). Every eligible key of a model is tried before the next model`
           : "no fallback chain is configured, so the automatic health-based order applies: healthy models with lower measured latency first, unmeasured models in a stable configured order. Every eligible key of a model is tried before the next model"
         : `${plan.configured} configured model(s), in the saved Fallback Chain order; every eligible key of a model is tried before the next model. Health only skips cooling targets`,
       count: ranked.length,
-      state: "info"
+      state: plan.failClosed ? "error" : "info"
     },
     {
       key: "remembered",
@@ -230,6 +235,10 @@ export function describeRouting({
       keys: entry.keys ?? null
     })),
     chainTargets: plan.configured,
+    // The chain is saved but permits nothing for this request: the panel shows
+    // this state instead of describing an order that will not be walked.
+    chainFailClosed: plan.failClosed,
+    chainEntries: plan.entries,
     retryableStatus: Array.isArray(retryableStatus) ? [...retryableStatus].sort((a, b) => a - b) : [],
     stages,
     candidates,

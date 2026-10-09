@@ -137,25 +137,47 @@ export function entryState(entry, group) {
 }
 
 /**
- * The order the pool will actually be walked, as far as the panel can know it.
- * A configured chain is its own order; with no chain the gateway builds the
- * automatic order, which the preview endpoint reports — never guessed here.
+ * Which order is in force for a pool, mirroring the planner exactly.
+ *
+ * Three states, and they are not interchangeable:
+ *
+ *   no entries at all        the pool is unconfigured -> automatic order
+ *   entries that resolve     -> their own order (or automatic, in auto mode)
+ *   entries that resolve to
+ *   nothing usable           -> nothing is walked. The chain is the operator's
+ *                               configuration and it permits no target, so the
+ *                               request fails rather than being routed to a
+ *                               model or key the chain does not cover.
  */
 export function chainSummary(entries, catalogue = [], mode) {
   const index = indexCatalogue(catalogue);
-  const active = (entries ?? []).filter((entry) => entry.enabled !== false && index.has(entryId(entry)));
-  if (active.length > 0) {
+  const saved = Array.isArray(entries) ? entries : [];
+
+  if (saved.length === 0) {
     return {
-      source: mode === "auto" ? "auto" : "chain",
-      label: mode === "auto"
-        ? "Automatic Health-Based Fallback over the configured models"
-        : "Configured order",
-      count: active.length
+      source: "auto",
+      label: "Automatic Health-Based Fallback (no chain configured)",
+      count: 0,
+      failClosed: false
     };
   }
+
+  const usable = saved.filter((entry) => entry.enabled !== false && index.has(entryId(entry)));
+  if (usable.length === 0) {
+    return {
+      source: "fail-closed",
+      label: "Chain configured, but no entry is usable — requests will fail rather than route elsewhere",
+      count: 0,
+      failClosed: true
+    };
+  }
+
   return {
-    source: "auto",
-    label: "Automatic Health-Based Fallback (no valid chain configured)",
-    count: 0
+    source: mode === "auto" ? "auto" : "chain",
+    label: mode === "auto"
+      ? "Automatic Health-Based Fallback over the configured models"
+      : "Configured order",
+    count: usable.length,
+    failClosed: false
   };
 }

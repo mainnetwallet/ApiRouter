@@ -646,3 +646,169 @@ test("saving a chain re-plans immediately, with no health change and no new buck
     await router.close(); await groq.close(); await mistral.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Fail-closed routing
+//
+// A pool with no saved chain routes automatically. A pool whose saved chain
+// cannot serve the request must NOT: widening to a model outside the chain, or
+// to a key an entry excludes, is the silent fallback the chain exists to stop.
+//
+// The API only saves entries that name models configured AT THAT MOMENT, so the
+// unusable-chain cases arise the way they do in production: a provider or model
+// disappears from the environment while the chain that names it is persisted.
+// ---------------------------------------------------------------------------
+
+/** A chain file shared across two router starts, so a saved chain can outlive
+ *  the providers it names. */
+const chainEnv = (dir, env = {}) => ({
+  FALLBACK_CHAIN_FILE: path.join(dir, "fallback-chain.json"),
+  MANUAL_SELECTION_FILE: path.join(dir, "manual-selection.json"),
+  ...env
+});
+
+test("a chain naming a provider that is no longer configured routes only through its usable entries", async () => {
+  const dir = tmpDir("gone-provider");
+  const groq = await startMockUpstream(() => ok("m1"));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const shared = { MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1` };
+
+  const first = await startRouter(chainEnv(dir, {
+    ...shared, GROQ_API_KEYS: "g0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+  }));
+  try {
+    assert.equal((await saveChain(first, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+  } finally {
+    await first.close();
+  }
+
+  // groq is removed from the environment; the persisted chain still names it.
+  const second = await startRouter(chainEnv(dir, shared));
+  try {
+    assert.equal((await chat(second)).status, 200);
+    assert.deepEqual(posts(mistral), ["s0"], "the entry that is still usable serves");
+    assert.deepEqual(posts(groq), [], "the removed provider is never called");
+  } finally {
+    await second.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("a chain whose only provider is gone fails closed with a 503 and routes nowhere", async () => {
+  const dir = tmpDir("gone-only");
+  const groq = await startMockUpstream(() => ok("m1"));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const mistralEnv = { MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1` };
+
+  const first = await startRouter(chainEnv(dir, {
+    ...mistralEnv, GROQ_API_KEYS: "g0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+  }));
+  try {
+    assert.equal((await saveChain(first, "text", [{ provider: "groq", model: "m1" }])).status, 200);
+  } finally {
+    await first.close();
+  }
+
+  const second = await startRouter(chainEnv(dir, mistralEnv));
+  try {
+    const response = await chat(second);
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.error.type, "fallback_chain_unusable", "the error says why, not a generic outage");
+    assert.match(body.error.message, /Fallback Chain/);
+    assert.deepEqual(posts(mistral), [], "a configured model outside the chain must not be substituted");
+  } finally {
+    await second.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("an unusable chain is per-pool: vision keeps routing automatically", async () => {
+  const dir = tmpDir("pool-isolation");
+  const groq = await startMockUpstream(() => ok("m1"));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const vision = await startMockUpstream(() => ok("vm1"));
+  // mistral is a TEXT provider that the chain does NOT name, so a router that
+  // widened would happily serve the request through it.
+  const afterEnv = {
+    MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`,
+    GROQ_VISION_API_KEYS: "v0", GROQ_VISION_MODELS: "vm1", GROQ_VISION_BASE_URL: `${vision.baseUrl}/v1`
+  };
+
+  const first = await startRouter(chainEnv(dir, {
+    ...afterEnv, GROQ_API_KEYS: "g0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+  }));
+  try {
+    assert.equal((await saveChain(first, "text", [{ provider: "groq", model: "m1" }])).status, 200);
+    // No vision chain is saved at all.
+  } finally {
+    await first.close();
+  }
+
+  const second = await startRouter(chainEnv(dir, afterEnv));
+  try {
+    assert.equal((await chat(second)).status, 503, "the text chain is unusable and must not widen to mistral");
+    assert.deepEqual(posts(mistral), [], "an unnamed text model must not be substituted");
+    assert.equal((await chatImage(second)).status, 200, "vision has no chain, so it still routes automatically");
+    assert.deepEqual(posts(vision), ["v0"]);
+  } finally {
+    await second.close(); await groq.close(); await mistral.close(); await vision.close();
+  }
+});
+
+test("a chain whose entries are all disabled fails closed, and clearing it restores automatic routing", async () => {
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1", enabled: false },
+      { provider: "mistral", model: "m2", enabled: false }
+    ])).status, 200);
+
+    assert.equal((await chat(router)).status, 503, "saved entries that permit nothing must not widen");
+    assert.deepEqual(posts(groq), []);
+    assert.deepEqual(posts(mistral), []);
+
+    // Clearing the chain is the way to ask for automatic routing.
+    assert.equal((await saveChain(router, "text", [])).status, 200);
+    assert.equal((await chat(router)).status, 200);
+    assert.ok(posts(groq).length + posts(mistral).length > 0, "the automatic order takes over");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("the preview reports the fail-closed state instead of an automatic order", async () => {
+  const dir = tmpDir("preview-failclosed");
+  const groq = await startMockUpstream(() => ok("m1"));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const mistralEnv = { MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1` };
+
+  const first = await startRouter(chainEnv(dir, {
+    ...mistralEnv, GROQ_API_KEYS: "g0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+  }));
+  try {
+    assert.equal((await saveChain(first, "text", [{ provider: "groq", model: "m1" }])).status, 200);
+  } finally {
+    await first.close();
+  }
+
+  const second = await startRouter(chainEnv(dir, mistralEnv));
+  try {
+    const preview = await second.request("/api/router/preview?pool=text&protocol=openai-chat").then(json);
+    assert.equal(preview.chainFailClosed, true);
+    assert.equal(preview.chainEntries, 1);
+    assert.deepEqual(preview.fallbackOrder, [], "nothing is planned");
+    const ranking = preview.stages.find((stage) => stage.key === "ranking");
+    assert.equal(ranking.state, "error");
+    assert.match(ranking.detail, /no target it names can serve this request/);
+
+    // And it recovers the moment the chain is cleared.
+    assert.equal((await saveChain(second, "text", [])).status, 200);
+    const after = await second.request("/api/router/preview?pool=text&protocol=openai-chat").then(json);
+    assert.equal(after.chainFailClosed, false);
+    assert.ok(after.fallbackOrder.length > 0, "the automatic order is planned again");
+  } finally {
+    await second.close(); await groq.close(); await mistral.close();
+  }
+});

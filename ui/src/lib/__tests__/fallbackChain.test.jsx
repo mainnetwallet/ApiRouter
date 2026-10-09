@@ -114,10 +114,29 @@ describe("fallback chain presentation", () => {
     expect(chainSummary([toEntry(a)], [a], "fixed").source).toBe("chain");
     expect(chainSummary([toEntry(a)], [a], "fixed").label).toBe("Configured order");
     expect(chainSummary([toEntry(a)], [a], "auto").source).toBe("auto");
-    // A chain that names nothing this pool serves is not a usable order.
-    expect(chainSummary([toEntry(a)], [], "fixed").source).toBe("auto");
-    expect(chainSummary([{ ...toEntry(a), enabled: false }], [a], "fixed").source).toBe("auto");
     expect(chainSummary([], [a], "fixed").source).toBe("auto");
+    expect(chainSummary([], [a], "fixed").failClosed).toBe(false);
+  });
+
+  it("distinguishes an unconfigured pool from a chain that cannot serve it", () => {
+    // Entries that resolve to nothing usable are NOT the same as no chain:
+    // the planner fails closed, and the panel must not claim automatic routing.
+    const unusable = [
+      chainSummary([toEntry(a)], [], "fixed"),
+      chainSummary([{ ...toEntry(a), enabled: false }], [a], "fixed"),
+      chainSummary([toEntry({ provider: "gone", model: "x" })], [a], "auto")
+    ];
+    for (const summary of unusable) {
+      expect(summary.source).toBe("fail-closed");
+      expect(summary.failClosed).toBe(true);
+      expect(summary.count).toBe(0);
+      expect(summary.label).toMatch(/no entry is usable/);
+    }
+
+    // A chain with at least one usable entry routes normally.
+    const partly = chainSummary([toEntry(a), { ...toEntry(b), enabled: false }], [a, b], "fixed");
+    expect(partly.failClosed).toBe(false);
+    expect(partly.count).toBe(1);
   });
 
   it("uses one vocabulary for the routing phases", () => {

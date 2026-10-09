@@ -530,6 +530,30 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 503, { error: { message: noRouteMessage, type: "no_route" } });
   }
 
+  // A chain is saved for this pool but nothing in it can serve this request.
+  // The plan is deliberately empty: reaching for a model the chain does not
+  // name, or a key an entry excludes, would be the silent fallback the chain
+  // exists to prevent. Say so plainly instead of reporting a generic outage.
+  if (routePlan.failClosed) {
+    const chainMessage = `The configured ${pool} Fallback Chain has no usable target for this request `
+      + `(${routePlan.entries} entr${routePlan.entries === 1 ? "y" : "ies"} saved, none reachable for this protocol). `
+      + "Clear the chain to use the automatic order instead.";
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id,
+      receivedAt,
+      protocol,
+      pool,
+      requestedModel,
+      httpStatus: 503,
+      outcome: "failed",
+      errorType: "fallback_chain_unusable",
+      errorMessage: chainMessage,
+      attempts
+    });
+    return json(res, 503, { error: { message: chainMessage, type: "fallback_chain_unusable" } });
+  }
+
   try {
     const result = await withFallback(
       selection.selected,

@@ -226,11 +226,15 @@ export default function FallbackChainConfig() {
           </section>
 
           <div className="fc-flow" aria-label="Ordering in force">
-            <span className={`badge ${summary.source === "chain" ? "badge--info" : "badge--warn"}`}>{summary.label}</span>
+            <span className={`badge ${summary.failClosed ? "badge--danger" : summary.source === "chain" ? "badge--info" : "badge--warn"}`}>
+              {summary.label}
+            </span>
             <span className="tiny dim">
-              {chain.length === 0
-                ? "No chain is configured, so the automatic health-based order is used."
-                : "A configured chain is followed exactly; health only skips models that are cooling down."}
+              {summary.failClosed
+                ? `Every entry in this chain is disabled or names a model the ${pool} pool no longer has. Clear the chain to hand routing back to the automatic order.`
+                : chain.length === 0
+                  ? "No chain is configured, so the automatic health-based order is used."
+                  : "A configured chain is followed exactly; health only skips models that are cooling down."}
             </span>
           </div>
 

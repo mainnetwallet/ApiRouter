@@ -310,9 +310,13 @@ test("a plan can only ever contain targets of the pool it was built for", () => 
   const visionTargets = [t("a", "VA", 0, "vision"), t("b", "VB", 0, "vision")];
   const all = [...textTargets, ...visionTargets];
 
+  // The text chain names a VISION model. It is unusable for the text pool, so
+  // the text plan is empty: neither the vision model nor any unrelated text
+  // model may be reached in its place.
   const text = buildRoutePlan({ targets: textTargets, chain: entries(["a", "VA"]), cacheKey: "pool-text" });
-  assert.ok(text.steps.every((step) => (step.target.pool ?? "text") === "text"));
-  assert.deepEqual(labels(text.steps), ["auto:a/A#0", "auto:b/B#0"], "a vision-only model cannot enter the text plan");
+  assert.deepEqual(text.steps, [], "a vision-only model cannot enter the text plan, and cannot be substituted for");
+  assert.equal(text.failClosed, true);
+  assert.ok(text.groups.every((group) => group.targets.length === 0));
 
   const vision = buildRoutePlan({ targets: visionTargets, chain: entries(["b", "VB"], ["a", "VA"]), cacheKey: "pool-vision" });
   assert.ok(vision.steps.every((step) => step.target.pool === "vision"));
@@ -338,18 +342,30 @@ test("an unlisted model is not routed to while its pool has a configured chain",
   assert.deepEqual(labels(steps), ["chain:b/B#0", "chain:b/B#1"]);
 });
 
-test("a chain with every entry disabled falls back to the automatic order", () => {
+test("a chain with entries that are all disabled routes nothing rather than widening", () => {
   resetAutomaticOrderCache();
-  const { steps, source } = buildRoutePlan({
+  const result = buildRoutePlan({
     targets: twoKeyTargets,
     chain: entries(["b", "B", { enabled: false }]),
     health: new HealthRegistry(),
     cacheKey: "all-disabled"
   });
-  // Nothing is configured that can be walked, so the router is in the same
-  // position as an unconfigured one — it must still route.
-  assert.equal(source, "auto");
-  assert.equal(steps.length, 5);
+  // Saved entries that permit nothing are still the operator's configuration.
+  // Routing the automatic order instead would reach models this chain does not
+  // name, which is the silent fallback it exists to prevent. The way to ask for
+  // automatic routing is to have no chain at all.
+  assert.equal(result.source, "chain");
+  assert.equal(result.failClosed, true);
+  assert.deepEqual(result.steps, []);
+
+  const cleared = buildRoutePlan({
+    targets: twoKeyTargets,
+    chain: [],
+    health: new HealthRegistry(),
+    cacheKey: "all-disabled-cleared"
+  });
+  assert.equal(cleared.source, "auto", "a genuinely empty chain is unconfigured and still routes");
+  assert.equal(cleared.steps.length, 5);
 });
 
 test("a pinned request walks its targets in key order with no chain and no memory", () => {
@@ -626,4 +642,142 @@ test("a chain that is wholly unservable is not silently replaced by routing to e
   });
   assert.equal(configured, 2);
   assert.deepEqual(steps, []);
+});
+
+// ---------------------------------------------------------------------------
+// Fail-closed routing
+//
+// A pool with NO saved entries is free to route automatically. A pool that has
+// saved entries but no USABLE ones must not: widening to models the chain does
+// not name, or to keys an entry excludes, is exactly the silent fallback the
+// chain exists to prevent.
+// ---------------------------------------------------------------------------
+
+const plan = (args) => buildRoutePlan({ targets: twoKeyTargets, cacheKey: `fc-${Math.random()}`, ...args });
+
+test("a genuinely empty chain still uses the automatic order", () => {
+  resetAutomaticOrderCache();
+  for (const chain of [[], undefined, null]) {
+    const result = plan({ chain: chain ?? [] });
+    assert.equal(result.source, "auto", `chain ${JSON.stringify(chain)} is empty, so the router is unconfigured`);
+    assert.equal(result.failClosed, false);
+    assert.equal(result.steps.length, 5, "every configured target stays eligible");
+  }
+});
+
+test("a chain naming only a model that is no longer configured routes nothing", () => {
+  resetAutomaticOrderCache();
+  // The provider was removed from the environment, but the chain still names it.
+  const result = plan({ chain: entries(["ghost", "Gone"]) });
+  assert.equal(result.source, "chain", "the chain is configured, so the automatic order must not take over");
+  assert.equal(result.failClosed, true);
+  assert.deepEqual(result.steps, [], "no unrelated model may be reached");
+});
+
+test("a chain whose entries are all disabled routes nothing", () => {
+  resetAutomaticOrderCache();
+  // Every entry withdrawn is not the same as no chain at all: the entries are
+  // still the operator's configuration, and they are unusable.
+  const result = plan({ chain: entries(["a", "A", { enabled: false }], ["b", "B", { enabled: false }]) });
+  assert.equal(result.source, "chain");
+  assert.equal(result.failClosed, true);
+  assert.deepEqual(result.steps, []);
+});
+
+test("a chain whose only entry is restricted to a key that does not exist routes nothing", () => {
+  resetAutomaticOrderCache();
+  const result = plan({ chain: entries(["a", "A", { keys: [9] }]) });
+  assert.equal(result.failClosed, true);
+  assert.deepEqual(result.steps, []);
+});
+
+test("a partly usable chain routes its usable entries and nothing else", () => {
+  resetAutomaticOrderCache();
+  const result = plan({
+    chain: entries(["ghost", "Gone"], ["b", "B"], ["a", "A", { enabled: false }])
+  });
+  assert.equal(result.source, "chain");
+  assert.equal(result.failClosed, false, "one usable entry is enough to route");
+  assert.deepEqual(labels(result.steps), ["chain:b/B#0", "chain:b/B#1"]);
+});
+
+test("an unusable chain fails closed in Automatic mode too", () => {
+  resetAutomaticOrderCache();
+  // Automatic mode re-orders the entries; it does not license reaching past them.
+  const result = plan({ chain: entries(["ghost", "Gone"]), mode: FALLBACK_MODES.AUTO, health: new HealthRegistry() });
+  assert.equal(result.failClosed, true);
+  assert.deepEqual(result.steps, []);
+});
+
+test("an unusable text chain does not affect the vision pool", () => {
+  resetAutomaticOrderCache();
+  const text = [t("a", "A"), t("b", "B")];
+  const vision = [t("a", "VA", 0, "vision"), t("b", "VB", 0, "vision")];
+  // The text chain names a model that is gone; vision has no chain at all.
+  const ranked = routeOrderByPool([...text, ...vision], { chains: { text: entries(["ghost", "Gone"]) } });
+
+  assert.equal(ranked.filter((target) => (target.pool ?? "text") === "text").length, 0,
+    "the unusable text chain routes nothing");
+  assert.equal(ranked.filter((target) => target.pool === "vision").length, 2,
+    "vision has no chain, so it still routes automatically");
+});
+
+test("pinned requests are unaffected by an unusable chain", () => {
+  resetAutomaticOrderCache();
+  const result = buildRoutePlan({
+    targets: twoKeyTargets,
+    chain: entries(["ghost", "Gone"]),
+    pinned: true,
+    cacheKey: "fc-pinned"
+  });
+  assert.equal(result.failClosed, false);
+  assert.deepEqual(labels(result.steps), ["chain:a/A#0", "chain:a/A#1", "chain:b/B#0", "chain:b/B#1", "chain:c/C#0"]);
+});
+
+// ---------------------------------------------------------------------------
+// Sticky routing against a chain whose provider is gone
+// ---------------------------------------------------------------------------
+
+test("a remembered target whose provider is no longer configured is not remembered", () => {
+  resetAutomaticOrderCache();
+  // Provider c is gone entirely: c/C is not in the target list any more, though
+  // the chain still names it. A target that cannot be reached cannot lead.
+  const withoutC = twoKeyTargets.filter((target) => target.provider !== "c");
+  const result = buildRoutePlan({
+    targets: withoutC,
+    chain: entries(["a", "A"], ["c", "C"]),
+    mode: FALLBACK_MODES.LAST_SUCCESS,
+    stickyTargetId: "c:C:key-0",
+    cacheKey: "fc-missing-provider-sticky"
+  });
+  assert.equal(result.sticky, null, "a target that cannot be reached cannot lead the walk");
+  assert.deepEqual(labels(result.steps), ["chain:a/A#0", "chain:a/A#1"]);
+  assert.equal(result.failClosed, false, "the chain is partly usable, so it still routes");
+});
+
+test("a remembered target is not remembered when its entry is disabled", () => {
+  resetAutomaticOrderCache();
+  const result = plan({
+    chain: entries(["a", "A"], ["b", "B", { enabled: false }]),
+    mode: FALLBACK_MODES.LAST_SUCCESS,
+    stickyTargetId: "b:B:key-0"
+  });
+  assert.equal(result.sticky, null);
+  assert.ok(!labels(result.steps).some((label) => label.includes("b/B")));
+});
+
+// ---------------------------------------------------------------------------
+// Cache: a reorder is a configuration change like any other
+// ---------------------------------------------------------------------------
+
+test("reordering the chain takes effect immediately in Automatic mode", () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  const targets = [t("a", "A"), t("b", "B")];
+  // Neither model is measured, so the configured order is the tie-break.
+  const run = (chain) => autoOrder(targets, chain, health, "cfg-order");
+
+  assert.deepEqual(run(entries(["a", "A"], ["b", "B"])), ["auto:a/A#0", "auto:b/B#0"]);
+  assert.deepEqual(run(entries(["b", "B"], ["a", "A"])), ["auto:b/B#0", "auto:a/A#0"],
+    "a reorder must not wait for the next bucket");
 });

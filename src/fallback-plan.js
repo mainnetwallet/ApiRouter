@@ -1,5 +1,5 @@
 import { targetId } from "./health.js";
-import { FALLBACK_MODES, activeEntries, allowedKeyIndexes, entryId } from "./fallback-chain.js";
+import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId } from "./fallback-chain.js";
 
 /**
  * The one routing planner. Text and vision use this same code; they differ only
@@ -61,17 +61,22 @@ export function groupTargets(targets) {
  * the order the operator saved, each expanded to its eligible keys — or to
  * every configured key when the entry names no subset.
  *
- * Two ways an entry can contribute nothing, and they must not be confused:
+ * Two ways an entry can contribute nothing to the ORDER, and they must not be
+ * confused:
  *
- *   - The model is not in this pool at all. The entry is dropped and does not
- *     count as configured, because it says nothing about what THIS request may
- *     reach.
- *   - The model IS here but the entry's key subset matches none of the keys the
- *     provider currently has (an old key index, or one narrowed away). That is
- *     still a configured entry, so it is kept with NO targets: the model is
- *     simply not routable. Dropping it instead would empty the chain, and an
- *     empty chain means the automatic order over EVERY target — which would
- *     quietly route to the very keys the operator excluded.
+ *   - The model is not reachable for this request at all (not in this pool, not
+ *     speaking this protocol, or its provider no longer configured). It adds no
+ *     group, because there is nothing to walk. The chain still COUNTS as
+ *     configured, though — see `savedEntries` below: an entry the router cannot
+ *     honour is a reason to fail closed, not a reason to route somewhere else.
+ *   - The model is reachable but the entry's key subset matches none of the keys
+ *     the provider currently has (an old key index, or one narrowed away). That
+ *     is kept as a group with NO targets, so it keeps its position and the model
+ *     is simply not routable.
+ *
+ * Either way, dropping an entry must never leave the pool looking unconfigured:
+ * an empty chain means the automatic order over EVERY target, which would
+ * quietly route to models the operator did not name and keys they excluded.
  */
 export function chainGroups(chain, targets) {
   const grouped = groupTargets(targets);
@@ -218,10 +223,19 @@ export function buildRoutePlan({
   const all = Array.isArray(targets) ? targets : [];
   const grouped = groupTargets(all);
   const { groups: configured } = chainGroups(chain, all);
-  // No usable entry: the chain is not a source of order, so the automatic
-  // health-based order takes over — that is the documented behaviour of an
-  // unconfigured router, whatever mode is selected.
-  const useChain = !pinned && configured.length > 0;
+  /**
+   * "A chain is configured" and "a chain is usable" are different questions,
+   * and the difference is the whole of fail-closed routing.
+   *
+   * No saved entries at all means the operator has not configured this pool, so
+   * the automatic order applies — that is the documented behaviour of an
+   * unconfigured router. Entries that ARE saved but yield nothing walkable mean
+   * the operator has stated an order the router cannot honour; widening to
+   * other models, or to keys an entry excludes, would be a silent fallback to
+   * exactly what the chain exists to rule out. That case walks nothing.
+   */
+  const savedEntries = allEntries(chain);
+  const useChain = !pinned && savedEntries.length > 0;
 
   let ordered;
   let source;
@@ -243,9 +257,24 @@ export function buildRoutePlan({
   const phase = source === PLAN_SOURCE.AUTO ? PHASES.AUTO : PHASES.CHAIN;
   const base = toSteps(ordered, phase);
 
+  /**
+   * A chain is saved for this pool but there is nothing walkable in it. The plan
+   * is deliberately empty: the caller must report "your chain cannot serve this
+   * request", never quietly reach for a target the chain does not cover.
+   */
+  const failClosed = useChain && base.length === 0;
+  const meta = {
+    source,
+    mode,
+    groups: ordered,
+    configured: configured.length,
+    entries: savedEntries.length,
+    failClosed
+  };
+
   const sticky = resolveSticky({ stickyTargetId, ordered, mode, pinned });
   if (!sticky) {
-    return { steps: base, source, mode, sticky: null, groups: ordered, configured: configured.length };
+    return { steps: base, sticky: null, ...meta };
   }
 
   // The remembered target leads, and the rest of its own model is exhausted
@@ -267,11 +296,8 @@ export function buildRoutePlan({
       ...siblings.map((target) => ({ target, phase: PHASES.STICKY, group: sticky.group.id })),
       ...base
     ],
-    source,
-    mode,
     sticky: sticky.target,
-    groups: ordered,
-    configured: configured.length
+    ...meta
   };
 }
 
