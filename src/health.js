@@ -60,6 +60,17 @@ export class HealthRegistry {
         latencyMs: null,
         lastStatus: null,
         lastReason: null,
+        /**
+         * Whether the provider's own model catalogue listed this target's model
+         * on the last probe. `null` means the catalogue could not be read, which
+         * is NOT the same as "the model is missing".
+         *
+         * This is deliberately separate from `status`: a target can have a valid
+         * key and a reachable API (healthy) while its configured model is absent
+         * from the catalogue, and the panel must be able to say so instead of
+         * reporting a confirmed usable model.
+         */
+        modelListed: null,
         // Timestamp of the newest accepted observation. Starts at 0 so the
         // first observation is always accepted, whatever its timestamp.
         observedAt: 0,
@@ -101,6 +112,8 @@ export class HealthRegistry {
         latencyMs: state.latencyMs,
         lastStatus: state.lastStatus,
         lastReason: state.lastReason,
+        // Reported, never inferred: `null` says the catalogue was unreadable.
+        modelListed: state.modelListed ?? null,
         updatedAt: state.updatedAt
       };
     });
@@ -173,14 +186,22 @@ export class HealthRegistry {
    * A target that is cooling down after a routing failure keeps exactly that
    * cooldown: a probe neither ends it early (success) nor stretches it (failure).
    * The target is retried when its own cooldown runs out, not when a probe says so.
+   *
+   * `modelListed` is recorded independently of both. It describes the provider's
+   * catalogue, not this target's health, so it is kept even while the target is
+   * cooling down — and it never changes `status`, which is what routing reads.
    */
   recordHealthCheck(
     target,
-    { ok = null, status = null, latencyMs = null, reason = null } = {},
+    { ok = null, status = null, latencyMs = null, reason = null, modelListed } = {},
     now = Date.now()
   ) {
-    if ((ok === true || ok === false) && Number(this.ensureTarget(target).cooldownUntil) > now) {
-      return this.ensureTarget(target);
+    const state = this.ensureTarget(target);
+
+    if (modelListed === true || modelListed === false) state.modelListed = modelListed;
+
+    if ((ok === true || ok === false) && Number(state.cooldownUntil) > now) {
+      return state;
     }
 
     if (ok === true) {
@@ -200,7 +221,6 @@ export class HealthRegistry {
       );
     }
 
-    const state = this.ensureTarget(target);
     // Keep the operator-visible reason current without touching health.
     if (!Number.isFinite(now) || now >= state.observedAt) {
       state.lastReason = reason ?? state.lastReason;
@@ -263,7 +283,8 @@ async function refreshTarget(target, check) {
       ok: result?.ok ?? null,
       status: result?.status ?? null,
       reason: result?.reason ?? null,
-      latencyMs
+      latencyMs,
+      modelListed: result?.modelListed ?? null
     }, observedAt);
 
     return { target, state, reason: result?.reason ?? null };

@@ -80,6 +80,11 @@ export function normalizeTarget(row, index = 0) {
     consecutiveFailures: count(row?.consecutiveFailures),
     lastStatus: num(row?.lastStatus),
     lastReason: typeof row?.lastReason === "string" && row.lastReason ? row.lastReason : null,
+    // Whether the provider's model catalogue listed this target's model.
+    // Tri-state on purpose: `true` listed, `false` absent, `null` unknown (the
+    // catalogue could not be read). Only `false` is evidence, and only `false`
+    // is ever rendered as a warning — an unreadable catalogue is not a finding.
+    modelListed: typeof row?.modelListed === "boolean" ? row.modelListed : null,
     cooldownUntil: count(row?.cooldownUntil),
     updatedAt: typeof row?.updatedAt === "string" ? row.updatedAt : null,
     // /api/models only. Null rather than 0 on the health projection, so the

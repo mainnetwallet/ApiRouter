@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
-import { geminiOutputTokens, toolCallKey, streamErrorMessage } from "./bridge-utils.js";
+import { geminiOutputTokens, toolCallKey, streamErrorMessage, geminiImageUnsupportedError } from "./bridge-utils.js";
+import { stripApiVersion } from "./url-utils.js";
 
 /**
  * Anthropic Messages bridge.
@@ -256,7 +257,11 @@ export function toGeminiRequest(body) {
     for (const b of blocks) {
       if (b.type === "text") {
         if (b.text) parts.push({ text: b.text });
-      } else if (b.type === "image" && b.source?.type === "base64") {
+      } else if (b.type === "image") {
+        // Anthropic allows a base64 source or a remote URL source. Gemini can
+        // take only inline bytes, so a remote URL is refused rather than
+        // dropped — the client must not be answered as though the model saw it.
+        if (b.source?.type !== "base64") throw geminiImageUnsupportedError();
         parts.push({ inlineData: { mimeType: b.source.media_type, data: b.source.data } });
       } else if (b.type === "tool_use") {
         const part = { functionCall: { name: b.name, args: b.input ?? {} } };
@@ -326,7 +331,10 @@ export function buildBridgeRequest(target, upstreamProtocol, body, incomingHeade
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
     const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
-    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
+    // A configured base URL may already carry the API version (`.../v1beta`),
+    // so it is stripped first — otherwise the request goes to
+    // `/v1beta/v1beta/models/...`.
+    const url = joinUrl(stripApiVersion(base), "v1beta/models/" + encodeURIComponent(target.model) + method);
     return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiRequest(body)) } };
   }
   throw new Error("Unsupported bridge protocol: " + upstreamProtocol);

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
-import { geminiOutputTokens, toolCallKey, streamErrorMessage } from "./bridge-utils.js";
+import { geminiOutputTokens, toolCallKey, streamErrorMessage, base64DataUrl, geminiImageUnsupportedError, unsupportedMediaError } from "./bridge-utils.js";
+import { stripApiVersion } from "./url-utils.js";
 
 /**
  * Codex (OpenAI Responses) bridge.
@@ -185,6 +186,15 @@ export function toOpenAIChatFromResponses(body, model) {
         continue;
       }
       const parts = Array.isArray(item.content) ? item.content : [{ type: "input_text", text: textOf(item.content) }];
+      // An `input_image` with no URL carries nothing to forward. It must not be
+      // dropped, and it must not degrade into the literal text "[image]" — both
+      // would answer as though the model had seen an image that was never sent.
+      if (parts.some((p) => p?.type === "input_image" && !imageUrlOf(p))) {
+        throw unsupportedMediaError(
+          "This request carries an `input_image` with no `image_url`. "
+          + "Send the image as a data URL or an https URL, or remove the part."
+        );
+      }
       const hasImage = parts.some((p) => p?.type === "input_image" && imageUrlOf(p));
       if (!hasImage) {
         const text = textOf(parts);
@@ -194,7 +204,7 @@ export function toOpenAIChatFromResponses(body, model) {
           role: "user",
           content: parts
             .map((p) => p?.type === "input_image"
-              ? (imageUrlOf(p) ? { type: "image_url", image_url: { url: imageUrlOf(p) } } : null)
+              ? { type: "image_url", image_url: { url: imageUrlOf(p) } }
               : { type: "text", text: textOf([p]) })
             .filter(Boolean)
         });
@@ -283,8 +293,11 @@ export function toGeminiFromResponses(body) {
       const content = Array.isArray(item.content) ? item.content : [{ type: "input_text", text: textOf(item.content) }];
       for (const p of content) {
         if (p?.type === "input_image") {
-          const m = /^data:([^;,]+);base64,(.+)$/s.exec(imageUrlOf(p));
-          if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+          // Gemini takes inline bytes; a remote URL has no equivalent, so it is
+          // refused rather than dropped (see geminiImageUnsupportedError).
+          const inline = base64DataUrl(imageUrlOf(p));
+          if (!inline) throw geminiImageUnsupportedError();
+          parts.push({ inlineData: inline });
         } else {
           const text = textOf([p]);
           if (text) parts.push({ text });
@@ -368,7 +381,9 @@ export function buildCodexRequest(target, upstreamProtocol, body, incomingHeader
     headers.accept = stream ? "text/event-stream" : "application/json";
     headers["x-goog-api-key"] = target.apiKey;
     const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
-    const url = joinUrl(base, "v1beta/models/" + encodeURIComponent(target.model) + method);
+    // The configured base URL may already carry the API version (`.../v1beta`);
+    // stripping it keeps the path from doubling to `/v1beta/v1beta/models/...`.
+    const url = joinUrl(stripApiVersion(base), "v1beta/models/" + encodeURIComponent(target.model) + method);
     return { url, options: { method: "POST", headers, body: JSON.stringify(toGeminiFromResponses(body)) } };
   }
   throw new Error("Unsupported Codex bridge protocol: " + upstreamProtocol);

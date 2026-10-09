@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
+import { stripApiVersion } from "./url-utils.js";
 
 export function providerProtocols(provider) {
   if (provider === "agentrouter") return ["anthropic", "openai-chat", "openai-responses"];
@@ -58,8 +59,7 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
     // A configured base URL may already carry the API version — `health-checks.js`
     // accepts either form — so it is stripped before the model path is appended.
     // Otherwise the request goes to `/v1beta/v1beta/models/...`.
-    const root = base.replace(/\/v\d+(?:alpha|beta)?\d*$/i, "");
-    url = joinUrl(root, "v1beta/models/" + encodeURIComponent(target.model) + method);
+    url = joinUrl(stripApiVersion(base), "v1beta/models/" + encodeURIComponent(target.model) + method);
     headers["x-goog-api-key"] = target.apiKey;
   } else {
     throw new Error("Unsupported upstream protocol: " + protocol);

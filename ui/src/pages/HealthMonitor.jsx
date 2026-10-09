@@ -550,6 +550,19 @@ function TargetDrawer({ target, onClose }) {
               {target.lastReason || <span className="dim">none recorded</span>}
             </dd>
 
+            <dt className="dl__term">Configured model</dt>
+            <dd className="dl__desc">
+              {/* Health above describes the KEY and the endpoint, not this
+                  model. Say so explicitly when the provider's own catalogue
+                  does not list it: a reachable API with a valid key must not
+                  read as a confirmed usable model. */}
+              {target.modelListed === false
+                ? <span className="text--warn">Not listed in the provider's model catalogue</span>
+                : target.modelListed === true
+                  ? <span className="dim">Listed in the provider's model catalogue</span>
+                  : <span className="dim">Catalogue unreadable — not verified</span>}
+            </dd>
+
             <dt className="dl__term">Cooldown until</dt>
             <dd className="dl__desc">
               {target.cooldownUntil > Date.now()

@@ -2,16 +2,17 @@
  * Provider-aware health probing.
  */
 
+import { API_VERSION_SUFFIX } from "./url-utils.js";
+
 export const PROBE_TIMEOUT_MS = 10000;
 const GEMINI_API_VERSION = "v1beta";
 const OPENAI_API_VERSION = "v1";
-const VERSION_SUFFIX = /\/v\d+(?:alpha|beta)?\d*$/i;
 const trimBase = (baseUrl) => String(baseUrl || "").replace(/\/+$/, "");
 
 function versionedBase(baseUrl, version) {
   const base = trimBase(baseUrl);
   if (!base) return "";
-  return VERSION_SUFFIX.test(base) ? base : base + "/" + version;
+  return API_VERSION_SUFFIX.test(base) ? base : base + "/" + version;
 }
 
 function applyConfiguredClientHeaders(headers, target) {
@@ -99,6 +100,67 @@ export function classifyProbeStatus(status) {
 
 const isAbortError = (error) => error?.name === "AbortError" || error?.name === "TimeoutError";
 
+/**
+ * The largest model catalogue the probe will read to look for the configured
+ * model id. A catalogue larger than this is left unread and reported as
+ * "cannot tell" rather than buffered.
+ */
+const MAX_MODEL_LIST_BYTES = 512 * 1024;
+
+/**
+ * Model ids named by a provider's catalogue response.
+ *
+ * Only the shapes this router actually probes are read: OpenAI's
+ * `{ data: [{ id }] }` (the generic compatibility branch) and Gemini's
+ * `{ models: [{ name }] }`. Any other shape yields `null` — "cannot tell", which
+ * must never be read as "the model is missing".
+ */
+export function listedModelIds(body) {
+  if (Array.isArray(body?.data)) {
+    return body.data.map((entry) => entry?.id).filter((id) => typeof id === "string");
+  }
+  if (Array.isArray(body?.models)) {
+    return body.models
+      .map((entry) => (typeof entry?.name === "string" ? entry.name : entry?.id))
+      .filter((id) => typeof id === "string");
+  }
+  return null;
+}
+
+/**
+ * Does a read catalogue name `model`? `null` when the catalogue could not be
+ * read at all. Gemini lists its models as `models/<id>`, so both spellings
+ * match.
+ */
+export function modelInCatalogue(ids, model) {
+  if (!Array.isArray(ids)) return null;
+  const wanted = String(model ?? "").trim();
+  if (!wanted) return null;
+  return ids.some((id) => id === wanted || id.replace(/^models\//, "") === wanted);
+}
+
+/**
+ * Read a bounded model catalogue off an OK probe response and report whether the
+ * configured model appears in it.
+ *
+ * Every failure path answers `null`. A provider that paginates, hides models, or
+ * replies with a shape this router does not recognise must never be reported as
+ * missing the model it is configured with — the probe has no evidence either way,
+ * and a false negative would be worse than the silence it replaces.
+ */
+async function readModelListing(response, model) {
+  if (Number(response?.status) !== 200) return null;
+  const declared = Number(response?.headers?.get?.("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_MODEL_LIST_BYTES) return null;
+  try {
+    const text = await response.text();
+    if (typeof text !== "string" || Buffer.byteLength(text) > MAX_MODEL_LIST_BYTES) return null;
+    return modelInCatalogue(listedModelIds(JSON.parse(text)), model);
+  } catch {
+    return null;
+  }
+}
+
 export async function probeTargetHealth(target, options = {}) {
   const { timeoutMs = PROBE_TIMEOUT_MS, fetchImpl = fetch } = options;
   const plan = healthProbePlan(target);
@@ -115,8 +177,17 @@ export async function probeTargetHealth(target, options = {}) {
       signal: controller.signal
     });
     const latencyMs = Date.now() - startedAt;
-    try { await upstream.body?.cancel(); } catch {}
-    return { ...classifyProbeStatus(upstream.status), status: upstream.status, latencyMs };
+    // Read the catalogue the probe already fetched to see whether the model this
+    // target is configured with is actually offered. This costs no extra
+    // request; it only stops the body being discarded unread.
+    let modelListed = null;
+    try {
+      modelListed = await readModelListing(upstream, target.model);
+    } finally {
+      // Nothing else consumes this body; release the socket either way.
+      try { await upstream.body?.cancel(); } catch {}
+    }
+    return { ...classifyProbeStatus(upstream.status), status: upstream.status, latencyMs, modelListed };
   } catch (error) {
     return { ok: false, status: 408, latencyMs: Date.now() - startedAt, reason: isAbortError(error) ? "probe timed out" : "probe unreachable" };
   } finally {

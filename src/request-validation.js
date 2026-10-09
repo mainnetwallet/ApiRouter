@@ -26,6 +26,11 @@ function checkEntries(field, entries) {
  * objects. An absent `messages` (an empty `{}` body) is an existing, tested
  * contract and is left to the upstream; only a present-but-unusable value is
  * rejected here.
+ *
+ * `content` is a string or an array of parts in both protocols. A bare object is
+ * neither, and every bridge reads a non-array as "no content" — so accepting one
+ * would drop the message while the request still looked routable. It is a client
+ * mistake and is reported as one, here, before any routing happens.
  */
 function validateMessages(body) {
   if (body.messages === undefined) return null;
@@ -37,8 +42,8 @@ function validateMessages(body) {
   for (let index = 0; index < body.messages.length; index += 1) {
     const content = body.messages[index].content;
     // string, array of parts or null (assistant tool-call turns) are all real shapes.
-    if (content !== undefined && content !== null && typeof content !== "string" && typeof content !== "object") {
-      return `"messages[${index}].content" must be a string or an array`;
+    if (content !== undefined && content !== null && typeof content !== "string" && !Array.isArray(content)) {
+      return `"messages[${index}].content" must be a string or an array, got ${describe(content)}`;
     }
   }
   return null;
@@ -69,11 +74,28 @@ function validateAnthropic(body) {
 /**
  * Responses API: `input` is a string or an array of items. An absent `input` is
  * left to the upstream (the Responses API allows requests without one).
+ *
+ * A `message` item's `content` follows the same string-or-array rule as chat
+ * messages: the bridge reads a non-array as no content, so a bare object there
+ * would silently drop the turn.
  */
 function validateResponsesInput(body) {
   if (body.input === undefined || typeof body.input === "string") return null;
   if (!Array.isArray(body.input)) return `"input" must be a string or an array, got ${describe(body.input)}`;
-  return checkEntries("input", body.input);
+  const entryError = checkEntries("input", body.input);
+  if (entryError) return entryError;
+  for (let index = 0; index < body.input.length; index += 1) {
+    const item = body.input[index];
+    // Mirrors `itemKind` in codex-bridge: a `message` is `type:"message"`, or
+    // any item carrying a role. Other item kinds have no `content` field.
+    const kind = item.type || (item.role ? "message" : "");
+    if (kind !== "message") continue;
+    const content = item.content;
+    if (content !== undefined && content !== null && typeof content !== "string" && !Array.isArray(content)) {
+      return `"input[${index}].content" must be a string or an array, got ${describe(content)}`;
+    }
+  }
+  return null;
 }
 
 /**

@@ -218,6 +218,22 @@ export function apiErrorFromException(error, { timedOut = false } = {}) {
   });
 }
 
+/**
+ * A request that ran past its deadline — stream paths use this instead of
+ * `apiErrorFromException(error, { timedOut: true })`.
+ *
+ * A timeout is NOT an abort. An abort is the caller cancelling, which every
+ * consumer treats as a normal outcome and reports as nothing; a timeout is a
+ * failure the operator has to see. Classifying it as `kind: "abort"` (as the
+ * abort branch above does, for `apiRequest`'s existing retry logic) is what let
+ * a dead gateway look like a user pressing Stop.
+ *
+ * The 408 status carries the timeout category, label and hint the UI shows.
+ */
+export function apiErrorFromTimeout(message = "The gateway did not respond before the timeout") {
+  return new ApiError({ kind: "timeout", status: 408, message });
+}
+
 // ---------------------------------------------------------------------------
 // Provider-level failure description
 // ---------------------------------------------------------------------------

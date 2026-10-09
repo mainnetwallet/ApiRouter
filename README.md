@@ -263,7 +263,9 @@ cooldown
 
 Failed targets enter cooldown without disabling their sibling keys or models.
 
-Health probes are provider-aware and designed to avoid consuming generation quota where a safe model-list endpoint is available.
+Health probes are provider-aware and designed to avoid consuming generation quota, by probing a model-list endpoint rather than generating. Cohere is the one exception: its compatibility surface has no dependable model-list probe, so it is probed with the smallest possible chat completion (`max_tokens: 1`), which **does consume generation quota** — once per Cohere target per refresh cycle.
+
+Health reports the key and the endpoint. Whether the configured model is actually offered is reported separately, as `modelListed`, because a valid key and a reachable provider do not prove the model is usable.
 
 The `/health` endpoint exposes target status, score, latency, success/failure counters, and cooldown information without returning API keys or upstream response bodies.
 
@@ -275,6 +277,23 @@ The `/health` endpoint exposes target status, score, latency, success/failure co
 - `/api/config` exposes configuration metadata and key counts, not key values.
 - UI-facing errors are sanitized to prevent credential-shaped data from reaching logs or UI components.
 - The gateway client token is stored in session storage rather than local storage or URLs.
+
+### Which endpoints require a token
+
+`APIROUTER_API_KEYS` is optional ("leave empty for local trusted use"), but when it is set it does not protect every route. The split is deliberate:
+
+| Endpoint | Token required |
+|---|---|
+| `GET /health` | no |
+| `GET /v1/models` | no |
+| `POST /v1/messages`, `/v1/responses`, `/v1/chat/completions` | yes |
+| `POST /v1beta/models/{model}:generateContent` | yes |
+| `POST /v1/messages/count_tokens` | yes |
+| `GET/POST /api/*` (control panel) | yes |
+
+`/health` and `/v1/models` are open on purpose: the first is a liveness/readiness probe meant for load balancers and container orchestrators, and the second is model discovery, which a client needs *before* it can name a model. Both are documented to exclude credentials — `/health` reports target status, scores and cooldowns, never API keys or upstream response bodies.
+
+They are not anonymous by accident, and they are not free of information: `/health` does reveal the configured provider, model, key-index inventory and its recent health, and `/v1/models` reveals the configured model ids. If that inventory is sensitive in your deployment, restrict both at the network layer (bind the gateway to a private interface, or put an authenticating reverse proxy in front of it) rather than assuming `APIROUTER_API_KEYS` covers them.
 
 ## Development
 

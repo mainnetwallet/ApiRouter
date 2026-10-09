@@ -2,6 +2,7 @@ import {
   ApiError,
   apiErrorFromException,
   apiErrorFromResponse,
+  apiErrorFromTimeout,
   isRetryableStatus
 } from "../lib/errors.js";
 import { getRouterToken } from "../lib/session.js";
@@ -185,11 +186,24 @@ export function postJson(path, body, options = {}) {
 }
 
 /**
- * Open a streaming request and hand back the raw `Response`.
+ * Open a streaming request and hand back the response plus its teardown.
  *
  * Used only by the Playground. Streaming is intentionally not retried: a
  * partially consumed generation cannot be resumed, and re-issuing it would
  * duplicate upstream cost.
+ *
+ * The timeout and the caller's abort bridge cover the WHOLE stream lifetime,
+ * not just the wait for headers. `fetch` resolves as soon as the headers
+ * arrive, while the body — the entire point of a stream — is still unread, so
+ * tearing the timer and the listener down at that moment (as this used to) left
+ * a stalled body unbounded and made the caller's signal powerless: the
+ * Playground's Stop button could not cancel a stream that had already started,
+ * and a body that stopped yielding hung the view forever.
+ *
+ * `release` MUST be called once the body is finished with — after the stream
+ * completes, errors, or is cancelled — to drop the timer and the listener.
+ *
+ * @returns {Promise<{response: Response, release: () => void, wasTimedOut: () => boolean}>}
  */
 export async function apiStream(path, { body, signal, timeoutMs = 180_000, headers: extraHeaders } = {}) {
   const token = getRouterToken();
@@ -198,10 +212,20 @@ export async function apiStream(path, { body, signal, timeoutMs = 180_000, heade
   signal?.addEventListener("abort", onAbort, { once: true });
 
   let timedOut = false;
+  // Aborts the fetch's own signal, which also errors an in-flight body stream —
+  // that is what makes the timeout and the caller's abort reach `reader.read()`.
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  };
 
   try {
     const response = await fetch(path, {
@@ -223,12 +247,12 @@ export async function apiStream(path, { body, signal, timeoutMs = 180_000, heade
       throw apiErrorFromResponse(response.status, envelope, { rawText: text.slice(0, 300) });
     }
 
-    return response;
+    return { response, release, wasTimedOut: () => timedOut };
   } catch (error) {
-    throw apiErrorFromException(error, { timedOut });
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
+    // Nothing is left to release once the request failed before the caller took
+    // ownership of the stream.
+    release();
+    throw timedOut ? apiErrorFromTimeout() : apiErrorFromException(error);
   }
 }
 

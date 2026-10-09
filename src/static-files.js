@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { stat, realpath } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -9,6 +9,11 @@ import path from "node:path";
  * directory listing, follows no symlinks out of the root, and never serves a
  * dotfile. The gateway is a security boundary, so the static path is written
  * as a strict allow-list rather than a path-join convenience.
+ *
+ * "Follows no symlinks out of the root" is enforced on the *real* filesystem
+ * path, not just the URL: `resolveWithinRoot` is lexical, so a symlink (or a
+ * Windows junction) placed inside `ui/dist` would pass it and then be followed
+ * by the stat/read out of the tree. See `realWithinRoot`.
  */
 
 const MIME_TYPES = new Map([
@@ -82,6 +87,37 @@ export function resolveWithinRoot(root, pathname) {
   return resolved;
 }
 
+/** Is `child` the root itself, or inside it? Both must be resolved absolute paths. */
+function isWithin(root, child) {
+  return child === root || child.startsWith(root + path.sep);
+}
+
+/**
+ * Resolve a path that is already lexically inside `root` to the real file it
+ * would open, refusing anything whose real path leaves the root.
+ *
+ * `realpath` resolves every symlink and junction, and reports a loop as `ELOOP`
+ * — treated here as "not there", exactly like a missing file, so a cycle can
+ * never be served or crash the handler. A missing root (the panel has not been
+ * built) is likewise just "not there".
+ *
+ * The returned path is the one used for the stat and the read, so the link that
+ * was checked is the link that is opened. A file swapped in after this call is
+ * still outside the check — closing that last window would need an `O_NOFOLLOW`
+ * open of the resolved path, which the platform's symlink semantics make
+ * non-portable; this is the strongest containment available without it.
+ */
+async function realWithinRoot(root, filePath) {
+  let realRoot;
+  let realFile;
+  try {
+    [realRoot, realFile] = await Promise.all([realpath(root), realpath(filePath)]);
+  } catch {
+    return null;
+  }
+  return isWithin(realRoot, realFile) ? realFile : null;
+}
+
 export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
   const indexPath = path.join(root, indexFile);
 
@@ -133,12 +169,17 @@ export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
     const filePath = resolveWithinRoot(root, pathname);
     if (!filePath) return false;
 
-    const stats = await statFile(filePath);
+    // Lexical containment is not enough: the real path must also be inside the
+    // root, or a link dropped into the build output would read out of it.
+    const realPath = await realWithinRoot(root, filePath);
+    if (!realPath) return false;
+
+    const stats = await statFile(realPath);
     if (!stats) return false;
 
     // Vite emits hashed filenames under /assets, which are safe to cache hard.
     const immutable = pathname.startsWith("/assets/");
-    await sendFile(req, res, filePath, stats, { immutable });
+    await sendFile(req, res, realPath, stats, { immutable });
     return true;
   }
 
@@ -148,7 +189,8 @@ export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
    * backend-only deployment still starts and explains itself.
    */
   async function serveIndex(req, res) {
-    const stats = await statFile(indexPath);
+    const realIndex = await realWithinRoot(root, indexPath);
+    const stats = realIndex ? await statFile(realIndex) : null;
 
     if (!stats) {
       return send(res, 200, {
@@ -158,10 +200,13 @@ export function createStaticHandler({ root, indexFile = "index.html" } = {}) {
       }, placeholderPage(indexFile));
     }
 
-    return sendFile(req, res, indexPath, stats);
+    return sendFile(req, res, realIndex, stats);
   }
 
-  const isBuilt = async () => Boolean(await statFile(indexPath));
+  async function isBuilt() {
+    const realIndex = await realWithinRoot(root, indexPath);
+    return Boolean(realIndex && (await statFile(realIndex)));
+  }
 
   return { serve, serveIndex, isBuilt, root, indexPath };
 }
