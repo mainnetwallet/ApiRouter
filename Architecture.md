@@ -74,8 +74,15 @@ flag:
 ```
 
 - `keys: null` means every key the provider has for that model, tried in key
-  order. Narrowing is always deliberate: a malformed key list is read as "every
-  key", never as a subset the operator did not choose.
+  order. It is the only form that means "unrestricted", and it is what an absent
+  field normalizes to.
+- An explicitly supplied key list is read as a restriction, so one that cannot
+  be read is treated as permitting **nothing** rather than everything: a
+  persisted or hand-edited `keys: [true]`, `keys: ["1"]`, `keys: []` or a
+  non-array `keys` normalizes to `[]`, which resolves to zero eligible keys. The
+  entry keeps its place, is walked as unusable, and the pool fails closed.
+  Reading it as `null` would grant every key — the opposite of what the file
+  asked for. A partly readable list keeps exactly the indexes it could read.
 - Every eligible key of an entry is attempted, in key order, before the walk
   advances to the next entry.
 - A disabled entry keeps its position and is simply not routed to. Disabling

@@ -75,8 +75,39 @@ export function setKeys(list, index, keys) {
   return list.map((item, i) => (i === index ? { ...item, keys: next.length > 0 ? next : null } : item));
 }
 
-/** `null` and `[]` both mean "every key", so they must compare equal. */
-const keySet = (value) => (Array.isArray(value) && value.length > 0 ? [...value].sort((a, b) => a - b) : null);
+/**
+ * A comparable form of an entry's key restriction.
+ *
+ * `null` (unrestricted) and `[]` (a restriction that permits no key) are
+ * deliberately NOT collapsed together: the whole point of the empty array is
+ * that it is not a free pass, so a panel that treated them as equal would hide
+ * the difference it exists to show.
+ */
+const keySet = (value) => (Array.isArray(value) ? [...value].sort((a, b) => a - b) : null);
+
+/**
+ * The key indexes an entry may actually use, given what the provider has now.
+ *
+ * The entry names a subset; the catalogue group reports which indexes exist.
+ * Only the intersection can be routed to, so this — not the length of the
+ * entry's own list — is the only correct basis for calling an entry usable:
+ *
+ *   keys: null    -> every index the provider has
+ *   keys: [0, 2]  -> those of them the provider still has
+ *   keys: []      -> none
+ *   keys: [5]     -> none, when the provider has only 0 and 1
+ *
+ * The last case is the one worth stating: the selection is non-empty, so a
+ * length check calls it a restriction, but it matches nothing, so the planner
+ * resolves the entry to zero eligible keys and the pool fails closed. The UI
+ * has to reach the same conclusion from the same intersection.
+ */
+export function eligibleKeys(entry, group) {
+  const available = Array.isArray(group?.keyIndexes) ? group.keyIndexes : [];
+  if (!Array.isArray(entry?.keys)) return available;
+  const chosen = new Set(entry.keys);
+  return available.filter((key) => chosen.has(key));
+}
 
 /** True when two chains would be sent identically, so the panel can spot a no-op save. */
 export function sameChain(a, b) {
@@ -108,7 +139,7 @@ export function keysLabel(entry, group) {
   const available = Array.isArray(group?.keyIndexes) ? group.keyIndexes : [];
   if (available.length === 0) return "no keys configured";
   if (!Array.isArray(entry?.keys)) return available.length === 1 ? "1 key" : `all ${available.length} keys`;
-  const chosen = entry.keys.filter((key) => available.includes(key));
+  const chosen = eligibleKeys(entry, group);
   return chosen.length === 0 ? "no eligible key selected" : `keys ${chosen.join(", ")}`;
 }
 
@@ -132,30 +163,76 @@ export function latencyOf(group) {
 export function entryState(entry, group) {
   if (!group) return { key: "missing", label: "Not configured in this pool", tone: "danger" };
   if (entry.enabled === false) return { key: "disabled", label: "Disabled — keeps its place, not routed to", tone: "muted" };
+  // Usable only if the selection intersects what the provider actually has. A
+  // non-empty selection that matches nothing is exactly as unroutable as an
+  // empty one, so neither may be reported as Active: the gateway would refuse
+  // the routing this page promised.
+  if (eligibleKeys(entry, group).length === 0) {
+    const stale = Array.isArray(entry.keys) && entry.keys.length > 0;
+    return {
+      key: "unusable",
+      label: stale
+        ? "No eligible key — none of the selected keys exist on this provider"
+        : "No eligible key — this entry cannot be used",
+      tone: "danger"
+    };
+  }
   if (group.available === false) return { key: "cooldown", label: "Cooling down — skipped until it recovers", tone: "warn" };
   return { key: "active", label: "Active", tone: group.status === "healthy" ? "ok" : "neutral" };
 }
 
 /**
- * The order the pool will actually be walked, as far as the panel can know it.
- * A configured chain is its own order; with no chain the gateway builds the
- * automatic order, which the preview endpoint reports — never guessed here.
+ * Which order is in force for a pool, mirroring the planner exactly.
+ *
+ * Three states, and they are not interchangeable:
+ *
+ *   no entries at all        the pool is unconfigured -> automatic order
+ *   entries that resolve     -> their own order (or automatic, in auto mode)
+ *   entries that resolve to
+ *   nothing usable           -> nothing is walked. The chain is the operator's
+ *                               configuration and it permits no target, so the
+ *                               request fails rather than being routed to a
+ *                               model or key the chain does not cover.
  */
 export function chainSummary(entries, catalogue = [], mode) {
   const index = indexCatalogue(catalogue);
-  const active = (entries ?? []).filter((entry) => entry.enabled !== false && index.has(entryId(entry)));
-  if (active.length > 0) {
+  const saved = Array.isArray(entries) ? entries : [];
+
+  if (saved.length === 0) {
     return {
-      source: mode === "auto" ? "auto" : "chain",
-      label: mode === "auto"
-        ? "Automatic Health-Based Fallback over the configured models"
-        : "Configured order",
-      count: active.length
+      source: "auto",
+      label: "Automatic Health-Based Fallback (no chain configured)",
+      count: 0,
+      failClosed: false
     };
   }
+
+  // Usable means: enabled, its model is still in this pool, AND at least one of
+  // the keys it selects still exists on that provider. Checking only that the
+  // selection is non-empty would count a stale index — one the provider no
+  // longer has — as a working entry, while the planner resolves it to zero
+  // targets and the pool fails closed. An explicit `keys: []` falls out of the
+  // same intersection: it permits no key either.
+  const usable = saved.filter((entry) => {
+    if (entry.enabled === false) return false;
+    const group = index.get(entryId(entry));
+    return Boolean(group) && eligibleKeys(entry, group).length > 0;
+  });
+  if (usable.length === 0) {
+    return {
+      source: "fail-closed",
+      label: "Chain configured, but no entry is usable — requests will fail rather than route elsewhere",
+      count: 0,
+      failClosed: true
+    };
+  }
+
   return {
-    source: "auto",
-    label: "Automatic Health-Based Fallback (no valid chain configured)",
-    count: 0
+    source: mode === "auto" ? "auto" : "chain",
+    label: mode === "auto"
+      ? "Automatic Health-Based Fallback over the configured models"
+      : "Configured order",
+    count: usable.length,
+    failClosed: false
   };
 }

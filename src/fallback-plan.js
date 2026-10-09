@@ -1,5 +1,5 @@
 import { targetId } from "./health.js";
-import { FALLBACK_MODES, activeEntries, allowedKeyIndexes, entryId } from "./fallback-chain.js";
+import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId } from "./fallback-chain.js";
 
 /**
  * The one routing planner. Text and vision use this same code; they differ only
@@ -57,14 +57,29 @@ export function groupTargets(targets) {
 }
 
 /**
- * The configured order. Every enabled entry that has targets in this pool, in
+ * The configured order. Every enabled entry that has a target in this pool, in
  * the order the operator saved, each expanded to its eligible keys — or to
- * every configured key when the entry names no subset. An entry naming a model
- * this pool does not serve simply contributes nothing; it is never guessed at.
+ * every configured key when the entry names no subset.
+ *
+ * Two ways an entry can contribute nothing to the ORDER, and they must not be
+ * confused:
+ *
+ *   - The model is not reachable for this request at all (not in this pool, not
+ *     speaking this protocol, or its provider no longer configured). It adds no
+ *     group, because there is nothing to walk. The chain still COUNTS as
+ *     configured, though — see `savedEntries` below: an entry the router cannot
+ *     honour is a reason to fail closed, not a reason to route somewhere else.
+ *   - The model is reachable but the entry's key subset matches none of the keys
+ *     the provider currently has (an old key index, or one narrowed away). That
+ *     is kept as a group with NO targets, so it keeps its position and the model
+ *     is simply not routable.
+ *
+ * Either way, dropping an entry must never leave the pool looking unconfigured:
+ * an empty chain means the automatic order over EVERY target, which would
+ * quietly route to models the operator did not name and keys they excluded.
  */
 export function chainGroups(chain, targets) {
   const grouped = groupTargets(targets);
-  const used = new Set();
   const groups = [];
 
   for (const entry of activeEntries(chain)) {
@@ -73,12 +88,10 @@ export function chainGroups(chain, targets) {
     if (!group) continue;
     const keys = allowedKeyIndexes(entry, group.targets.map((target) => target.keyIndex));
     const narrowed = group.targets.filter((target) => keys.includes(target.keyIndex));
-    if (narrowed.length === 0) continue;
-    used.add(id);
     groups.push({ ...group, targets: narrowed, entryOrder: groups.length });
   }
 
-  return { groups, used };
+  return { groups };
 }
 
 /**
@@ -135,14 +148,31 @@ export function orderGroupsByHealth(groups, health, now) {
 }
 
 /**
- * Ordered group ids for the automatic order, cached against the health
- * registry's version and a coarse time bucket.
+ * A stable fingerprint of the exact set being ordered: which groups, in which
+ * order, each still holding which keys.
+ *
+ * This is what makes the cache safe to key on time and health alone. Those two
+ * say nothing about the configuration, so without this a chain edited within
+ * the same 30-second bucket — a model added, an entry disabled, a key subset
+ * narrowed — would keep being served the order computed before the edit.
+ * Including the shape of the input makes the key change the moment the
+ * configuration does, and leaves it identical when nothing has changed, so an
+ * unchanged configuration still reuses its cached order.
+ */
+function groupFingerprint(groups) {
+  return groups.map((group) => `${group.id}[${group.targets.map((target) => target.keyIndex).join(",")}]`).join("|");
+}
+
+/**
+ * Ordered group ids for the automatic order, cached against the configuration
+ * being ordered, the health registry's version, and a coarse time bucket.
  *
  * The bucket is what lets a target that has finished cooling down rejoin the
  * order without a full recomputation on every request; the version is what
- * makes a real health change take effect immediately. Ids — not target objects —
- * are cached, so a caller whose target list narrowed (a pin, a protocol filter)
- * simply ignores ids it no longer has.
+ * makes a real health change take effect immediately; the fingerprint is what
+ * makes a CONFIGURATION change take effect immediately. Ids — not target
+ * objects — are cached, so a caller whose target list narrowed (a pin, a
+ * protocol filter) simply ignores ids it no longer has.
  */
 const AUTO_CACHE = new Map();
 export const AUTO_ORDER_BUCKET_MS = 30_000;
@@ -154,7 +184,7 @@ export function resetAutomaticOrderCache() {
 export function automaticGroupIds({ cacheKey, groups, health, now, bucketMs = AUTO_ORDER_BUCKET_MS }) {
   const version = Number(health?.version) || 0;
   const bucket = Math.floor(now / bucketMs);
-  const key = `${cacheKey}|${version}|${bucket}`;
+  const key = `${cacheKey}|${version}|${bucket}|${groupFingerprint(groups)}`;
   const cached = AUTO_CACHE.get(key);
   if (cached) return cached;
 
@@ -193,10 +223,19 @@ export function buildRoutePlan({
   const all = Array.isArray(targets) ? targets : [];
   const grouped = groupTargets(all);
   const { groups: configured } = chainGroups(chain, all);
-  // No usable entry: the chain is not a source of order, so the automatic
-  // health-based order takes over — that is the documented behaviour of an
-  // unconfigured router, whatever mode is selected.
-  const useChain = !pinned && configured.length > 0;
+  /**
+   * "A chain is configured" and "a chain is usable" are different questions,
+   * and the difference is the whole of fail-closed routing.
+   *
+   * No saved entries at all means the operator has not configured this pool, so
+   * the automatic order applies — that is the documented behaviour of an
+   * unconfigured router. Entries that ARE saved but yield nothing walkable mean
+   * the operator has stated an order the router cannot honour; widening to
+   * other models, or to keys an entry excludes, would be a silent fallback to
+   * exactly what the chain exists to rule out. That case walks nothing.
+   */
+  const savedEntries = allEntries(chain);
+  const useChain = !pinned && savedEntries.length > 0;
 
   let ordered;
   let source;
@@ -218,30 +257,47 @@ export function buildRoutePlan({
   const phase = source === PLAN_SOURCE.AUTO ? PHASES.AUTO : PHASES.CHAIN;
   const base = toSteps(ordered, phase);
 
-  const sticky = resolveSticky({ stickyTargetId, ordered, grouped, all, mode, pinned });
+  /**
+   * A chain is saved for this pool but there is nothing walkable in it. The plan
+   * is deliberately empty: the caller must report "your chain cannot serve this
+   * request", never quietly reach for a target the chain does not cover.
+   */
+  const failClosed = useChain && base.length === 0;
+  const meta = {
+    source,
+    mode,
+    groups: ordered,
+    configured: configured.length,
+    entries: savedEntries.length,
+    failClosed
+  };
+
+  const sticky = resolveSticky({ stickyTargetId, ordered, mode, pinned });
   if (!sticky) {
-    return { steps: base, source, mode, sticky: null, groups: ordered, configured: configured.length };
+    return { steps: base, sticky: null, ...meta };
   }
 
   // The remembered target leads, and the rest of its own model is exhausted
   // before the configured order resumes — otherwise a working second key of the
   // remembered model would be passed over in favour of another model entirely.
-  const remembered = grouped.get(groupKey(sticky)) ?? null;
-  const siblings = (remembered?.targets ?? [])
-    .filter((target) => targetId(target) !== targetId(sticky))
-    .sort((a, b) => a.keyIndex - b.keyIndex);
+  //
+  // Both halves come from the REMEMBERED GROUP AS THE ORDER HOLDS IT, never from
+  // the raw target list: `ordered` is what the configuration narrowed each entry
+  // to, so a key the operator has excluded is not in it to be remembered or to
+  // be tried as a sibling. Reading the unrestricted group here would let an old
+  // remembered target — and every key beside it — silently bypass a key
+  // restriction the operator has since applied.
+  const siblings = sticky.group.targets
+    .filter((target) => targetId(target) !== targetId(sticky.target));
 
   return {
     steps: [
-      { target: sticky, phase: PHASES.STICKY },
-      ...siblings.map((target) => ({ target, phase: PHASES.STICKY, group: groupKey(target) })),
+      { target: sticky.target, phase: PHASES.STICKY, group: sticky.group.id },
+      ...siblings.map((target) => ({ target, phase: PHASES.STICKY, group: sticky.group.id })),
       ...base
     ],
-    source,
-    mode,
-    sticky,
-    groups: ordered,
-    configured: configured.length
+    sticky: sticky.target,
+    ...meta
   };
 }
 
@@ -252,24 +308,28 @@ function automaticGroupsOrder(groups, { cacheKey, health, now }) {
 }
 
 /**
- * The remembered target, when the selected mode remembers one and it is still
- * part of this request's pool, protocol and order.
+ * The remembered target, when the selected mode remembers one and the ORDER
+ * still contains it.
+ *
+ * The search runs over `ordered` — the groups as the configuration narrowed
+ * them, entry by entry — and not over the raw target list. That is the whole
+ * point: a remembered target whose key the current entry no longer allows is
+ * simply not found, so it cannot lead the walk, and the group it is returned
+ * with is already narrowed to the keys that are still permitted.
  *
  * `fixed` never resolves one: that is the whole point of the mode, and it is
- * also what makes "Reset Fallback" trivially correct there.
+ * also what makes "Reset Fallback" trivially correct there. A pinned request is
+ * strict — it uses neither the chain nor the remembered target.
  */
-function resolveSticky({ stickyTargetId, ordered, grouped, all, mode, pinned }) {
+function resolveSticky({ stickyTargetId, ordered, mode, pinned }) {
   if (pinned || !stickyTargetId) return null;
-  if (mode === FALLBACK_MODES.FIXED) return null;
   if (!rememberedModes.has(mode)) return null;
 
-  const candidate = all.find((target) => targetId(target) === stickyTargetId) ?? null;
-  if (!candidate) return null;
-  // Only a target this request could actually reach: the chain may have been
-  // edited since the success was remembered.
-  const inOrder = ordered.some((group) => group.id === groupKey(candidate));
-  if (!inOrder) return null;
-  return grouped.get(groupKey(candidate)) ? candidate : null;
+  for (const group of ordered) {
+    const target = group.targets.find((item) => targetId(item) === stickyTargetId);
+    if (target) return { target, group };
+  }
+  return null;
 }
 
 /**
@@ -313,6 +373,51 @@ export function routeOrderByPool(targets, {
       cacheKey: `pool:${pool}`
     });
     out.push(...effectiveOrder(steps, isEligible).map((step) => step.target));
+  }
+  return out;
+}
+
+/**
+ * Per-pool routing status, for the health surface.
+ *
+ * `ranked` alone cannot say WHY a pool is empty: an unusable Fallback Chain and
+ * a provider that is simply down both leave the ranked list without that pool's
+ * targets. Monitoring needs to tell them apart — one is a configuration fault
+ * that every request for that pool will fail on, the other is ordinary weather.
+ *
+ * Derived from the same `buildRoutePlan` the proxy calls, so this can never
+ * describe a state the router would not actually be in.
+ */
+export function chainStatusByPool(targets, {
+  chains = {},
+  mode = FALLBACK_MODES.FIXED,
+  health = null,
+  now = Date.now()
+} = {}) {
+  const all = Array.isArray(targets) ? targets : [];
+  const out = {};
+  for (const pool of ["text", "vision"]) {
+    const inPool = all.filter((target) => (target.pool ?? "text") === pool);
+    const plan = buildRoutePlan({
+      targets: inPool,
+      chain: chains?.[pool] ?? [],
+      mode,
+      health,
+      now,
+      cacheKey: `status:${pool}`
+    });
+    out[pool] = {
+      // Saved entries that permit nothing: requests for this pool fail rather
+      // than route to a model outside the chain. This is the signal that
+      // separates a configuration fault from a provider being down.
+      failClosed: plan.failClosed,
+      // Saved entries, and how many of them name a target this pool can reach.
+      // Both are about the CHAIN, not about the pool: an unconfigured pool
+      // reports 0/0 while still routing every target automatically.
+      entries: plan.entries,
+      resolved: plan.configured,
+      source: plan.source
+    };
   }
   return out;
 }

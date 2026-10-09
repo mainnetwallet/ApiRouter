@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
-import { routeOrderByPool } from "./fallback-plan.js";
+import { resetAutomaticOrderCache, routeOrderByPool } from "./fallback-plan.js";
 import {
   FALLBACK_MODE_INFO,
   FALLBACK_MODES,
   FALLBACK_POOLS,
+  MAX_KEYS,
   normalizeEntries,
   normalizeMode,
   remembersSuccess
@@ -311,6 +312,37 @@ export function createApi({
     };
   }
 
+  /**
+   * Validates one entry's `keys` exactly as the operator sent it.
+   *
+   * `keys` is the one field where a lenient reading is dangerous: `null` means
+   * EVERY key, so mistaking an unusable restriction for "no restriction" can
+   * only widen routing. The store no longer makes that mistake on its own — an
+   * unreadable persisted value normalizes to an empty restriction that permits
+   * nothing — and this is the boundary that stops such a value being written in
+   * the first place. A restriction that cannot be honoured is a 400, rather
+   * than a chain that silently routes nowhere.
+   *
+   * Absent and explicit `null` still mean every key: that is the documented way
+   * to say it, and it is what the panel sends for an unrestricted model.
+   * Everything else must be an array of real integers this provider has.
+   *
+   * Returns null when the restriction is valid, or a machine-readable reason.
+   */
+  function keyRestrictionProblem(keys, available) {
+    if (keys === undefined || keys === null) return null;
+    if (!Array.isArray(keys)) return { reason: "keys_not_an_array", keys };
+    if (keys.length === 0) return { reason: "keys_empty", keys };
+    const offending = [...new Set(keys.filter((value) => (
+      typeof value !== "number"
+      || !Number.isInteger(value)
+      || value < 0
+      || value >= MAX_KEYS
+      || !available.has(value)
+    )))];
+    return offending.length > 0 ? { reason: "keys_not_configured", keys: offending } : null;
+  }
+
   // --- /api/fallback -----------------------------------------------------
   /**
    * Everything the Fallback Configuration page needs, in one payload: the saved
@@ -578,48 +610,112 @@ export function createApi({
         try { body = await readJsonBody(req, config.maxBodyBytes); }
         catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
 
+        /*
+         * Everything is validated BEFORE anything is written. A rejected save
+         * must leave the configuration exactly as it was — including the case
+         * where one request carries both a mode and a pool and only the second
+         * is invalid, which used to persist the mode on the way to the error.
+         */
+        const hasMode = body?.mode !== undefined;
+        const hasPool = body?.pool !== undefined;
+        if (!hasMode && !hasPool) return fail(req, res, 400, "a pool or a mode is required", "invalid_request");
+
         // The mode is its own setting and can be saved on its own, so the panel
         // does not have to post a whole chain just to flip a switch.
-        if (body?.mode !== undefined) {
-          const mode = normalizeMode(body.mode);
-          if (body.mode !== null && String(body.mode).trim() !== "" && mode !== String(body.mode).trim().toLowerCase()) {
+        let mode = null;
+        if (hasMode) {
+          mode = normalizeMode(body.mode);
+          const requested = body.mode === null ? "" : String(body.mode).trim().toLowerCase();
+          if (requested !== "" && mode !== requested) {
             return fail(req, res, 400, `unknown mode "${body.mode}"`, "invalid_request", { modes: FALLBACK_MODES });
           }
-          try { fallbackChain.setMode(mode); }
-          catch { return fail(req, res, 500, "Could not save the fallback mode", "server_error"); }
-          if (body?.pool === undefined) return sendJson(req, res, 200, fallbackPayload(now));
         }
 
-        if (body?.pool !== undefined) {
-          const pool = String(body.pool ?? "").trim().toLowerCase();
+        let pool = null;
+        let entries = null;
+        if (hasPool) {
+          pool = String(body.pool ?? "").trim().toLowerCase();
           if (!FALLBACK_POOLS.includes(pool)) {
             return fail(req, res, 400, `unknown pool "${pool}"`, "invalid_request", { pools: FALLBACK_POOLS });
           }
           if (!Array.isArray(body?.entries)) return fail(req, res, 400, "entries must be an array", "invalid_request");
 
-          const entries = normalizeEntries(body.entries);
-          // Reject only what cannot be routed at all: an entry naming a model
-          // that is not configured in this pool. This is what stops the UI from
-          // saving a vision model into the text chain.
-          const known = new Set(
-            targets.filter((target) => (target.pool ?? "text") === pool).map((target) => `${target.provider}/${target.model}`)
-          );
-          const unknown = entries.filter((entry) => !known.has(`${entry.provider}/${entry.model}`));
+          // What this pool can actually be routed to: the models it serves, and
+          // the key indexes each of those providers actually has configured.
+          const keyIndexes = new Map();
+          for (const target of targets) {
+            if ((target.pool ?? "text") !== pool) continue;
+            const id = `${target.provider}/${target.model}`;
+            if (!keyIndexes.has(id)) keyIndexes.set(id, new Set());
+            keyIndexes.get(id).add(target.keyIndex);
+          }
+
+          // Checked against what was SENT, not the normalized form. The store
+          // reads a file on disk forgivingly on purpose — a malformed
+          // restriction becomes an unusable one (permitting nothing) and a stale
+          // index becomes one that matches no key — but neither is something an
+          // operator should be able to save from here, so a write that cannot be
+          // honoured is refused rather than stored.
+          const unknown = [];
+          const badKeys = [];
+          for (const raw of body.entries) {
+            const provider = String(raw?.provider ?? "").trim().toLowerCase();
+            const model = String(raw?.model ?? "").trim();
+            // Malformed entries carry no routing intent; normalization drops them.
+            if (!provider || !model) continue;
+            const id = `${provider}/${model}`;
+            const available = keyIndexes.get(id);
+            if (!available) {
+              unknown.push(id);
+              continue;
+            }
+            const problem = keyRestrictionProblem(raw?.keys, available);
+            if (problem) {
+              badKeys.push({
+                provider, model,
+                ...problem,
+                available: [...available].sort((a, b) => a - b)
+              });
+            }
+          }
+
           if (unknown.length > 0) {
             return fail(
               req, res, 400,
               "entries contains models that are not configured for this pool",
               "invalid_request",
-              { pool, unknown: unknown.map((entry) => `${entry.provider}/${entry.model}`) }
+              { pool, unknown }
+            );
+          }
+          if (badKeys.length > 0) {
+            return fail(
+              req, res, 400,
+              "entries contains key restrictions that are not valid for this pool",
+              "invalid_request",
+              { pool, keys: badKeys }
             );
           }
 
-          try { fallbackChain.set(pool, entries); }
-          catch { return fail(req, res, 500, "Could not save the fallback chain", "server_error"); }
-          return sendJson(req, res, 200, fallbackPayload(now));
+          entries = normalizeEntries(body.entries);
         }
 
-        return fail(req, res, 400, "a pool or a mode is required", "invalid_request");
+        // Nothing above failed, so this is the only place anything is written.
+        // A mode and a chain arriving together go through ONE persisted update:
+        // writing them separately could land the mode and then fail on the
+        // chain, leaving a half-applied configuration behind.
+        try {
+          fallbackChain.update({
+            ...(hasMode ? { mode } : {}),
+            ...(hasPool ? { pool, entries } : {})
+          });
+        } catch {
+          return fail(req, res, 500, "Could not save the fallback configuration", "server_error");
+        }
+        // The saved configuration is live from this moment. Invalidated only
+        // after the writes succeeded, so a rejected save cannot disturb the
+        // order already in force.
+        resetAutomaticOrderCache();
+        return sendJson(req, res, 200, fallbackPayload(now));
       }
     }
 
