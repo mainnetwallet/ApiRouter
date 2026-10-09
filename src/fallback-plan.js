@@ -11,12 +11,18 @@ import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId }
  *   AUTO    the same entries (or every configured target when the chain is
  *           empty) ordered by measured health and latency
  *
- * Manual Model Selection (mode `manual`) is the one mode that walks three
- * phases in a single plan:
+ * Manual Model Selection (mode `manual`) is the one mode whose plan alternates
+ * between two batches inside a single request:
  *
  *   MANUAL        the operator's selected entries, in exactly the saved order
  *   HEALTH        every reachable model that is NOT one of those entries, by health
- *   MANUAL_RETRY  one final pass over the selected entries, same order
+ *   MANUAL_RETRY  the selected batch again, for targets a retry is permitted for
+ *   HEALTH_RETRY  the health batch again, for targets a retry is permitted for
+ *
+ * i.e. MANUAL -> HEALTH -> MANUAL -> HEALTH -> ... The repetition is not a cycle
+ * counter: every round after the first holds only `retry` steps, and the walker
+ * (`withFallback`) authorises a retry per TARGET, never per round. A round that
+ * has nothing a retry is permitted for simply walks nothing.
  *
  * There is no priority phase and no separate normal-fallback phase any more:
  * the configured chain IS the order, and the automatic order is what takes over
@@ -34,8 +40,19 @@ export const PHASES = Object.freeze({
   AUTO: "auto",
   MANUAL: "manual-selection",
   HEALTH: "health-fallback",
-  MANUAL_RETRY: "manual-retry"
+  MANUAL_RETRY: "manual-retry",
+  HEALTH_RETRY: "health-retry"
 });
+
+/**
+ * How many times ONE target may be retried inside one request, after its first
+ * attempt, by the Manual <-> Health alternation. This is the existing retry
+ * policy (a target is retried at most once, and only after a transient failure
+ * this request itself caused) given a name; it is a per-target bound, not a
+ * limit on rounds or total attempts. The planner emits one retry round per unit
+ * of it and the walker enforces it target by target, so the two cannot disagree.
+ */
+export const TARGET_RETRY_ALLOWANCE = 1;
 
 export const PLAN_SOURCE = Object.freeze({
   CHAIN: "chain",
@@ -224,31 +241,35 @@ function toSteps(groups, phase, extra = {}) {
 }
 
 /**
- * Manual Model Selection: three phases in one plan.
+ * Manual Model Selection: Manual and Health alternate within one plan.
  *
- *   1. MANUAL        the saved entries, in the exact order saved. Interleaved
- *                    providers stay interleaved (gemini A, groq B, gemini C ...):
- *                    nothing here groups or sorts by provider, because groups
- *                    are keyed by provider/model and walked in `configured` order.
- *   2. HEALTH        every reachable target whose provider/model is not one of
- *                    the saved entries, ordered by the existing health + latency
- *                    ordering. "Saved" includes parked (disabled) entries — an
- *                    operator who parked a model did not ask for it as a fallback
- *                    — and entries whose key subset narrowed to nothing, so a
- *                    restriction can never leak a model's other keys into this
- *                    phase. Exclusion is by MODEL, never by provider: an unselected
- *                    model of a provider that appears in the selection stays here.
- *   3. MANUAL_RETRY  the same entries and keys as phase 1, in the same order,
- *                    flagged `retry` so the walker treats them as the one
- *                    bounded second pass rather than as duplicates.
+ *   MANUAL        the saved entries, in the exact order saved. Interleaved
+ *                 providers stay interleaved (gemini A, groq B, gemini C ...):
+ *                 nothing here groups or sorts by provider, because groups
+ *                 are keyed by provider/model and walked in `configured` order.
+ *   HEALTH        every reachable target whose provider/model is not one of
+ *                 the saved entries, ordered by the existing health + latency
+ *                 ordering. "Saved" includes parked (disabled) entries — an
+ *                 operator who parked a model did not ask for it as a fallback
+ *                 — and entries whose key subset narrowed to nothing, so a
+ *                 restriction can never leak a model's other keys into this
+ *                 phase. Exclusion is by MODEL, never by provider: an unselected
+ *                 model of a provider that appears in the selection stays here.
+ *   then MANUAL_RETRY, HEALTH_RETRY, MANUAL_RETRY, ... — the same two batches in
+ *                 the same order, every step flagged `retry` and numbered by
+ *                 `round`, so the walker can authorise (or refuse) each one
+ *                 against that target's own state instead of replaying anything.
+ *
+ * Both batches are computed ONCE, here, so the health order is stable for the
+ * whole request; a later health refresh can only change the next request's plan.
  *
  * Fail closed: when the selection itself has nothing walkable for this request,
- * the plan is empty. Phase 2 exists to catch FAILURES of the operator's order,
- * not to substitute for an order that cannot be honoured at all.
+ * the plan is empty. The health batch exists to catch FAILURES of the operator's
+ * order, not to substitute for an order that cannot be honoured at all.
  */
 function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now }) {
   const selected = new Set(savedEntries.map((entry) => entryId(entry)));
-  const phase1 = toSteps(configured, PHASES.MANUAL);
+  const manualFirst = toSteps(configured, PHASES.MANUAL);
   const meta = {
     source: PLAN_SOURCE.MANUAL,
     mode: FALLBACK_MODES.MANUAL,
@@ -258,17 +279,24 @@ function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, 
     rememberedKey: null
   };
 
-  if (phase1.length === 0) {
+  if (manualFirst.length === 0) {
     return { steps: [], groups: configured, failClosed: true, ...meta };
   }
 
   const others = [...grouped.values()].filter((group) => !selected.has(group.id));
   const fallbackGroups = automaticGroupsOrder(others, { cacheKey: `${cacheKey}|manual-fallback`, health, now });
-  const phase2 = toSteps(fallbackGroups, PHASES.HEALTH);
-  const phase3 = toSteps(configured, PHASES.MANUAL_RETRY, { retry: true });
+  const healthFirst = toSteps(fallbackGroups, PHASES.HEALTH);
+
+  const steps = [...manualFirst, ...healthFirst];
+  for (let round = 1; round <= TARGET_RETRY_ALLOWANCE; round += 1) {
+    steps.push(
+      ...toSteps(configured, PHASES.MANUAL_RETRY, { retry: true, round }),
+      ...toSteps(fallbackGroups, PHASES.HEALTH_RETRY, { retry: true, round })
+    );
+  }
 
   return {
-    steps: [...phase1, ...phase2, ...phase3],
+    steps,
     groups: [...configured, ...fallbackGroups],
     failClosed: false,
     ...meta
@@ -311,7 +339,7 @@ export function buildRoutePlan({
   const savedEntries = allEntries(chain);
   const useChain = !pinned && savedEntries.length > 0;
 
-  // Manual Model Selection has its own three-phase plan; every other mode, and
+  // Manual Model Selection has its own alternating plan; every other mode, and
   // every pinned request, takes the paths below untouched.
   if (useChain && mode === FALLBACK_MODES.MANUAL) {
     return buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now });

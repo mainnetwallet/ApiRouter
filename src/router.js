@@ -1,4 +1,5 @@
 import { HealthRegistry } from "./health.js";
+import { TARGET_RETRY_ALLOWANCE } from "./fallback-plan.js";
 
 const DEFAULT_RETRY_STATUS_CODES = new Set([401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
 
@@ -97,8 +98,8 @@ export function classifyFailure(status, error = null) {
 /**
  * A failure that says "not right now" rather than "not this request / not this
  * credential": a timeout, rate limit, server error, or a call that never got an
- * HTTP answer at all. Only these are worth a second look in the final manual
- * pass. Everything else (400/404/413/422 about the request or model, 401/402/403
+ * HTTP answer at all. Only these are worth a retry in the Manual <-> Health
+ * alternation. Everything else (400/404/413/422 about the request or model, 401/402/403
  * about the credential) would simply fail the same way again.
  */
 function isTransientStatus(status) {
@@ -223,22 +224,31 @@ export class RouteSession {
  * once; a repeat is reported through `onSkip`, never called. Targets cooling
  * down in the shared health registry are skipped the same way.
  *
- * The one exception is a step flagged `retry` (the final pass of Manual Model
- * Selection, see fallback-plan.js). It is the single, bounded second look at a
- * target, with these rules:
+ * The one exception is a step flagged `retry` (the later rounds of Manual Model
+ * Selection, which alternates Manual -> Health -> Manual -> Health, see
+ * fallback-plan.js). A retry is authorised per TARGET from per-request state,
+ * never because another round began:
  *
- *   - each target is retried at most once, however often the plan lists it;
- *   - a target already cooling down when this request reached it, and a target
- *     cooled by a credential-level or non-transient failure (401/402/403, 400,
- *     404, 413, 422 ...), is NEVER retried: that cooldown is a real health
- *     verdict, and the pass does not override it;
- *   - the one cooldown the pass looks past is the one THIS request put on a
+ *   - a target is retried at most TARGET_RETRY_ALLOWANCE times per request;
+ *   - a target this request never called is not "retried": it is walked as a
+ *     first attempt, and only if it is available right now. A cooldown that
+ *     existed when the request reached it is never overridden;
+ *   - a target whose failure here was credential-level, provider-level,
+ *     non-transient (400/401/402/403/404/413/422 ...) or opted out of health
+ *     tracking is never retried: it would fail the same way again;
+ *   - the one cooldown a retry looks past is the one THIS request put on the
  *     target through a transient, target-scoped failure (timeout, 429, 5xx,
- *     transport error), and only while nobody else has refreshed it since.
- *     Without this every target that failed in the first pass would be sitting
- *     in the cooldown that failure just created, and the final pass could never
- *     retry anything. A retry success clears the cooldown; a retry failure
- *     starts a fresh one.
+ *     transport error), and only while it is still exactly that cooldown, so a
+ *     health refresh or another request that touched it since is respected.
+ *     Without that, every target that failed in the first round would be
+ *     sitting in the cooldown that failure just created and no retry could
+ *     happen. A retry success clears the cooldown; a retry failure starts a
+ *     fresh one.
+ *
+ * Termination: every call either consumes the target's single first attempt or
+ * one unit of its retry allowance, so the number of calls is bounded by
+ * (1 + allowance) x the number of distinct targets, and a round in which no
+ * target is authorised simply calls nothing.
  *
  * Every success is
  * recorded on the session as its remembered target when the selected mode
@@ -264,8 +274,11 @@ export async function withFallback(
   }
 
   const attempted = new Set();
-  // Final-pass bookkeeping (see the `retry` rules above).
-  const retried = new Set();
+  // Retry bookkeeping (see the `retry` rules above): how many retries each
+  // target has used, and which targets must never be retried at all.
+  const retries = new Map();
+  const noRetry = new Set();
+  const retrySkipReported = new Set();
   // target id -> the cooldownUntil THIS request set through a transient failure.
   const ownTransientCooldown = new Map();
   const cooldownReported = new Set();
@@ -283,13 +296,24 @@ export async function withFallback(
     const target = step.target;
     const id = health.key(target);
 
-    const isRetry = step.retry === true;
-    if (isRetry ? retried.has(id) : attempted.has(id)) {
-      skip(step, isRetry ? "already_retried" : "already_attempted");
+    // A retry step for a target this request has not called is a first attempt
+    // that happens to sit in a later round; it gets no retry privileges.
+    const isRetry = step.retry === true && attempted.has(id);
+    if (isRetry) {
+      const reason = retries.get(id) >= TARGET_RETRY_ALLOWANCE ? "already_retried" : noRetry.has(id) ? "not_retryable" : null;
+      if (reason) {
+        if (!retrySkipReported.has(id)) {
+          retrySkipReported.add(id);
+          skip(step, reason);
+        }
+        continue;
+      }
+    } else if (attempted.has(id)) {
+      skip(step, "already_attempted");
       continue;
     }
     // The cooldown this request itself created by a transient failure does not
-    // block the final pass, as long as it is still exactly that cooldown.
+    // block a retry, as long as it is still exactly that cooldown.
     const ownCooldown = isRetry
       && ownTransientCooldown.has(id)
       && Number(health.get(id)?.cooldownUntil) === ownTransientCooldown.get(id);
@@ -305,7 +329,7 @@ export async function withFallback(
 
     eligible += 1;
     attempted.add(id);
-    if (isRetry) retried.add(id);
+    if (isRetry) retries.set(id, (retries.get(id) ?? 0) + 1);
     ownTransientCooldown.delete(id);
     const startedAt = Date.now();
 
@@ -322,10 +346,16 @@ export async function withFallback(
 
       // An error can opt out of health tracking entirely (skipCooldown). A
       // target that refused the request for its own reasons — an image it
-      // cannot carry, say — is not unhealthy, so it is not cooled down.
-      if (error?.skipCooldown) continue;
+      // cannot carry, say — is not unhealthy, so it is not cooled down, and it
+      // is not retried either: the same request would be refused again.
+      if (error?.skipCooldown) {
+        noRetry.add(id);
+        continue;
+      }
 
       const { scope, kind } = describeFailure(status, error);
+      // Only a transient, target-scoped failure is worth a second look.
+      if (scope !== FAILURE_SCOPE.TARGET || !isTransientStatus(status)) noRetry.add(id);
       // A failure narrowed to this target by its message carries a fixed,
       // non-upstream reason so the Models page can say why it is cooling down.
       health.markFailure(target, status, {

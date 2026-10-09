@@ -4,6 +4,7 @@ import { HealthRegistry, startHealthMonitor } from "../src/health.js";
 import { FALLBACK_MODES, FALLBACK_MODE_INFO, normalizeMode, remembersSuccess } from "../src/fallback-chain.js";
 import {
   PHASES,
+  TARGET_RETRY_ALLOWANCE,
   buildRoutePlan,
   effectiveOrder,
   resetAutomaticOrderCache,
@@ -42,6 +43,7 @@ const selection = [
   entry("gemini", "E")
 ];
 
+const PHASE_TWO_ORDER = ["gemini/X#0", "gemini/X#1", "openrouter/Y#0", "cerebras/Z#0"];
 const MANUAL_ORDER = [
   "gemini/A#0", "gemini/A#1",
   "groq/B#0",
@@ -182,22 +184,32 @@ test("a parked (disabled) entry and a key the operator excluded never reach phas
 // PHASE 3 — one final manual pass
 // ---------------------------------------------------------------------------
 
-test("phase 3 is the same selection in the same order, flagged as the one bounded retry", () => {
+test("the plan alternates Manual -> Health -> Manual -> Health, later rounds flagged as retries", () => {
   const p = plan();
-  const last = phaseSteps(p, PHASES.MANUAL_RETRY);
-  assert.deepEqual(labels(last), MANUAL_ORDER);
-  assert.ok(last.every((step) => step.retry === true));
-  assert.ok(p.steps.filter((step) => step.phase !== PHASES.MANUAL_RETRY).every((step) => step.retry !== true));
+  const manualRetry = phaseSteps(p, PHASES.MANUAL_RETRY);
+  const healthRetry = phaseSteps(p, PHASES.HEALTH_RETRY);
+  assert.deepEqual(labels(manualRetry), MANUAL_ORDER, "the retry round keeps the saved order");
+  assert.deepEqual(labels(healthRetry), PHASE_TWO_ORDER, "and the same health order as the first health batch");
+  assert.ok([...manualRetry, ...healthRetry].every((step) => step.retry === true));
+  assert.ok(p.steps.filter((step) => step.retry !== true).every((step) => [PHASES.MANUAL, PHASES.HEALTH].includes(step.phase)));
 
-  // The plan is exactly phase 1, then phase 2, then phase 3 — and no fourth phase.
-  assert.deepEqual([...new Set(p.steps.map((step) => step.phase))], [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY]);
-  assert.equal(p.steps.length, MANUAL_ORDER.length * 2 + 4);
+  // Collapsed, the plan reads MANUAL, HEALTH, MANUAL, HEALTH.
+  const collapsed = p.steps.map((step) => step.phase).filter((phase, index, all) => phase !== all[index - 1]);
+  assert.deepEqual(collapsed, [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY, PHASES.HEALTH_RETRY]);
+  assert.equal(p.steps.length, (MANUAL_ORDER.length + PHASE_TWO_ORDER.length) * (1 + TARGET_RETRY_ALLOWANCE));
+});
+
+test("the retry rounds list exactly the same targets as the first rounds: nothing new, nothing reordered", () => {
+  const p = plan();
+  const first = p.steps.filter((step) => step.retry !== true).map((step) => label(step.target));
+  const later = p.steps.filter((step) => step.retry === true).map((step) => label(step.target));
+  assert.deepEqual(later, first);
 });
 
 test("the plan never lists a target twice within one phase", () => {
   const dup = [...targets, t("gemini", "A", 0), t("gemini", "X", 1)];
   const p = plan({ targets: dup });
-  for (const phase of [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY]) {
+  for (const phase of [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY, PHASES.HEALTH_RETRY]) {
     const ids = labels(phaseSteps(p, phase));
     assert.equal(new Set(ids).size, ids.length, `${phase} has a duplicate`);
   }
@@ -266,7 +278,7 @@ test("text and vision pools stay separate under manual selection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The walker over the three phases
+// The walker over the alternating batches
 // ---------------------------------------------------------------------------
 
 /** Walks a manual plan, recording every call; `behavior(id, count)` decides each outcome. */
@@ -301,22 +313,111 @@ async function walkManual(behavior, { health = new HealthRegistry(), chain = sel
 
 const PHASE_TWO = ["gemini/X#0", "gemini/X#1", "openrouter/Y#0", "cerebras/Z#0"];
 
-test("all three phases run in order when everything fails with a transient error", async () => {
+test("Manual and Health alternate, in order, while permitted targets remain, then the request fails", async () => {
   const { calls, error, phases } = await walkManual(() => { throw fail(500); });
-  assert.deepEqual(calls, [...MANUAL_ORDER, ...PHASE_TWO, ...MANUAL_ORDER]);
+  assert.deepEqual(calls, [...MANUAL_ORDER, ...PHASE_TWO, ...MANUAL_ORDER, ...PHASE_TWO]);
   assert.equal(error.status, 502);
   assert.deepEqual(
-    [...new Set(phases)],
-    [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY],
-    "the walker reports which phase every call belonged to"
+    phases.filter((phase, index, all) => phase !== all[index - 1]),
+    [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY, PHASES.HEALTH_RETRY],
+    "the walker reports which batch every call belonged to"
   );
 });
 
-test("the final pass is bounded: each manual target is called at most twice, every other at most once", async () => {
+test("termination is per target: every target is called at most 1 + the retry allowance, and the walk ends", async () => {
   const { counts } = await walkManual(() => { throw fail(500); });
-  for (const id of MANUAL_ORDER) assert.equal(counts.get(id), 2, `${id}: first pass + one retry`);
-  for (const id of PHASE_TWO) assert.equal(counts.get(id), 1, `${id}: tried once`);
-  assert.equal([...counts.values()].reduce((a, b) => a + b, 0), 20, "no infinite loop, no stray duplicates");
+  for (const id of [...MANUAL_ORDER, ...PHASE_TWO]) {
+    assert.equal(counts.get(id), 1 + TARGET_RETRY_ALLOWANCE, `${id}: first attempt + its retry allowance`);
+  }
+  assert.equal([...counts.values()].reduce((a, b) => a + b, 0), 24, "no infinite loop, no stray duplicates");
+});
+
+test("a Health target that failed transiently is retried in the second Health batch, in the same order", async () => {
+  const { calls, counts } = await walkManual((id, n) => {
+    if (id === "cerebras/Z#0" && n === 2) return "recovered";
+    throw fail(503);
+  });
+  assert.equal(counts.get("cerebras/Z#0"), 2);
+  assert.deepEqual(calls, [...MANUAL_ORDER, ...PHASE_TWO, ...MANUAL_ORDER, ...PHASE_TWO.slice(0, 4)],
+    "second Manual batch ran in full before the second Health batch, which stopped at the success");
+});
+
+test("a Health target that failed for a credential or request reason is never retried", async () => {
+  const { counts } = await walkManual((id) => {
+    if (id === "openrouter/Y#0") throw fail(401);
+    if (id === "cerebras/Z#0") throw fail(404);
+    throw fail(500);
+  });
+  assert.equal(counts.get("openrouter/Y#0"), 1);
+  assert.equal(counts.get("cerebras/Z#0"), 1);
+  assert.equal(counts.get("gemini/X#0"), 2, "its transient siblings still get their one retry");
+});
+
+test("a refusal that skips health tracking (e.g. an image the target cannot carry) is not retried", async () => {
+  const { counts, health } = await walkManual((id) => {
+    if (id === "groq/B#0") throw fail(400, { skipCooldown: true, retryable: true });
+    throw fail(500);
+  });
+  assert.equal(counts.get("groq/B#0"), 1, "same request, same refusal: retrying would only repeat it");
+  assert.ok(health.isAvailable(t("groq", "B", 0)), "and it was never cooled down");
+});
+
+test("a new round alone never authorises a retry: a target nobody cooled is not replayed unless it failed transiently", async () => {
+  // Success is the only way a target is 'finished' without a cooldown, and that ends the walk.
+  const { calls } = await walkManual((id) => { throw fail(id.startsWith("gemini/") ? 401 : 500); });
+  // Gemini key 0 and key 1 are both rejected as credentials: one call per key in the whole request.
+  assert.equal(calls.filter((id) => id === "gemini/A#0").length, 1);
+  assert.equal(calls.filter((id) => id === "gemini/A#1").length, 1);
+});
+
+test("a success in any later batch ends routing immediately", async () => {
+  const { calls, result } = await walkManual((id, n) => {
+    if (id === "mistral/D#0" && n === 2) return "second-manual-batch";
+    throw fail(500);
+  });
+  assert.equal(result, "second-manual-batch");
+  const lastIndex = calls.length - 1;
+  assert.equal(calls[lastIndex], "mistral/D#0");
+  assert.equal(calls.filter((id) => id === "mistral/D#0").length, 2);
+  assert.ok(!calls.slice(lastIndex + 1).length, "nothing after the success");
+});
+
+test("the Health batch order is fixed for the whole request, even if measurements change while it runs", async () => {
+  const health = new HealthRegistry();
+  health.markSuccess(t("openrouter", "Y", 0), { latencyMs: 40 });
+  health.markSuccess(t("cerebras", "Z", 0), { latencyMs: 90 });
+  health.markSuccess(t("gemini", "X", 0), { latencyMs: 400 });
+  const { calls } = await walkManual((id) => {
+    // Mid-request the measurements flip. The plan was built once, so this must not reorder anything.
+    health.markSuccess(t("gemini", "X", 0), { latencyMs: 1 });
+    throw fail(500);
+  }, { health });
+  const firstHealth = calls.filter((id) => !MANUAL_ORDER.includes(id));
+  assert.deepEqual(firstHealth.slice(0, 4), ["openrouter/Y#0", "cerebras/Z#0", "gemini/X#0", "gemini/X#1"]);
+});
+
+test("a health refresh changes the Health order of the NEXT request only when the measurements warrant it", () => {
+  const health = new HealthRegistry();
+  health.markSuccess(t("openrouter", "Y", 0), { latencyMs: 40 });
+  health.markSuccess(t("cerebras", "Z", 0), { latencyMs: 90 });
+  const before = models(phaseSteps(plan({ health }), PHASES.HEALTH));
+  // A refresh that finds the same ordering of numbers does not move anything.
+  health.markSuccess(t("openrouter", "Y", 0), { latencyMs: 41 });
+  health.markSuccess(t("cerebras", "Z", 0), { latencyMs: 91 });
+  assert.deepEqual(models(phaseSteps(plan({ health }), PHASES.HEALTH)), before, "effectively the same measurements, same order");
+  // A refresh that finds cerebras now faster does.
+  health.markSuccess(t("cerebras", "Z", 0), { latencyMs: 5 });
+  assert.deepEqual(models(phaseSteps(plan({ health }), PHASES.HEALTH)).slice(0, 2), ["cerebras/Z", "openrouter/Y"]);
+});
+
+test("a health refresh never clears a cooldown or makes a cooling target callable", async () => {
+  const health = new HealthRegistry();
+  health.markFailure(t("openrouter", "Y", 0), 500);
+  const before = health.get(health.key(t("openrouter", "Y", 0))).cooldownUntil;
+  health.markSuccess(t("cerebras", "Z", 0), { latencyMs: 5 }); // a refresh of someone else
+  assert.equal(health.get(health.key(t("openrouter", "Y", 0))).cooldownUntil, before);
+  const { calls } = await walkManual(() => { throw fail(500); }, { health });
+  assert.ok(!calls.includes("openrouter/Y#0"), "still cooling, so never called, in any batch");
 });
 
 test("a success in phase 1 stops the walk: phase 2 and 3 are never reached", async () => {
@@ -342,7 +443,7 @@ test("the final pass can still recover a target whose first failure was transien
   assert.deepEqual(calls.slice(-MANUAL_ORDER.length), MANUAL_ORDER, "phase 3 walked the original order up to the success");
 });
 
-test("targets that fail for a non-transient reason are not retried in the final pass", async () => {
+test("targets that fail for a non-transient reason are not retried in a later batch", async () => {
   const { counts } = await walkManual((id) => {
     if (id === "groq/B#0") throw fail(404);   // the model is gone
     if (id === "mistral/D#0") throw fail(429); // transient: worth a second look

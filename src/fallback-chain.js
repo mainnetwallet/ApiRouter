@@ -31,7 +31,9 @@ export const FALLBACK_POOLS = Object.freeze(["text", "vision"]);
  *   auto          the chain is ordered by measured health and latency each cycle
  *   manual        Manual Model Selection: the chain is the operator's explicit
  *                 pick. It is walked in its saved order, then every model NOT in
- *                 it is tried by health, then the picks get one final pass
+ *                 it is tried by health, and the two batches then alternate
+ *                 (selected, health, selected, health ...) for as long as a
+ *                 target is permitted another attempt
  */
 export const FALLBACK_MODES = Object.freeze({
   FIXED: "fixed",
@@ -62,7 +64,7 @@ export const FALLBACK_MODE_INFO = Object.freeze([
   {
     id: FALLBACK_MODES.MANUAL,
     label: "Manual Model Selection",
-    detail: "Three phases. 1) Your selected models, in exactly the order you saved them, every eligible key of a model before the next. 2) If all of those fail, every model you did NOT select, ordered by measured health and latency. 3) One final pass over your selected models in their original order. Cooldowns and key restrictions apply throughout; nothing is retried more than once."
+    detail: "Two batches that alternate within one request. 1) Your selected models, in exactly the order you saved them, every eligible key of a model before the next. 2) If all of those fail, every model you did NOT select, ordered by measured health and latency. Then selected, health, selected, health again — but only for targets that failed transiently in this request, each at most once more. Cooldowns and key restrictions apply throughout; a credential failure or a cooling key is never retried."
   }
 ]);
 

@@ -164,7 +164,7 @@ export default function FallbackChainConfig() {
                   {data.mode === "fixed"
                     ? "Every request starts at the first model of the chain."
                     : data.mode === "manual"
-                      ? "Your selection first, then every other model by health, then one final pass over your selection."
+                      ? "Your selection first, then every other model by health, then the two alternate again for targets that failed transiently."
                       : "A success is remembered and tried first on the next request."}
                 </span>
               </div>

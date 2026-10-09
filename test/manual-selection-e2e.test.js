@@ -114,34 +114,35 @@ test("manual mode is selectable through the API and reported as such", async () 
   } finally { await fleet.close(); }
 });
 
-test("PHASES 1-2-3 over the real proxy: selection, every unselected model, one final pass", async () => {
+const H = ["groq/X#0", "groq/X#1", "mistral/Y#0", "cerebras/Z#0"];
+
+test("Manual and Health alternate over the real proxy: selection, every unselected model, selection again, health again", async () => {
   const fleet = await startFleet(() => down);
   try {
     await manual(fleet);
     const response = await chat(fleet.router);
     assert.equal(response.status, 502);
 
-    const phase1 = fleet.calls.slice(0, P1.length);
-    assert.deepEqual(phase1, P1, "exact saved order, providers interleaved, every key before the next model");
-    assert.deepEqual(sortedUniqueByModel(phase1), ["groq/A", "mistral/B", "groq/C", "openrouter/D", "groq/E"]);
+    const batch1 = fleet.calls.slice(0, P1.length);
+    assert.deepEqual(batch1, P1, "exact saved order, providers interleaved, every key before the next model");
+    assert.deepEqual(sortedUniqueByModel(batch1), ["groq/A", "mistral/B", "groq/C", "openrouter/D", "groq/E"]);
 
-    const phase2 = fleet.calls.slice(P1.length, fleet.calls.length - P1.length);
-    assert.deepEqual(new Set(phase2), new Set(["groq/X#0", "groq/X#1", "mistral/Y#0", "cerebras/Z#0"]),
+    const health1 = fleet.calls.slice(P1.length, P1.length + H.length);
+    assert.deepEqual(new Set(health1), new Set(H),
       "every unselected model, including groq/X from a provider that is in the selection");
-    assert.equal(phase2.length, 4, "each fallback key is tried exactly once");
-    const groqX = phase2.filter((id) => id.startsWith("groq/X"));
-    assert.deepEqual(groqX, ["groq/X#0", "groq/X#1"]);
-    assert.equal(phase2.indexOf("groq/X#1") - phase2.indexOf("groq/X#0"), 1, "a fallback model's keys are adjacent");
+    assert.equal(health1.length, 4, "each fallback key is tried exactly once per batch");
+    assert.equal(health1.indexOf("groq/X#1") - health1.indexOf("groq/X#0"), 1, "a fallback model's keys are adjacent");
 
-    const phase3 = fleet.calls.slice(fleet.calls.length - P1.length);
-    assert.deepEqual(phase3, P1, "one final pass, same order");
+    const rest = fleet.calls.slice(P1.length + H.length);
+    assert.deepEqual(rest.slice(0, P1.length), P1, "second Manual batch: same order");
+    assert.deepEqual(rest.slice(P1.length), health1, "second Health batch: the same order as the first, stable within the request");
 
-    assert.equal(fleet.calls.length, P1.length * 2 + 4, "bounded: no loop, no accidental duplicates");
-    for (const id of P1) assert.equal(fleet.counts.get(id), 2);
+    assert.equal(fleet.calls.length, (P1.length + H.length) * 2, "bounded: no loop, no accidental duplicates");
+    for (const id of [...P1, ...H]) assert.equal(fleet.counts.get(id), 2, `${id}: first attempt + one permitted retry`);
   } finally { await fleet.close(); }
 });
 
-test("the final pass is skipped once a fallback model answers", async () => {
+test("later batches are never reached once a fallback model answers", async () => {
   const fleet = await startFleet(({ id }) => (id === "cerebras/Z#0" ? okBody("Z") : down));
   try {
     await manual(fleet);
@@ -150,11 +151,11 @@ test("the final pass is skipped once a fallback model answers", async () => {
     assert.equal(response.headers.get("x-multi-ai-provider"), "cerebras");
     assert.equal(response.headers.get("x-multi-ai-model"), "Z");
     assert.deepEqual(fleet.calls.slice(0, P1.length), P1);
-    for (const id of P1) assert.equal(fleet.counts.get(id), 1, `${id} must not be retried when phase 2 succeeded`);
+    for (const id of P1) assert.equal(fleet.counts.get(id), 1, `${id} must not be retried when the first Health batch succeeded`);
   } finally { await fleet.close(); }
 });
 
-test("the final pass recovers a target that failed transiently", async () => {
+test("a later Manual batch recovers a target that failed transiently, after Health has also failed", async () => {
   const fleet = await startFleet(({ id, n }) => (id === "groq/E#1" && n === 2 ? okBody("E") : down));
   try {
     await manual(fleet);
@@ -163,7 +164,8 @@ test("the final pass recovers a target that failed transiently", async () => {
     assert.equal(response.headers.get("x-multi-ai-model"), "E");
     assert.equal(response.headers.get("x-multi-ai-key-index"), "1");
     assert.equal(fleet.counts.get("groq/E#1"), 2);
-    assert.deepEqual(fleet.calls.slice(-P1.length), P1);
+    assert.deepEqual(fleet.calls.slice(0, P1.length + H.length), [...P1, ...fleet.calls.slice(P1.length, P1.length + H.length)]);
+    assert.deepEqual(fleet.calls.slice(P1.length + H.length), P1, "second Manual batch walked in saved order up to the success");
   } finally { await fleet.close(); }
 });
 
@@ -180,7 +182,7 @@ test("a manual success never moves ahead of an earlier selection, and nothing is
   } finally { await fleet.close(); }
 });
 
-test("transient failures are retried in the final pass; request/credential failures are not", async () => {
+test("transient failures are retried in a later batch; request/credential failures are not", async () => {
   const fleet = await startFleet(({ id }) => {
     if (id === "mistral/B#0") return { status: 404, body: { error: "gone" } };
     if (id === "openrouter/D#0") return { status: 429, body: { error: "slow down" } };
@@ -191,6 +193,45 @@ test("transient failures are retried in the final pass; request/credential failu
     await chat(fleet.router);
     assert.equal(fleet.counts.get("mistral/B#0"), 1, "a withdrawn model is not worth a second try");
     assert.equal(fleet.counts.get("openrouter/D#0"), 2, "a rate limit is");
+  } finally { await fleet.close(); }
+});
+
+test("credential failures are never retried indefinitely, in either batch, and a transient Health failure gets exactly one retry", async () => {
+  const fleet = await startFleet(({ id }) => {
+    if (id === "groq/A#0") return { status: 401, body: { error: "bad key" } }; // cools key 0 of groq for every groq model
+    if (id === "mistral/Y#0") return { status: 403, body: { error: "forbidden" } };
+    return down;
+  });
+  try {
+    await manual(fleet);
+    assert.equal((await chat(fleet.router)).status, 502);
+    assert.equal(fleet.counts.get("groq/A#0"), 1, "a rejected credential is called once per request");
+    assert.equal(fleet.counts.get("mistral/Y#0"), 1, "same in the Health batch");
+    for (const id of ["groq/C#0", "groq/E#0", "groq/X#0"]) {
+      assert.equal(fleet.counts.get(id) ?? 0, 0, `${id} shares the rejected key and is skipped, not retried`);
+    }
+    assert.equal(fleet.counts.get("cerebras/Z#0"), 2, "a transient Health failure is retried once, in the second Health batch");
+    for (const [id, n] of fleet.counts) assert.ok(n <= 2, `${id} was called ${n} times`);
+  } finally { await fleet.close(); }
+});
+
+test("a success in the second Health batch ends routing and the next request still honours cooldowns", async () => {
+  let healed = false;
+  const fleet = await startFleet(({ id, n }) => {
+    if (id === "mistral/Y#0" && (healed || n === 2)) return okBody("Y");
+    return down;
+  });
+  try {
+    await manual(fleet);
+    const response = await chat(fleet.router);
+    healed = true;
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-multi-ai-model"), "Y");
+    assert.equal(fleet.calls.at(-1), "mistral/Y#0", "routing stopped on the success");
+    fleet.reset();
+    // Nothing else cooled down is called by the next request; the recovered target is the only one available.
+    assert.equal((await chat(fleet.router)).status, 200);
+    assert.deepEqual(fleet.calls, ["mistral/Y#0"]);
   } finally { await fleet.close(); }
 });
 
@@ -223,8 +264,9 @@ test("key restrictions and disabled models stay excluded in every phase", async 
     assert.ok(!fleet.calls.some((id) => id.startsWith("groq/E")), "a parked model is not a fallback either");
     const phase1 = ["groq/A#1", "mistral/B#0", "groq/C#0", "groq/C#1", "openrouter/D#0"];
     assert.deepEqual(fleet.calls.slice(0, phase1.length), phase1);
-    assert.deepEqual(fleet.calls.slice(-phase1.length), phase1);
-    assert.equal(fleet.calls.length, phase1.length * 2 + 4);
+    // Second Manual batch sits after the first Health batch, then Health repeats.
+    assert.deepEqual(fleet.calls.slice(phase1.length + 4, phase1.length * 2 + 4), phase1);
+    assert.equal(fleet.calls.length, (phase1.length + 4) * 2);
   } finally { await fleet.close(); }
 });
 
@@ -298,7 +340,7 @@ test("Reset Fallback leaves manual mode and the selection alone", async () => {
   } finally { await fleet.close(); }
 });
 
-test("Live Logs label the three phases, in order, and never expose a credential", async () => {
+test("Live Logs label every batch, in order, and never expose a credential", async () => {
   const fleet = await startFleet(() => down);
   try {
     await manual(fleet);
@@ -308,14 +350,15 @@ test("Live Logs label the three phases, in order, and never expose a credential"
     assert.ok(!raw.includes("SECRET"), "no API key may appear in the request log");
     const log = JSON.parse(raw);
     const attempts = (log.attempts ?? []).filter((attempt) => attempt.skipped !== true);
-    assert.equal(attempts.length, P1.length * 2 + 4);
+    assert.equal(attempts.length, (P1.length + H.length) * 2);
 
     const phases = attempts.map((attempt) => attempt.phase);
     const collapsed = phases.filter((phase, index) => phase !== phases[index - 1]);
-    assert.deepEqual(collapsed, ["manual-selection", "health-fallback", "manual-retry"]);
+    assert.deepEqual(collapsed, ["manual-selection", "health-fallback", "manual-retry", "health-retry"]);
     assert.equal(phases.filter((phase) => phase === "manual-selection").length, P1.length);
     assert.equal(phases.filter((phase) => phase === "health-fallback").length, 4);
     assert.equal(phases.filter((phase) => phase === "manual-retry").length, P1.length);
+    assert.equal(phases.filter((phase) => phase === "health-retry").length, 4);
 
     // The recorded order is the real call order.
     assert.deepEqual(
@@ -325,7 +368,7 @@ test("Live Logs label the three phases, in order, and never expose a credential"
     // Live attempt events (what the Live Logs page streams) carry the same phase vocabulary.
     const events = await fleet.router.request("/api/attempts?limit=100").then(json);
     const eventPhases = new Set((events.attempts ?? events.events ?? []).map((event) => event.phase).filter(Boolean));
-    for (const phase of eventPhases) assert.ok(["manual-selection", "health-fallback", "manual-retry"].includes(phase), phase);
+    for (const phase of eventPhases) assert.ok(["manual-selection", "health-fallback", "manual-retry", "health-retry"].includes(phase), phase);
   } finally { await fleet.close(); }
 });
 

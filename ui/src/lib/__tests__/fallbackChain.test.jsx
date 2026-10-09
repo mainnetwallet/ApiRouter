@@ -217,12 +217,13 @@ describe("fallback chain presentation", () => {
     expect(phaseLabel(null)).toBeNull();
   });
 
-  it("labels the three Manual Model Selection phases distinctly", () => {
+  it("labels every Manual Model Selection batch distinctly", () => {
     expect(phaseLabel("manual-selection")).toBe("Manual selection");
     expect(phaseLabel("health-fallback")).toBe("Health-based fallback");
-    expect(phaseLabel("manual-retry")).toBe("Final manual retry");
-    const labels = ["manual-selection", "health-fallback", "manual-retry"].map(phaseLabel);
-    expect(new Set(labels).size).toBe(3);
+    expect(phaseLabel("manual-retry")).toBe("Manual retry");
+    expect(phaseLabel("health-retry")).toBe("Health retry");
+    const labels = ["manual-selection", "health-fallback", "manual-retry", "health-retry"].map(phaseLabel);
+    expect(new Set(labels).size).toBe(4);
     // The new vocabulary does not resurrect the retired "manual" phase id.
     expect(phaseLabel("manual")).toBeNull();
   });

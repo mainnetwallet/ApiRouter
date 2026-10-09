@@ -368,7 +368,7 @@ In the `fixed` mode nothing is remembered at all: every request starts at the
 first model of the chain and its first eligible key.
 
 
-### Manual Model Selection (three phases)
+### Manual Model Selection (alternating batches)
 
 `manual` is a fourth fallback mode. It is the only mode whose plan has more than
 one source, and it is built by `buildManualPlan` in `fallback-plan.js`:
@@ -382,154 +382,42 @@ one source, and it is built by `buildManualPlan` in `fallback-plan.js`:
    unselected model of a provider that appears in the selection stays eligible.
    Parked (disabled) entries and entries narrowed to no keys are excluded too,
    so a restriction can never leak a model's other keys into this phase.
-3. **`manual-retry`** — the same entries and keys as phase 1, in the same order,
-   flagged `retry`. This is one pass; the plan has no fourth phase.
+3. **`manual-retry`, `health-retry`, ...** — the same two batches again, in the
+   same order, every step flagged `retry` and numbered by `round`. The sequence
+   is therefore MANUAL → HEALTH → MANUAL → HEALTH.
 
-The per-request "a target is invoked at most once" rule is unchanged for every
-other step. A `retry` step is the one bounded exception (`withFallback` in
-`router.js`): each target is retried at most once; a cooldown that existed when
-the request reached the target is never overridden; a credential-level or
-non-transient failure (400/401/402/403/404/413/422) is never retried; and the one
-cooldown the pass looks past is the one *this request* set through a transient,
-target-scoped failure (timeout, 429, 5xx, transport error), and only while it is
-still exactly that cooldown. Without that, every target that failed in phase 1
-would already be cooling down from that failure and phase 3 could retry nothing.
+Both batches are computed once when the request starts, so the Health order is
+stable for the whole request. A health refresh (every 12 minutes) can change the
+order the *next* request's plan gets; it never clears a cooldown.
+
+The repetition is not a cycle counter. The plan only lists the targets again; the
+walker (`withFallback` in `router.js`) decides, target by target and from
+per-request state, whether a listed retry is permitted:
+
+- the per-request "a target is invoked at most once" rule is unchanged for every
+  other step and every other mode;
+- a target is retried at most `TARGET_RETRY_ALLOWANCE` (1) times per request, and
+  the planner emits exactly that many retry rounds;
+- a cooldown that existed when the request reached the target is never
+  overridden;
+- a credential-level or non-transient failure (400/401/402/403/404/413/422), a
+  key- or provider-scoped failure, and a refusal that opted out of health
+  tracking (`skipCooldown`) are never retried;
+- the one cooldown a retry looks past is the one *this request* set through a
+  transient, target-scoped failure (timeout, 429, 5xx, transport error), and only
+  while it is still exactly that cooldown. A retry success clears it; a retry
+  failure starts a fresh one;
+- a retry step for a target this request never called is walked as a first
+  attempt, and only if it is available right now.
+
+Termination follows from that: every call spends the target's first attempt or
+one unit of its retry allowance, so calls are bounded by `(1 + allowance) ×
+distinct targets`, and a round with nothing permitted calls nothing. When nothing
+is left that may legally be attempted the existing error is returned: `503` when
+no target was ever eligible (everything cooling down), `502` when targets were
+called and all failed, or the shared `400` when every one answered 400.
 
 If the selection itself has nothing walkable for a request, the plan is empty and
-the request fails closed (`fallback_chain_unusable`): phase 2 catches failures of
-the operator's order, it does not stand in for an order that cannot be honoured.
-Manual mode remembers nothing. A pinned request never uses any of this.
-
-## Security
-
-Router authentication is optional:
-
-```env
-APIROUTER_API_KEYS=
-```
-
-When it is set, every `/api/*` route and every proxy route (`POST /v1/messages`, `/v1/responses`, `/v1/chat/completions`, `/v1beta/models/{model}:generateContent`, `/v1/messages/count_tokens`) requires the token. `GET /health` and `GET /v1/models` do not, and this is intentional rather than an oversight: a liveness probe has to answer before a credential is available, and model discovery happens before a client can name a model. Neither returns credentials, and the README documents the inventory they do reveal so an operator can decide whether to restrict them at the network layer.
-
-Provider API keys remain server-side and are never returned in routing metadata.
-
-Real credentials must stay in `.env` and must not be committed.
-
-## Runtime
-
-```text
-Node.js >= 20
-npm start
-```
-
-## Source Architecture
-
-```text
-src/
-├── server.js              HTTP gateway
-├── api.js                 read-only control-panel API (/api/*)
-├── static-files.js        static handler for the built control panel
-├── config.js              environment + target construction
-├── router.js              the plan walker, failure scope and session memory
-├── fallback-chain.js      the persisted Fallback Chain and its mode
-├── fallback-plan.js       the one routing planner (chain / automatic)
-├── health.js              health + ranking + cooldown
-├── health-checks.js       provider-aware health probes
-├── adapters.js            protocol + upstream request adapter
-├── providers/
-│   └── catalog.js         provider catalog
-└── observability/
-    ├── request-log.js     bounded in-memory request log
-    ├── metrics.js         pure aggregation over health + requests
-    ├── config-view.js     safe configuration projection
-    ├── router-preview.js  faithful rendering of the routing decision
-    ├── route-select.js    shared target-selection rule
-    ├── monitor-state.js   health-cycle observation
-    ├── system-info.js     runtime facts
-    └── sanitize.js        credential scrubbing
-
-ui/                        React + Vite control panel (built into ui/dist)
-```
-
-## Control Panel
-
-The gateway is self-describing. `/api/*` exposes the state a browser needs, and
-the panel is served from the same origin — no separate service, no CORS shim.
-
-The API layer is strictly read-only apart from `POST /api/health/refresh`, which
-does nothing the 12-minute timer would not do anyway. It cannot alter routing,
-health, provider configuration or the proxy path.
-
-### Representing the routing decision
-
-The panel must not invent routing logic, so there is exactly one copy of it.
-`selectRouteTargets` (`src/observability/route-select.js`) is called by both
-`proxy()` and `/api/router/preview`, and ranking is delegated to
-`healthRegistry.rank`. The Router page therefore renders the decision the
-gateway will actually make, and cannot drift from it: any divergence is a
-compile-time-visible change to a shared function, not two implementations.
-
-### Request log
-
-`proxy()` records one entry per request — the protocol, the requested model,
-every upstream attempt in order, the final target, latency, tokens and outcome.
-It is bounded (500 entries, oldest evicted) because an unbounded log would
-eventually take the process down.
-
-The stored shape is an allow-list. Request bodies, prompts, response bodies and
-headers are never copied in, so they cannot leak later even if an upstream error
-contained them. Error text is additionally passed through `sanitizeMessage`.
-
-Because the attempt list is recorded by the same closure `withFallback` calls,
-the fallback chain the UI shows is observed rather than reconstructed.
-
-### In-flight requests
-
-`RequestLog.begin()` registers a request when routing starts and `progress()`
-records each attempt as it goes on the wire and finishes; `record()` retires it
-into the completed log. Pending entries live in their own map, so metrics, the
-model catalogue and the Requests page never see an unfinished request. They are
-exposed as `pending` on `GET /api/requests`, and both forms share a `startSeq`,
-which lets Live Logs show one card per call and update it in place, with one
-box per attempt (`CALLING` / `FAILED` / `SUCCESS`) and a `FALLBACK` line between
-a failed box and the next. A request
-that never reports back is dropped after 10 minutes and the set is capped.
-
-### Real-time
-
-Most pages poll, with conditional requests. Live Logs is the exception: it is
-pushed to over server-sent events (`GET /api/requests/stream`). `RequestLog`
-has `subscribe()`, called synchronously on `begin()`, `progress()` and
-`record()`; the endpoint sends a `snapshot` (same payload as `GET
-/api/requests`) and then one `pending` / `entry` event per change, in the same
-tick the change happens. The panel reads it with `fetch` rather than
-`EventSource` because it authenticates with a Bearer header. A dropped stream
-reconnects with backoff and starts over with a fresh snapshot, polling runs
-only while the stream is not open, and a stale snapshot can never move a call
-backwards (`mergeRows`). Open streams are capped and closed on shutdown. For
-polled pages, `/api/*` returns an `ETag` over a
-stable projection of the payload (volatile fields such as `generatedAt` are
-excluded from the hash), so an unchanged poll returns `304` and the client
-returns the previous object by identity — which lets React skip the re-render
-entirely.
-
-Health and system status live in separate React contexts so a health tick
-re-renders only the components that display health.
-
-## Architecture Notes
-
-The core implementation is separated by responsibility:
-
-- `src/server.js` — HTTP gateway, endpoints, authentication, sessions and proxy execution.
-- `src/api.js` — the read-only control-panel API and its safe projections.
-- `src/static-files.js` — static serving for `ui/dist`, with traversal protection.
-- `src/fallback-chain.js` — the persisted Fallback Chain, its mode and the one-time legacy import.
-- `src/fallback-plan.js` — the routing planner: the configured chain, the automatic health-based order, and the remembered target.
-- `src/config.js` — environment parsing and routing-target construction.
-- `src/router.js` — the sequential plan walker, failure classification and session memory.
-- `src/health.js` — target health, scoring, cooldown and health-refresh infrastructure.
-- `src/health-checks.js` — provider-aware health probes (no generation quota, except Cohere — see "Provider-aware probing") and status classification.
-- `src/adapters.js` — client protocol detection and upstream request construction.
-- `src/providers/catalog.js` — provider catalog.
-- `src/observability/` — request log, metrics, safe config view, routing preview and sanitization.
-
-The architecture document describes the runtime design; implementation details remain in the source files.
+the request fails closed (`fallback_chain_unusable`): the Health batch catches
+failures of the operator's order, it does not stand in for an order that cannot
+be honoured.

@@ -16,7 +16,8 @@ export const PHASE_LABEL = {
   auto: "Automatic (health + latency)",
   "manual-selection": "Manual selection",
   "health-fallback": "Health-based fallback",
-  "manual-retry": "Final manual retry"
+  "manual-retry": "Manual retry",
+  "health-retry": "Health retry"
 };
 
 export function phaseLabel(phase) {
