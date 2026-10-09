@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ensureThoughtSignatures } from "./gemini-signature.js";
 
 /**
  * Anthropic Messages bridge.
@@ -245,7 +246,7 @@ export function toGeminiRequest(body) {
     push(msg.role === "assistant" ? "model" : "user", parts);
   }
 
-  const payload = { contents, generationConfig: {} };
+  const payload = { contents: ensureThoughtSignatures(contents), generationConfig: {} };
   // The client's own limit is forwarded as sent; when it sends none, none is added.
   if (body.max_tokens !== undefined && body.max_tokens !== null) payload.generationConfig.maxOutputTokens = body.max_tokens;
   const sys = systemText(body.system);

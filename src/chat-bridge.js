@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
+import { ensureThoughtSignatures } from "./gemini-signature.js";
 
 /**
  * OpenAI chat-completions bridge.
@@ -196,7 +197,7 @@ export function toGeminiFromChat(body) {
     push("user", parts);
   }
 
-  const payload = { contents };
+  const payload = { contents: ensureThoughtSignatures(contents) };
   if (system.length) payload.systemInstruction = { parts: [{ text: system.join("\n\n") }] };
 
   const generationConfig = {};

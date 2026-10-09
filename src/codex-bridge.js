@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
+import { ensureThoughtSignatures } from "./gemini-signature.js";
 
 /**
  * Codex (OpenAI Responses) bridge.
@@ -308,7 +309,7 @@ export function toGeminiFromResponses(body) {
     }
   }
 
-  const payload = { contents };
+  const payload = { contents: ensureThoughtSignatures(contents) };
   const generationConfig = {};
   const maxTokens = positiveInt(body.max_output_tokens);
   if (maxTokens) generationConfig.maxOutputTokens = maxTokens;

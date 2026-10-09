@@ -57,6 +57,7 @@ import {
   chatJsonToGemini,
   streamToGemini
 } from "./gemini-bridge.js";
+import { isSignatureRejection } from "./gemini-signature.js";
 import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
 import { sanitizeMessage, registerConfiguredSecrets } from "./observability/sanitize.js";
@@ -610,6 +611,9 @@ async function proxy(req, res, protocol, pathname) {
             // cooldown (see cooldownOptions in router.js). If every target
             // answers 400 the client gets the 400.
             else if (upstream.status === 400) error.retryable = true;
+            // A signature rejection is about this request's history, not the model:
+            // fall back, but do not put the Gemini models on an 8 minute cooldown.
+            if (upstream.status === 400 && isSignatureRejection(error.message)) error.skipCooldown = true;
             attempt(false, upstream.status, error.message);
             throw error;
           }

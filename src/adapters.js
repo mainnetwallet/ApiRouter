@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ensureThoughtSignatures } from "./gemini-signature.js";
 
 export function providerProtocols(provider) {
   if (provider === "agentrouter") return ["anthropic", "openai-chat", "openai-responses"];
@@ -50,6 +51,9 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
   } else if (protocol === "gemini") {
     // The client picks streaming by calling :streamGenerateContent, so the
     // method name — not a body field — decides which one to ask the provider for.
+    // A history that came from another provider has no signatures; add the
+    // placeholder on a copy so the shared request body stays untouched.
+    if (Array.isArray(payload.contents)) payload.contents = ensureThoughtSignatures(payload.contents);
     const method = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
     // A configured base URL may already carry the API version — `health-checks.js`
     // accepts either form — so it is stripped before the model path is appended.
