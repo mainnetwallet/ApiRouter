@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
+import { geminiOutputTokens, toolCallKey, streamErrorMessage } from "./bridge-utils.js";
 
 /**
  * Codex (OpenAI Responses) bridge.
@@ -474,7 +475,7 @@ export function geminiJsonToResponses(json, model, ctx = {}) {
     createdAt: Math.floor(Date.now() / 1000),
     status: truncated ? "incomplete" : "completed",
     output,
-    usage: usageOf(json?.usageMetadata?.promptTokenCount ?? ctx.inputTokens ?? 0, json?.usageMetadata?.candidatesTokenCount ?? 0),
+    usage: usageOf(json?.usageMetadata?.promptTokenCount ?? ctx.inputTokens ?? 0, geminiOutputTokens(json?.usageMetadata)),
     incomplete: truncated ? "max_output_tokens" : null
   });
 }
@@ -513,6 +514,7 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
   let inputTokens = null;
   let outputTokens = 0;
   let outputChars = 0;
+  const toolKeys = { last: null };
 
   const closeText = function* () {
     if (!text) return;
@@ -585,6 +587,17 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
       let chunk;
       try { chunk = JSON.parse(data); } catch { continue; }
 
+      // An upstream error chunk fails the response; it must not look completed.
+      if (chunk?.error) {
+        yield ev("response.failed", {
+          response: snapshot("failed", {
+            output: output.filter(Boolean),
+            error: { code: "upstream_error", message: streamErrorMessage(chunk.error) }
+          })
+        });
+        return;
+      }
+
       if (upstreamProtocol === "gemini") {
         const candidate = chunk.candidates?.[0];
         for (const part of candidate?.content?.parts || []) {
@@ -601,7 +614,7 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
         }
         if (candidate?.finishReason) finish = candidate.finishReason === "MAX_TOKENS" ? "length" : "stop";
         if (chunk.usageMetadata?.promptTokenCount) inputTokens = chunk.usageMetadata.promptTokenCount;
-        if (chunk.usageMetadata?.candidatesTokenCount) outputTokens = chunk.usageMetadata.candidatesTokenCount;
+        if (chunk.usageMetadata) outputTokens = geminiOutputTokens(chunk.usageMetadata) || outputTokens;
         continue;
       }
 
@@ -614,7 +627,7 @@ export async function* streamToResponses(upstreamProtocol, events, model, ctx = 
       if (typeof delta.content === "string" && delta.content) yield* writeText(delta.content);
 
       for (const call of delta.tool_calls || []) {
-        const key = call.index ?? 0;
+        const key = toolCallKey(call, toolKeys);
         let tool = tools.get(key);
         if (!tool) tool = yield* startTool(key, call.id || newId("call"), call.function?.name || "tool");
         yield* toolArgs(tool, call.function?.arguments);

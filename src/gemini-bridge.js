@@ -67,14 +67,23 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
 
   if (system) messages.push({ role: "system", content: system });
 
+  // Gemini clients usually send no ids on functionCall/functionResponse, so a
+  // response is paired with the unanswered call of the same name from the
+  // latest model turn. Otherwise the tool message would carry the function name
+  // while the call carries a generated id, which OpenAI-compatible providers reject.
+  let pending = [];
+
   for (const content of Array.isArray(body?.contents) ? body.contents : []) {
     const role = content?.role === "model" ? "assistant" : "user";
+    if (role === "assistant") pending = [];
     const text = [];
     const parts = [];
     const toolCalls = [];
     const toolResults = [];
 
     for (const part of Array.isArray(content?.parts) ? content.parts : []) {
+      // Thinking summaries are not conversation text.
+      if (part?.thought === true && typeof part.text === "string") continue;
       if (typeof part?.text === "string") {
         text.push(part.text);
         // A mixed turn must use the content-parts form, in which every entry
@@ -87,6 +96,7 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
       }
       if (part?.functionCall) {
         const callId = part.functionCall.id || id("call");
+        pending.push({ id: callId, name: part.functionCall.name || "tool" });
         toolCalls.push({
           id: callId,
           type: "function",
@@ -97,9 +107,19 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
         });
       }
       if (part?.functionResponse) {
+        const responseName = part.functionResponse.name || "";
+        let callId = part.functionResponse.id;
+        let at = callId
+          ? pending.findIndex((call) => call.id === callId)
+          : pending.findIndex((call) => call.name === responseName);
+        if (!callId && at === -1 && pending.length) at = 0;
+        if (at !== -1) {
+          if (!callId) callId = pending[at].id;
+          pending.splice(at, 1);
+        }
         toolResults.push({
           role: "tool",
-          tool_call_id: part.functionResponse.id || part.functionResponse.name || "tool",
+          tool_call_id: callId || responseName || "tool",
           name: part.functionResponse.name || undefined,
           content: JSON.stringify(part.functionResponse.response ?? {})
         });
@@ -115,13 +135,13 @@ export function toChatFromGemini(body, model, { stream = false } = {}) {
       continue;
     }
 
-    // A functionResponse turn carries no user text. Emitting an empty user
-    // message there would separate the tool result from the assistant turn it
-    // answers, which OpenAI-compatible providers reject outright.
+    // Tool results must directly follow the assistant turn that made the calls,
+    // so they go before any user text that shares the turn. A functionResponse
+    // turn with no text emits no empty user message for the same reason.
+    messages.push(...toolResults);
     if (parts.length > 0) {
       messages.push({ role, content: hasImage ? parts : text.join("") });
     }
-    messages.push(...toolResults);
   }
 
   const tools = [];

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
+import { geminiOutputTokens, toolCallKey, streamErrorMessage } from "./bridge-utils.js";
 
 /**
  * Anthropic Messages bridge.
@@ -62,10 +63,39 @@ function safeParse(text) {
   try { return JSON.parse(text); } catch { return {}; }
 }
 
+/** Resolves a local `#/...` JSON pointer (e.g. `#/$defs/File`) against the schema root. */
+function resolveRef(ref, root) {
+  if (typeof ref !== "string" || !ref.startsWith("#/")) return undefined;
+  let node = root;
+  for (const segment of ref.slice(2).split("/")) {
+    const key = segment.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (!node || typeof node !== "object" || !(key in node)) return undefined;
+    node = node[key];
+  }
+  return node && typeof node === "object" ? node : undefined;
+}
+
 /** Gemini rejects most JSON-Schema extras; keep only what it understands. */
 export function cleanSchemaForGemini(schema) {
-  if (Array.isArray(schema)) return schema.map(cleanSchemaForGemini);
+  return cleanNode(schema, schema, []);
+}
+
+function cleanNode(schema, root, stack) {
+  if (Array.isArray(schema)) return schema.map((item) => cleanNode(item, root, stack));
   if (!schema || typeof schema !== "object") return schema;
+
+  // Gemini has no $ref/$defs: inline the target so the node keeps its real
+  // shape instead of degrading to a bare string. A recursive reference cannot
+  // be expanded, so it stops at a plain object.
+  if (typeof schema.$ref === "string") {
+    const { $ref, ...rest } = schema;
+    if (stack.includes($ref)) {
+      return rest.description ? { type: "object", description: rest.description } : { type: "object" };
+    }
+    const target = resolveRef($ref, root);
+    if (target) return cleanNode({ ...target, ...rest }, root, [...stack, $ref]);
+    schema = rest;
+  }
 
   // Gemini has no anyOf/oneOf/allOf here: collapse to the first non-null
   // variant so the node keeps a usable type instead of becoming `{}`.
@@ -73,7 +103,7 @@ export function cleanSchemaForGemini(schema) {
   if (Array.isArray(variants) && variants.length) {
     const pick = variants.find((v) => v && v.type !== "null") || variants[0];
     const { anyOf, oneOf, allOf, ...rest } = schema;
-    const merged = cleanSchemaForGemini({ ...pick, ...rest });
+    const merged = cleanNode({ ...pick, ...rest }, root, stack);
     if (variants.some((v) => v && v.type === "null")) merged.nullable = true;
     return merged;
   }
@@ -88,12 +118,12 @@ export function cleanSchemaForGemini(schema) {
       if (schema.type.includes("null")) out.nullable = true;
     } else if (key === "properties") {
       out.properties = Object.fromEntries(
-        Object.entries(schema.properties || {}).map(([k, v]) => [k, cleanSchemaForGemini(v)])
+        Object.entries(schema.properties || {}).map(([k, v]) => [k, cleanNode(v, root, stack)])
       );
     } else if (key === "items") {
       // Tuple-style `items: [...]` is not supported; use the first entry.
       const item = Array.isArray(schema.items) ? schema.items[0] : schema.items;
-      out.items = cleanSchemaForGemini(item);
+      out.items = cleanNode(item, root, stack);
     } else {
       out[key] = schema[key];
     }
@@ -331,7 +361,8 @@ export function openAIJsonToAnthropic(json, model) {
     role: "assistant",
     model,
     content,
-    stop_reason: hasTools ? "tool_use" : STOP_REASONS[choice.finish_reason] || "end_turn",
+    // A call cut off by the token limit has incomplete arguments: report the limit, not a tool_use.
+    stop_reason: hasTools && choice.finish_reason !== "length" ? "tool_use" : STOP_REASONS[choice.finish_reason] || "end_turn",
     stop_sequence: null,
     usage: {
       input_tokens: json?.usage?.prompt_tokens ?? 0,
@@ -367,7 +398,7 @@ export function geminiJsonToAnthropic(json, model) {
     stop_sequence: null,
     usage: {
       input_tokens: json?.usageMetadata?.promptTokenCount ?? 0,
-      output_tokens: json?.usageMetadata?.candidatesTokenCount ?? 0
+      output_tokens: geminiOutputTokens(json?.usageMetadata)
     }
   };
 }
@@ -417,6 +448,8 @@ export async function* streamToAnthropic(upstreamProtocol, events, model) {
   let sawTool = false;
   let finish = null;
   let outputTokens = 0;
+  let inputTokens = 0;
+  const toolKeys = { last: null };
   const open = [];
 
   const closeText = function* () {
@@ -441,6 +474,14 @@ export async function* streamToAnthropic(upstreamProtocol, events, model) {
     let chunk;
     try { chunk = JSON.parse(data); } catch { continue; }
 
+    // An upstream error mid-stream must reach the client as an error, not as a
+    // normal (empty or truncated) completion.
+    if (chunk?.error) {
+      yield* closeText();
+      yield sse("error", { type: "error", error: { type: "api_error", message: streamErrorMessage(chunk.error) } });
+      return;
+    }
+
     if (upstreamProtocol === "gemini") {
       const candidate = chunk.candidates?.[0];
       for (const part of candidate?.content?.parts || []) {
@@ -459,19 +500,24 @@ export async function* streamToAnthropic(upstreamProtocol, events, model) {
         }
       }
       if (candidate?.finishReason) finish = candidate.finishReason === "MAX_TOKENS" ? "max_tokens" : "end_turn";
-      if (chunk.usageMetadata?.candidatesTokenCount) outputTokens = chunk.usageMetadata.candidatesTokenCount;
+      if (chunk.usageMetadata) {
+        const out = geminiOutputTokens(chunk.usageMetadata);
+        if (out) outputTokens = out;
+        if (chunk.usageMetadata.promptTokenCount) inputTokens = chunk.usageMetadata.promptTokenCount;
+      }
       continue;
     }
 
     // OpenAI chat chunk
     if (chunk.usage?.completion_tokens) outputTokens = chunk.usage.completion_tokens;
+    if (chunk.usage?.prompt_tokens) inputTokens = chunk.usage.prompt_tokens;
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     const delta = choice.delta || {};
     if (typeof delta.content === "string" && delta.content) yield* writeText(delta.content);
 
     for (const call of delta.tool_calls || []) {
-      const key = call.index ?? 0;
+      const key = toolCallKey(call, toolKeys);
       if (!toolBlocks.has(key)) {
         yield* closeText();
         const index = nextIndex++;
@@ -497,8 +543,14 @@ export async function* streamToAnthropic(upstreamProtocol, events, model) {
   }
   yield sse("message_delta", {
     type: "message_delta",
-    delta: { stop_reason: sawTool ? "tool_use" : finish || "end_turn", stop_sequence: null },
-    usage: { output_tokens: outputTokens }
+    // A tool call cut off by the token limit has incomplete arguments, so an
+    // OpenAI-chat upstream that hit the limit reports it instead of tool_use.
+    // Gemini always returns whole calls, so its tool_use stands.
+    delta: {
+      stop_reason: upstreamProtocol !== "gemini" && finish === "max_tokens" ? "max_tokens" : sawTool ? "tool_use" : finish || "end_turn",
+      stop_sequence: null
+    },
+    usage: inputTokens ? { input_tokens: inputTokens, output_tokens: outputTokens } : { output_tokens: outputTokens }
   });
   yield sse("message_stop", { type: "message_stop" });
 }

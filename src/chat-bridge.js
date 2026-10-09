@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cleanSchemaForGemini, rememberSignature, signatureFor } from "./anthropic-bridge.js";
 import { ensureThoughtSignatures } from "./gemini-signature.js";
+import { geminiOutputTokens, streamErrorMessage } from "./bridge-utils.js";
 
 /**
  * OpenAI chat-completions bridge.
@@ -298,7 +299,7 @@ export function geminiJsonToChat(json, model, ctx = {}) {
   }
 
   const input = json?.usageMetadata?.promptTokenCount ?? ctx.inputTokens ?? 0;
-  const output = json?.usageMetadata?.candidatesTokenCount ?? 0;
+  const output = geminiOutputTokens(json?.usageMetadata);
   const message = { role: "assistant", content: text || (toolCalls.length ? null : "") };
   if (toolCalls.length) message.tool_calls = toolCalls;
 
@@ -355,6 +356,13 @@ export async function* streamToChat(upstreamProtocol, events, model, ctx = {}) {
       let parsed;
       try { parsed = JSON.parse(data); } catch { continue; }
 
+      // Surface an upstream error chunk instead of ending as a normal "stop".
+      if (parsed?.error) {
+        yield "data: " + JSON.stringify({ error: { message: streamErrorMessage(parsed.error), type: "upstream_error" } }) + "\n\n";
+        yield "data: [DONE]\n\n";
+        return;
+      }
+
       const candidate = parsed.candidates?.[0];
       for (const part of candidate?.content?.parts || []) {
         if (part.thought) continue;
@@ -378,7 +386,7 @@ export async function* streamToChat(upstreamProtocol, events, model, ctx = {}) {
       }
       if (candidate?.finishReason) finish = candidate.finishReason === "MAX_TOKENS" ? "length" : "stop";
       if (parsed.usageMetadata?.promptTokenCount) inputTokens = parsed.usageMetadata.promptTokenCount;
-      if (parsed.usageMetadata?.candidatesTokenCount) outputTokens = parsed.usageMetadata.candidatesTokenCount;
+      if (parsed.usageMetadata) outputTokens = geminiOutputTokens(parsed.usageMetadata) || outputTokens;
     }
   } catch (error) {
     yield "data: " + JSON.stringify({
