@@ -31,7 +31,8 @@ export const FALLBACK_POOLS = Object.freeze(["text", "vision"]);
  *   auto          the chain is ordered by measured health and latency each cycle
  *   manual        Manual Model Selection: the chain is the operator's explicit
  *                 pick. It is walked in its saved order, then every model NOT in
- *                 it is tried by health, then the picks get one final pass
+ *                 it is tried by health; that Manual -> Health cycle then
+ *                 repeats, a bounded number of times
  */
 export const FALLBACK_MODES = Object.freeze({
   FIXED: "fixed",
@@ -62,9 +63,30 @@ export const FALLBACK_MODE_INFO = Object.freeze([
   {
     id: FALLBACK_MODES.MANUAL,
     label: "Manual Model Selection",
-    detail: "Three phases. 1) Your selected models, in exactly the order you saved them, every eligible key of a model before the next. 2) If all of those fail, every model you did NOT select, ordered by measured health and latency. 3) One final pass over your selected models in their original order. Cooldowns and key restrictions apply throughout; nothing is retried more than once."
+    detail: "A repeating cycle. 1) Your selected models, in exactly the order you saved them, every eligible key of a model before the next. 2) If all of those fail, every model you did NOT select, ordered by measured health and latency. Then 1) and 2) run again, up to a fixed number of cycles (default 3) and a fixed number of upstream attempts per request (default 100), and the first model that answers ends the request. Cooldowns, credential failures and key restrictions apply throughout: a repeat never overrides a cooldown that existed before the request or a failure that would only repeat."
   }
 ]);
+
+/**
+ * Bounds on a Manual Model Selection request. The plan is a finite list either
+ * way; these are the explicit, configurable limits on how long it may be and on
+ * how many real upstream calls one request may spend.
+ *
+ *   cycles    how many Manual -> Health rounds one request may walk
+ *   attempts  how many real upstream calls one request may make in total
+ */
+export const MANUAL_LIMITS = Object.freeze({
+  cycles: Object.freeze({ default: 3, min: 1, max: 10 }),
+  attempts: Object.freeze({ default: 100, min: 1, max: 1000 })
+});
+
+/** A cycle count as the planner will honour it: an integer inside the allowed range. */
+export function normalizeManualCycles(value) {
+  const { default: fallback, min, max } = MANUAL_LIMITS.cycles;
+  const number = Number(value);
+  if (value === null || value === undefined || !Number.isInteger(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
 
 export function fallbackModeLabel(mode) {
   return FALLBACK_MODE_INFO.find((entry) => entry.id === normalizeMode(mode))?.label ?? DEFAULT_MODE;

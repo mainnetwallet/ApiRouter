@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addEntry, chainSummary, eligibleKeys, entryId, entryState, filterCatalogue, indexCatalogue,
-  keysLabel, latencyOf, moveEntry, phaseLabel, removeEntry, sameChain, setKeys, toEntry, toggleEnabled
+  keysLabel, latencyOf, moveEntry, phaseCycleLabel, phaseLabel, removeEntry, sameChain, setKeys, toEntry, toggleEnabled
 } from "../fallbackChain.js";
 
 const group = (provider, model, extra = {}) => ({
@@ -217,13 +217,27 @@ describe("fallback chain presentation", () => {
     expect(phaseLabel(null)).toBeNull();
   });
 
-  it("labels the three Manual Model Selection phases distinctly", () => {
+  it("labels the Manual Model Selection phases distinctly", () => {
     expect(phaseLabel("manual-selection")).toBe("Manual selection");
     expect(phaseLabel("health-fallback")).toBe("Health-based fallback");
+    expect(new Set(["manual-selection", "health-fallback"].map(phaseLabel)).size).toBe(2);
+    // A row recorded by an older gateway keeps a readable label.
     expect(phaseLabel("manual-retry")).toBe("Final manual retry");
-    const labels = ["manual-selection", "health-fallback", "manual-retry"].map(phaseLabel);
-    expect(new Set(labels).size).toBe(3);
     // The new vocabulary does not resurrect the retired "manual" phase id.
     expect(phaseLabel("manual")).toBeNull();
+  });
+
+  it("names the cycle an attempt belongs to, next to its phase", () => {
+    expect(phaseCycleLabel("manual-selection", 1)).toBe("Cycle 1 · Manual selection");
+    expect(phaseCycleLabel("health-fallback", 1)).toBe("Cycle 1 · Health-based fallback");
+    expect(phaseCycleLabel("manual-selection", 2)).toBe("Cycle 2 · Manual selection");
+    expect(phaseCycleLabel("health-fallback", 3)).toBe("Cycle 3 · Health-based fallback");
+    // No cycle (every other mode, older gateways): the phase alone, exactly as before.
+    expect(phaseCycleLabel("chain", null)).toBe("Fallback chain");
+    expect(phaseCycleLabel("sticky", undefined)).toBe("Remembered");
+    expect(phaseCycleLabel(null, null)).toBeNull();
+    // Never invents a cycle from a bad value.
+    expect(phaseCycleLabel("chain", 0)).toBe("Fallback chain");
+    expect(phaseCycleLabel("chain", "2")).toBe("Fallback chain");
   });
 });

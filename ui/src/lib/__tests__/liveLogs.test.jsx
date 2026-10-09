@@ -587,6 +587,47 @@ describe("copy logs as text", () => {
 });
 
 
+describe("Manual Model Selection cycles on a Live Logs card", () => {
+  const manualRows = () => rowsOf(
+    failed(1, 500, { phase: "manual-selection", cycle: 1 }),
+    failed(2, 500, { phase: "health-fallback", cycle: 1, callIndex: 2 }),
+    failed(3, 500, { phase: "manual-selection", cycle: 2, callIndex: 3 }),
+    attempt(4, { phase: "health-fallback", cycle: 2, callIndex: 4 })
+  );
+
+  it("keeps the cycle on the row, and null when the gateway sent none", () => {
+    const rows = manualRows();
+    expect(rows.map((r) => r.cycle)).toEqual([1, 1, 2, 2]);
+    expect(row(attempt(5, { phase: "chain" })).cycle).toBeNull();
+    expect(row(attempt(6, { cycle: "2" })).cycle).toBeNull();
+  });
+
+  it("shows which cycle and phase each card belongs to", () => {
+    const html = render(manualRows());
+    expect(html).toContain("Cycle 1 · Manual selection");
+    expect(html).toContain("Cycle 1 · Health-based fallback");
+    expect(html).toContain("Cycle 2 · Manual selection");
+    expect(html).toContain("Cycle 2 · Health-based fallback");
+    // In the order the calls happened.
+    expect(html.indexOf("Cycle 1 · Manual selection")).toBeLessThan(html.indexOf("Cycle 1 · Health-based fallback"));
+    expect(html.indexOf("Cycle 1 · Health-based fallback")).toBeLessThan(html.indexOf("Cycle 2 · Manual selection"));
+    expect(html.indexOf("Cycle 2 · Manual selection")).toBeLessThan(html.indexOf("Cycle 2 · Health-based fallback"));
+  });
+
+  it("adds nothing to a card of any other mode", () => {
+    const html = render(rowsOf(attempt(1, { phase: "chain" }), failed(2, 500, { phase: "auto" })));
+    expect(html).not.toContain("Cycle ");
+    expect(html).not.toContain("Manual selection");
+  });
+
+  it("includes the cycle in the copied text", () => {
+    const text = formatRowsAsText(manualRows());
+    expect(text).toContain("Cycle 1 · Manual selection");
+    expect(text).toContain("Cycle 2 · Health-based fallback");
+    expect(formatRowsAsText(rowsOf(attempt(1, { phase: "chain" })))).not.toContain("Cycle");
+  });
+});
+
 describe("token usage on a Live Logs card", () => {
   const usageOf = (row) => [row.inputTokens, row.outputTokens, row.totalTokens];
   const html = (row) => renderToStaticMarkup(<LiveLogRow row={row} now={T0} />);

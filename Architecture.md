@@ -368,37 +368,64 @@ In the `fixed` mode nothing is remembered at all: every request starts at the
 first model of the chain and its first eligible key.
 
 
-### Manual Model Selection (three phases)
+### Manual Model Selection (repeating Manual → Health cycles)
 
 `manual` is a fourth fallback mode. It is the only mode whose plan has more than
-one source, and it is built by `buildManualPlan` in `fallback-plan.js`:
+one source, and it is built by `buildManualPlan` in `fallback-plan.js`. The plan
+is a repeating cycle, `maxCycles` times (default 3, range 1–10, `MANUAL_MAX_CYCLES`):
+
+    cycle 1: manual-selection, health-fallback
+    cycle 2: manual-selection, health-fallback
+    cycle 3: manual-selection, health-fallback      then the plan ends
 
 1. **`manual-selection`** — the saved entries in exactly the saved order. Groups
    are keyed by provider/model, so an interleaved selection (provider P model A,
    provider Q model B, provider P model C) stays interleaved; nothing groups or
    sorts by provider. Every eligible key of a model is tried before the next.
+   Order and key order are identical in every cycle.
 2. **`health-fallback`** — every reachable model that is *not* a saved entry,
    ordered by the existing health/latency ordering. Exclusion is by model, so an
    unselected model of a provider that appears in the selection stays eligible.
    Parked (disabled) entries and entries narrowed to no keys are excluded too,
-   so a restriction can never leak a model's other keys into this phase.
-3. **`manual-retry`** — the same entries and keys as phase 1, in the same order,
-   flagged `retry`. This is one pass; the plan has no fourth phase.
+   so a restriction can never leak a model's other keys into this phase. The
+   order is computed once, when the plan is built, and is the same in every cycle.
 
-The per-request "a target is invoked at most once" rule is unchanged for every
-other step. A `retry` step is the one bounded exception (`withFallback` in
-`router.js`): each target is retried at most once; a cooldown that existed when
-the request reached the target is never overridden; a credential-level or
-non-transient failure (400/401/402/403/404/413/422) is never retried; and the one
-cooldown the pass looks past is the one *this request* set through a transient,
-target-scoped failure (timeout, 429, 5xx, transport error), and only while it is
-still exactly that cooldown. Without that, every target that failed in phase 1
-would already be cooling down from that failure and phase 3 could retry nothing.
+Every step carries its `cycle` (1-based). Steps of cycle 2 and later are flagged
+`retry`. The cycle number travels with each attempt into the request log
+(`attempts[].cycle`), the live attempt events, and the Live Logs / timeline
+labels (`Cycle 2 · Manual selection`). It is `null` in every other mode.
+
+**Bounds.** The plan is finite by construction (`maxCycles` copies of one cycle),
+and `withFallback` in `router.js` adds two explicit limits that the server passes
+only for Manual Model Selection: `maxAttempts` (`MANUAL_MAX_ATTEMPTS`, default
+100, range 1–1000), the total number of real upstream calls in one request, and
+`maxTargetAttempts` (= the cycle count), the most times one target may be called.
+Exhausting either ends the walk with the ordinary `502 All routing targets
+failed` (the error carries `attemptBudgetExhausted` when it was the budget).
+Skips never count against the budget.
+
+**Retry policy for repeats.** The per-request "a target is invoked at most once"
+rule is unchanged for every non-retry step. A `retry` step is the one bounded
+exception:
+
+- a target already cooling down when this request reached it is never retried;
+- a target whose failure in this request was credential-level (401/402/403,
+  key- or provider-scoped), non-transient (400/404/413/422 ...), or that opted
+  out of health tracking (`skipCooldown`) is never retried, and neither is any
+  sibling that failure cooled — even if something clears that cooldown while the
+  request is still running;
+- the one cooldown a repeat looks past is the one *this request* set through a
+  transient, target-scoped failure (timeout, 429, 5xx, transport error), and only
+  while it is still exactly that cooldown. A retry success clears it; a retry
+  failure starts a fresh one. Without this every target that failed in cycle 1
+  would already be cooling down and no later cycle could retry anything;
+- a cycle in which nothing could be invoked ends the walk;
+- skips are reported once per target and reason, not once per cycle.
 
 If the selection itself has nothing walkable for a request, the plan is empty and
-the request fails closed (`fallback_chain_unusable`): phase 2 catches failures of
-the operator's order, it does not stand in for an order that cannot be honoured.
-Manual mode remembers nothing. A pinned request never uses any of this.
+the request fails closed (`fallback_chain_unusable`): the health phase catches
+failures of the operator's order, it does not stand in for an order that cannot be
+honoured. Manual mode remembers nothing. A pinned request never uses any of this.
 
 ## Security
 

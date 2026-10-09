@@ -493,6 +493,7 @@ export function createApi({
         chain: fallbackChain?.get?.(pool) ?? [],
         mode: fallbackMode(),
         retryableStatus: config.retryableStatus,
+        maxCycles: config.manualMaxCycles,
         model: (searchParams.get("model") || "").trim(),
         stickyTargetId: (searchParams.get("session") || "").trim() || null, // observability text only
         now

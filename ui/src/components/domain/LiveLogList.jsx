@@ -2,6 +2,10 @@ import { Fragment } from "react";
 import { STATE, STATE_TONE, hasUsage, isLive, shortRequestId } from "../../lib/liveLogs.js";
 import { sanitizeText } from "../../lib/sanitize.js";
 import { EMPTY, formatLatency, formatNumber, providerLabel } from "../../lib/format.js";
+import { phaseCycleLabel } from "../../lib/fallbackChain.js";
+
+/** `Cycle 2 · Manual selection` for a Manual Model Selection attempt; null for every other row. */
+export const cycleLabel = (row) => (Number.isInteger(row?.cycle) ? phaseCycleLabel(row.phase, row.cycle) : null);
 
 /** 24-hour local clock, `HH:MM:SS`; an explicit placeholder when unknown. */
 export function formatClock(ts) {
@@ -207,6 +211,7 @@ export function LiveLogRow({ row, now = Date.now(), first = true, onSelectReques
 
   // The figures live in the header only: key, then status and time.
   const figures = [
+    cycleLabel(row),
     Number.isInteger(row.keyIndex) ? `key ${row.keyIndex}` : null,
     describeOutcome(row, now)
   ].filter(Boolean).join(" · ");
@@ -262,6 +267,8 @@ export function formatRowsAsText(rows) {
       row.attemptId ? `attempt ${row.attemptId}` : null
     ].filter(Boolean).join("  ");
     const lines = [head];
+    const where = cycleLabel(row);
+    if (where) lines.push(`  ${where}`);
 
     const target = clean(describeTarget(row));
     if (target) lines.push(`  ${target}${figures && row.kind === "attempt" ? `  (${figures})` : ""}`);

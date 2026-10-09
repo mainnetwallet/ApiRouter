@@ -42,7 +42,12 @@ const MAX_PENDING = 200;
  * fallback-plan.js by value; a phase that is not listed here is stored as null,
  * so the two must be changed together.
  */
+// "manual-retry" is no longer produced (a repeat is the same phase in a later cycle),
+// but is still accepted so a row recorded by an older build keeps its label.
 const PHASES = ["sticky", "chain", "auto", "manual-selection", "health-fallback", "manual-retry"];
+
+/** The Manual -> Health cycle (1-based) an attempt belongs to; null outside Manual Model Selection. */
+const cycleOf = (value) => (Number.isInteger(value) && value > 0 ? value : null);
 const pad = (value) => String(value).padStart(6, "0");
 
 /**
@@ -54,9 +59,11 @@ function plainAttempt(attempt, index) {
   return {
     index: index + 1,
     attemptId: typeof attempt?.attemptId === "string" && attempt.attemptId ? attempt.attemptId : null,
-    // "sticky" | "chain" | "auto" | "manual-selection" | "health-fallback" | "manual-retry" | null (older callers); and whether this row was
+    // "sticky" | "chain" | "auto" | "manual-selection" | "health-fallback" | null (older callers), plus the
+    // Manual -> Health `cycle` it belongs to (1, 2, 3 ...; null in every other mode); and whether this row was
     // skipped without a network call (cooldown / already attempted).
     phase: PHASES.includes(attempt?.phase) ? attempt.phase : null,
+    cycle: cycleOf(attempt?.cycle),
     skipped: attempt?.skipped === true,
     skipReason: attempt?.skipped === true && typeof attempt?.skipReason === "string" ? attempt.skipReason : null,
     provider: attempt?.provider ?? null,
@@ -209,6 +216,7 @@ export class RequestLog {
           requestedModel: ctx.requestedModel ?? null,
           protocol: row.protocol ?? ctx.protocol ?? null,
           phase: row.phase,
+          cycle: row.cycle,
           callIndex: calls,
           provider: row.provider,
           model: row.model,
@@ -337,6 +345,7 @@ export class RequestLog {
       requestedModel: pending.requestedModel,
       protocol,
       phase: PHASES.includes(target.phase) ? target.phase : null,
+      cycle: cycleOf(target.cycle),
       callIndex: pending.attemptsStarted,
       provider: target.provider ?? null,
       model: target.model ?? null,

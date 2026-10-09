@@ -142,6 +142,8 @@ export function buildAttemptRow(attempt, ctx = {}) {
     pool: pool === "vision" ? "vision" : "text",
     requestedModel: optText(attempt.requestedModel ?? ctx.requestedModel, 120),
     phase: attempt.phase ?? null,
+    // The Manual -> Health cycle (1, 2, 3 ...) in Manual Model Selection; null in every other mode.
+    cycle: optInt(attempt.cycle),
     provider: attempt.provider ?? null,
     model: attempt.model ?? null,
     keyIndex: optInt(attempt.keyIndex),
@@ -182,6 +184,7 @@ export function buildRequestRow(entry) {
     pool: entry.pool === "vision" ? "vision" : "text",
     requestedModel: optText(entry.requestedModel, 120),
     phase: null,
+    cycle: null,
     provider: entry.finalProvider ?? null,
     model: entry.finalModel ?? null,
     keyIndex: optInt(entry.finalKeyIndex),

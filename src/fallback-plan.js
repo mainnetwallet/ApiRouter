@@ -1,5 +1,7 @@
 import { targetId } from "./health.js";
-import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId } from "./fallback-chain.js";
+import { FALLBACK_MODES, MANUAL_LIMITS, activeEntries, allEntries, allowedKeyIndexes, entryId, normalizeManualCycles } from "./fallback-chain.js";
+
+export { MANUAL_LIMITS, normalizeManualCycles };
 
 /**
  * The one routing planner. Text and vision use this same code; they differ only
@@ -11,12 +13,14 @@ import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId }
  *   AUTO    the same entries (or every configured target when the chain is
  *           empty) ordered by measured health and latency
  *
- * Manual Model Selection (mode `manual`) is the one mode that walks three
- * phases in a single plan:
+ * Manual Model Selection (mode `manual`) is the one mode that walks a repeating
+ * cycle in a single plan:
  *
- *   MANUAL        the operator's selected entries, in exactly the saved order
- *   HEALTH        every reachable model that is NOT one of those entries, by health
- *   MANUAL_RETRY  one final pass over the selected entries, same order
+ *   MANUAL  the operator's selected entries, in exactly the saved order
+ *   HEALTH  every reachable model that is NOT one of those entries, by health
+ *
+ * and then Manual -> Health again, `maxCycles` times in all (a bounded number,
+ * never open-ended). Every step carries the `cycle` (1-based) it belongs to.
  *
  * There is no priority phase and no separate normal-fallback phase any more:
  * the configured chain IS the order, and the automatic order is what takes over
@@ -33,8 +37,7 @@ export const PHASES = Object.freeze({
   CHAIN: "chain",
   AUTO: "auto",
   MANUAL: "manual-selection",
-  HEALTH: "health-fallback",
-  MANUAL_RETRY: "manual-retry"
+  HEALTH: "health-fallback"
 });
 
 export const PLAN_SOURCE = Object.freeze({
@@ -224,51 +227,67 @@ function toSteps(groups, phase, extra = {}) {
 }
 
 /**
- * Manual Model Selection: three phases in one plan.
+ * Manual Model Selection: a repeating Manual -> Health cycle in one plan.
  *
- *   1. MANUAL        the saved entries, in the exact order saved. Interleaved
- *                    providers stay interleaved (gemini A, groq B, gemini C ...):
- *                    nothing here groups or sorts by provider, because groups
- *                    are keyed by provider/model and walked in `configured` order.
- *   2. HEALTH        every reachable target whose provider/model is not one of
- *                    the saved entries, ordered by the existing health + latency
- *                    ordering. "Saved" includes parked (disabled) entries — an
- *                    operator who parked a model did not ask for it as a fallback
- *                    — and entries whose key subset narrowed to nothing, so a
- *                    restriction can never leak a model's other keys into this
- *                    phase. Exclusion is by MODEL, never by provider: an unselected
- *                    model of a provider that appears in the selection stays here.
- *   3. MANUAL_RETRY  the same entries and keys as phase 1, in the same order,
- *                    flagged `retry` so the walker treats them as the one
- *                    bounded second pass rather than as duplicates.
+ *   Cycle 1   MANUAL, then HEALTH
+ *   Cycle 2   MANUAL again, then HEALTH again
+ *   ...       up to `maxCycles` cycles, then the plan ends.
+ *
+ *   MANUAL  the saved entries, in the exact order saved. Interleaved providers
+ *           stay interleaved (gemini A, groq B, gemini C ...): nothing here
+ *           groups or sorts by provider, because groups are keyed by
+ *           provider/model and walked in `configured` order. The order and the
+ *           per-model key order are identical in every cycle.
+ *   HEALTH  every reachable target whose provider/model is not one of the saved
+ *           entries, ordered by the existing health + latency ordering. "Saved"
+ *           includes parked (disabled) entries — an operator who parked a model
+ *           did not ask for it as a fallback — and entries whose key subset
+ *           narrowed to nothing, so a restriction can never leak a model's other
+ *           keys into this phase. Exclusion is by MODEL, never by provider: an
+ *           unselected model of a provider that appears in the selection stays
+ *           here. The order is computed once, when the plan is built, and is the
+ *           same in every cycle: it does not reshuffle while a request is
+ *           failing its way through it.
+ *
+ * Every step of cycle 2 and later is flagged `retry`: it is a repeat visit, and
+ * the walker lets it through only under the bounded retry policy documented on
+ * `withFallback` (it never overrides a cooldown that predates the request, a
+ * credential failure or a non-transient failure).
  *
  * Fail closed: when the selection itself has nothing walkable for this request,
- * the plan is empty. Phase 2 exists to catch FAILURES of the operator's order,
- * not to substitute for an order that cannot be honoured at all.
+ * the plan is empty. The health phase exists to catch FAILURES of the operator's
+ * order, not to substitute for an order that cannot be honoured at all.
  */
-function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now }) {
+function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now, maxCycles }) {
   const selected = new Set(savedEntries.map((entry) => entryId(entry)));
-  const phase1 = toSteps(configured, PHASES.MANUAL);
+  const cycles = normalizeManualCycles(maxCycles);
   const meta = {
     source: PLAN_SOURCE.MANUAL,
     mode: FALLBACK_MODES.MANUAL,
     configured: configured.length,
     entries: savedEntries.length,
+    cycles,
     sticky: null,
     rememberedKey: null
   };
 
-  if (phase1.length === 0) {
+  if (toSteps(configured, PHASES.MANUAL).length === 0) {
     return { steps: [], groups: configured, failClosed: true, ...meta };
   }
 
   const others = [...grouped.values()].filter((group) => !selected.has(group.id));
   const fallbackGroups = automaticGroupsOrder(others, { cacheKey: `${cacheKey}|manual-fallback`, health, now });
-  const phase2 = toSteps(fallbackGroups, PHASES.HEALTH);
-  const phase3 = toSteps(configured, PHASES.MANUAL_RETRY, { retry: true });
+
+  const steps = [];
+  for (let cycle = 1; cycle <= cycles; cycle += 1) {
+    // Cycle 1 is the first visit to every target; every later cycle is a repeat.
+    const extra = { cycle, retry: cycle > 1 };
+    steps.push(...toSteps(configured, PHASES.MANUAL, extra));
+    steps.push(...toSteps(fallbackGroups, PHASES.HEALTH, extra));
+  }
 
   return {
-    steps: [...phase1, ...phase2, ...phase3],
+    steps,
     groups: [...configured, ...fallbackGroups],
     failClosed: false,
     ...meta
@@ -283,6 +302,7 @@ function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, 
  * @param mode            fixed | last-success | auto
  * @param stickyTargetId  remembered target id, already TTL-checked by the caller
  * @param pinned          a pinned request bypasses the chain entirely
+ * @param maxCycles       Manual mode only: how many Manual -> Health cycles to plan
  */
 export function buildRoutePlan({
   targets = [],
@@ -292,7 +312,8 @@ export function buildRoutePlan({
   health = null,
   now = Date.now(),
   pinned = false,
-  cacheKey = "pool"
+  cacheKey = "pool",
+  maxCycles = MANUAL_LIMITS.cycles.default
 } = {}) {
   const all = Array.isArray(targets) ? targets : [];
   const grouped = groupTargets(all);
@@ -311,10 +332,10 @@ export function buildRoutePlan({
   const savedEntries = allEntries(chain);
   const useChain = !pinned && savedEntries.length > 0;
 
-  // Manual Model Selection has its own three-phase plan; every other mode, and
+  // Manual Model Selection has its own repeating-cycle plan; every other mode, and
   // every pinned request, takes the paths below untouched.
   if (useChain && mode === FALLBACK_MODES.MANUAL) {
-    return buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now });
+    return buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now, maxCycles });
   }
 
   let ordered;
