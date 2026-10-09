@@ -812,3 +812,219 @@ test("the preview reports the fail-closed state instead of an automatic order", 
     await second.close(); await groq.close(); await mistral.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Per-pool fail-closed diagnostics on /health
+// ---------------------------------------------------------------------------
+
+const healthPayload = (router) => router.request("/health").then(json);
+
+test("/health distinguishes an unusable chain from ordinary provider unavailability", async () => {
+  const dir = tmpDir("health-status");
+  const groq = await startMockUpstream(() => ok("m1"));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const mistralEnv = { MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1` };
+
+  const first = await startRouter(chainEnv(dir, {
+    ...mistralEnv, GROQ_API_KEYS: "g0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+  }));
+  try {
+    assert.equal((await saveChain(first, "text", [{ provider: "groq", model: "m1" }])).status, 200);
+  } finally {
+    await first.close();
+  }
+
+  const second = await startRouter(chainEnv(dir, mistralEnv));
+  try {
+    const payload = await healthPayload(second);
+    // The chain is saved and cannot be honoured: a configuration fault.
+    assert.equal(payload.fallback.pools.text.failClosed, true);
+    assert.equal(payload.fallback.pools.text.entries, 1);
+    assert.equal(payload.fallback.pools.text.resolved, 0);
+    // And it is reported per pool, not globally.
+    assert.equal(payload.fallback.pools.vision.failClosed, false);
+    assert.equal(payload.fallback.chains.text, 1);
+  } finally {
+    await second.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("/health reports an empty chain as unconfigured, not as a fault", async () => {
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    const payload = await healthPayload(router);
+    for (const pool of ["text", "vision"]) {
+      assert.equal(payload.fallback.pools[pool].failClosed, false, `${pool} is unconfigured, not broken`);
+      assert.equal(payload.fallback.pools[pool].entries, 0);
+    }
+    assert.ok(payload.rankedTargets.length > 0, "an unconfigured router still routes");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("/health keeps failClosed false when a configured chain is merely unavailable", async () => {
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    await saveChain(router, "text", [{ provider: "groq", model: "m1" }]);
+    assert.equal((await chat(router)).status, 200);
+
+    const payload = await healthPayload(router);
+    assert.equal(payload.fallback.pools.text.failClosed, false,
+      "a provider being unavailable is not a configuration fault");
+    assert.equal(payload.fallback.pools.text.entries, 1);
+    assert.equal(payload.fallback.pools.text.resolved, 1);
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Key-index validation
+// ---------------------------------------------------------------------------
+
+test("PUT /api/fallback rejects key indexes the provider does not have", async () => {
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    const put = (body) => router.request("/api/fallback", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+    });
+
+    // groq/m1 is configured with keys 0 and 1 only.
+    const response = await put({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: [0, 5] }] });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.match(body.error.message, /key indexes/);
+    assert.deepEqual(body.error.details.keys, [
+      { provider: "groq", model: "m1", keys: [5], available: [0, 1] }
+    ]);
+    assert.deepEqual((await getFallback(router)).chain.text, [], "a rejected request must save nothing");
+
+    // A value that is not a usable index at all is refused the same way, rather
+    // than being normalized away into "every key".
+    assert.equal((await put({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: ["nonsense"] }] })).status, 400);
+    assert.equal((await put({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: [64] }] })).status, 400);
+
+    // Real indexes are still accepted.
+    assert.equal((await put({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: [1] }] })).status, 200);
+    assert.deepEqual((await getFallback(router)).chain.text, [
+      { provider: "groq", model: "m1", keys: [1], enabled: true }
+    ]);
+
+    // And a request honours the saved subset.
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(posts(groq), ["g1"], "only the allowed key is called");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("a rejected save leaves the previous configuration untouched, mode included", async () => {
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    await saveMode(router, "last-success");
+    await saveChain(router, "text", [{ provider: "mistral", model: "m2" }]);
+    const before = await getFallback(router);
+
+    // One request carrying BOTH a valid mode and an invalid chain: the mode must
+    // not be written on the way to the error.
+    const response = await router.request("/api/fallback", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "fixed", pool: "text", entries: [{ provider: "groq", model: "m1", keys: [9] }] })
+    });
+    assert.equal(response.status, 400);
+
+    const after = await getFallback(router);
+    assert.equal(after.mode, "last-success", "a rejected save must not persist the mode");
+    assert.deepEqual(after.chain, before.chain, "nor the chain");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Pinned requests stay strict
+// ---------------------------------------------------------------------------
+
+/**
+ * A pinned request. The model matters: `pinTargets` narrows by provider, by key
+ * AND by the requested model, so naming a model the provider does not serve is
+ * itself a 404 (that is the custom-model case, which needs its own header).
+ */
+const pinnedChat = (router, provider, model, keyIndex) => router.request("/v1/chat/completions", postJson(
+  { model, messages: [{ role: "user", content: "hello" }] },
+  { "x-multi-ai-pin-provider": provider, ...(keyIndex === undefined ? {} : { "x-multi-ai-pin-key-index": String(keyIndex) }) }
+));
+
+test("a pinned request is unaffected by an unusable chain", async () => {
+  const dir = tmpDir("pinned");
+  const groq = await startMockUpstream(() => ok("m1"));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const mistralEnv = { MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1` };
+
+  const first = await startRouter(chainEnv(dir, {
+    ...mistralEnv, GROQ_API_KEYS: "g0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+  }));
+  try {
+    assert.equal((await saveChain(first, "text", [{ provider: "groq", model: "m1" }])).status, 200);
+  } finally {
+    await first.close();
+  }
+
+  const second = await startRouter(chainEnv(dir, mistralEnv));
+  try {
+    // The chain cannot be honoured at all...
+    assert.equal((await chat(second)).status, 503);
+    // ...but a pin names its target outright, so it still routes there. The
+    // fail-closed chain neither blocks it nor substitutes a model for it.
+    assert.equal((await pinnedChat(second, "mistral", "m2")).status, 200);
+    assert.deepEqual(posts(mistral), ["s0"]);
+    assert.deepEqual(posts(groq), [], "the pinned provider is the only one reached");
+  } finally {
+    await second.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("a pinned request pins one key and ignores the configured key restrictions", async () => {
+  // Both groq keys work, so a pin to key 0 is observable: without it the chain
+  // restricts the request to key 1.
+  const groq = await startMockUpstream(() => ok("m1"));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`
+  });
+  try {
+    // The chain allows only key 1 of groq/m1.
+    await saveChain(router, "text", [{ provider: "groq", model: "m1", keys: [1] }]);
+
+    // An ordinary request obeys the restriction.
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(posts(groq), ["g1"], "the configured subset is respected");
+
+    // A pin to key 0 is a deliberate one-off override and must reach key 0.
+    assert.equal((await pinnedChat(router, "groq", "m1", 0)).status, 200);
+    assert.deepEqual(posts(groq), ["g1", "g0"], "the pinned key is used, not the key the chain allows");
+
+    // And it is strict: no fallback to another model, and no target remembered.
+    assert.deepEqual(posts(mistral), []);
+    assert.deepEqual((await getFallback(router)).remembered.remembered.text, [],
+      "a pinned request must not remember a target");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
+test("a pin naming nothing configured is still a 404, whatever the chain says", async () => {
+  const { router, groq, mistral } = await startTwoProviderRouter();
+  try {
+    await saveChain(router, "text", [{ provider: "mistral", model: "m2" }]);
+    const response = await pinnedChat(router, "openai", "anything");
+    assert.equal(response.status, 404);
+    assert.deepEqual(posts(groq), []);
+    assert.deepEqual(posts(mistral), []);
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});

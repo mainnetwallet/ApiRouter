@@ -376,3 +376,48 @@ export function routeOrderByPool(targets, {
   }
   return out;
 }
+
+/**
+ * Per-pool routing status, for the health surface.
+ *
+ * `ranked` alone cannot say WHY a pool is empty: an unusable Fallback Chain and
+ * a provider that is simply down both leave the ranked list without that pool's
+ * targets. Monitoring needs to tell them apart — one is a configuration fault
+ * that every request for that pool will fail on, the other is ordinary weather.
+ *
+ * Derived from the same `buildRoutePlan` the proxy calls, so this can never
+ * describe a state the router would not actually be in.
+ */
+export function chainStatusByPool(targets, {
+  chains = {},
+  mode = FALLBACK_MODES.FIXED,
+  health = null,
+  now = Date.now()
+} = {}) {
+  const all = Array.isArray(targets) ? targets : [];
+  const out = {};
+  for (const pool of ["text", "vision"]) {
+    const inPool = all.filter((target) => (target.pool ?? "text") === pool);
+    const plan = buildRoutePlan({
+      targets: inPool,
+      chain: chains?.[pool] ?? [],
+      mode,
+      health,
+      now,
+      cacheKey: `status:${pool}`
+    });
+    out[pool] = {
+      // Saved entries that permit nothing: requests for this pool fail rather
+      // than route to a model outside the chain. This is the signal that
+      // separates a configuration fault from a provider being down.
+      failClosed: plan.failClosed,
+      // Saved entries, and how many of them name a target this pool can reach.
+      // Both are about the CHAIN, not about the pool: an unconfigured pool
+      // reports 0/0 while still routing every target automatically.
+      entries: plan.entries,
+      resolved: plan.configured,
+      source: plan.source
+    };
+  }
+  return out;
+}

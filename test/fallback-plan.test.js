@@ -5,6 +5,7 @@ import { FALLBACK_MODES } from "../src/fallback-chain.js";
 import {
   PHASES,
   buildRoutePlan,
+  chainStatusByPool,
   effectiveOrder,
   resetAutomaticOrderCache,
   routeOrderByPool
@@ -780,4 +781,44 @@ test("reordering the chain takes effect immediately in Automatic mode", () => {
   assert.deepEqual(run(entries(["a", "A"], ["b", "B"])), ["auto:a/A#0", "auto:b/B#0"]);
   assert.deepEqual(run(entries(["b", "B"], ["a", "A"])), ["auto:b/B#0", "auto:a/A#0"],
     "a reorder must not wait for the next bucket");
+});
+
+// ---------------------------------------------------------------------------
+// Per-pool status, for the health surface
+// ---------------------------------------------------------------------------
+
+test("chainStatusByPool reports an unusable chain per pool, without touching the other pool", () => {
+  resetAutomaticOrderCache();
+  const text = [t("a", "A"), t("b", "B")];
+  const vision = [t("a", "VA", 0, "vision")];
+
+  const status = chainStatusByPool([...text, ...vision], {
+    chains: { text: entries(["ghost", "Gone"]) }
+  });
+
+  assert.deepEqual(status.text, { failClosed: true, entries: 1, resolved: 0, source: "chain" });
+  // Vision has no chain at all, so it is unconfigured rather than broken — and
+  // `entries`/`resolved` describe the CHAIN, so an unconfigured pool is 0/0 even
+  // though it routes every one of its targets automatically.
+  assert.deepEqual(status.vision, { failClosed: false, entries: 0, resolved: 0, source: "auto" });
+});
+
+test("chainStatusByPool separates an unusable chain from ordinary unavailability", () => {
+  resetAutomaticOrderCache();
+  const all = [t("a", "A")];
+
+  // A chain that is saved and usable is neither fail-closed nor unconfigured.
+  const healthy = chainStatusByPool(all, { chains: { text: entries(["a", "A"]) } });
+  assert.deepEqual(healthy.text, { failClosed: false, entries: 1, resolved: 1, source: "chain" });
+
+  // No chain at all is unconfigured, which is a different state again.
+  const none = chainStatusByPool(all, { chains: {} });
+  assert.deepEqual(none.text, { failClosed: false, entries: 0, resolved: 0, source: "auto" });
+
+  // Every target cooling down is NOT fail-closed: the configuration is fine.
+  const health = new HealthRegistry();
+  health.markFailure(t("a", "A"), 500, { cooldownMs: 60_000 });
+  const cooling = chainStatusByPool(all, { chains: { text: entries(["a", "A"]) }, health });
+  assert.equal(cooling.text.failClosed, false, "provider trouble must not read as a configuration fault");
+  assert.equal(cooling.text.resolved, 1, "the entry still resolves; it is the provider that is unavailable");
 });

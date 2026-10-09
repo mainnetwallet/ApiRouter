@@ -25,7 +25,7 @@ import { createApi } from "./api.js";
 import { createSseUsageTap, createJsonUsageTap, tapBytes, tapEvents, usageFrom } from "./usage.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
-import { buildRoutePlan, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
+import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
 import {
   FallbackChainStore,
   hasLegacyConfig,
@@ -1031,7 +1031,16 @@ async function handleRequest(req, res) {
         chains: {
           text: fallbackChain.get("text").length,
           vision: fallbackChain.get("vision").length
-        }
+        },
+        // Per pool: `rankedTargets` going quiet for a pool is ambiguous on its
+        // own, because an unusable chain and an unavailable provider look the
+        // same there. This says which it is. `failClosed` means every request
+        // for that pool will fail until the chain is fixed or cleared.
+        pools: chainStatusByPool(targets, {
+          chains: fallbackChain.snapshot(),
+          mode: fallbackChain.mode,
+          health: healthRegistry
+        })
       },
       retryableStatus: [...config.retryableStatus]
     });

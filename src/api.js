@@ -578,55 +578,105 @@ export function createApi({
         try { body = await readJsonBody(req, config.maxBodyBytes); }
         catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
 
+        /*
+         * Everything is validated BEFORE anything is written. A rejected save
+         * must leave the configuration exactly as it was — including the case
+         * where one request carries both a mode and a pool and only the second
+         * is invalid, which used to persist the mode on the way to the error.
+         */
+        const hasMode = body?.mode !== undefined;
+        const hasPool = body?.pool !== undefined;
+        if (!hasMode && !hasPool) return fail(req, res, 400, "a pool or a mode is required", "invalid_request");
+
         // The mode is its own setting and can be saved on its own, so the panel
         // does not have to post a whole chain just to flip a switch.
-        if (body?.mode !== undefined) {
-          const mode = normalizeMode(body.mode);
-          if (body.mode !== null && String(body.mode).trim() !== "" && mode !== String(body.mode).trim().toLowerCase()) {
+        let mode = null;
+        if (hasMode) {
+          mode = normalizeMode(body.mode);
+          const requested = body.mode === null ? "" : String(body.mode).trim().toLowerCase();
+          if (requested !== "" && mode !== requested) {
             return fail(req, res, 400, `unknown mode "${body.mode}"`, "invalid_request", { modes: FALLBACK_MODES });
           }
-          try { fallbackChain.setMode(mode); }
-          catch { return fail(req, res, 500, "Could not save the fallback mode", "server_error"); }
-          // The saved mode is live from this moment. Invalidated only after the
-          // write succeeded: a rejected save must leave the running order alone.
-          resetAutomaticOrderCache();
-          if (body?.pool === undefined) return sendJson(req, res, 200, fallbackPayload(now));
         }
 
-        if (body?.pool !== undefined) {
-          const pool = String(body.pool ?? "").trim().toLowerCase();
+        let pool = null;
+        let entries = null;
+        if (hasPool) {
+          pool = String(body.pool ?? "").trim().toLowerCase();
           if (!FALLBACK_POOLS.includes(pool)) {
             return fail(req, res, 400, `unknown pool "${pool}"`, "invalid_request", { pools: FALLBACK_POOLS });
           }
           if (!Array.isArray(body?.entries)) return fail(req, res, 400, "entries must be an array", "invalid_request");
 
-          const entries = normalizeEntries(body.entries);
-          // Reject only what cannot be routed at all: an entry naming a model
-          // that is not configured in this pool. This is what stops the UI from
-          // saving a vision model into the text chain.
-          const known = new Set(
-            targets.filter((target) => (target.pool ?? "text") === pool).map((target) => `${target.provider}/${target.model}`)
-          );
-          const unknown = entries.filter((entry) => !known.has(`${entry.provider}/${entry.model}`));
+          // What this pool can actually be routed to: the models it serves, and
+          // the key indexes each of those providers actually has configured.
+          const keyIndexes = new Map();
+          for (const target of targets) {
+            if ((target.pool ?? "text") !== pool) continue;
+            const id = `${target.provider}/${target.model}`;
+            if (!keyIndexes.has(id)) keyIndexes.set(id, new Set());
+            keyIndexes.get(id).add(target.keyIndex);
+          }
+
+          // Checked against what was SENT, not the normalized form: a key index
+          // that normalization would quietly discard (a nonsense value, or one
+          // past its sanity bound) must be refused rather than read as "every
+          // key", which would widen a restriction the operator tried to state.
+          const unknown = [];
+          const badKeys = [];
+          for (const raw of body.entries) {
+            const provider = String(raw?.provider ?? "").trim().toLowerCase();
+            const model = String(raw?.model ?? "").trim();
+            // Malformed entries carry no routing intent; normalization drops them.
+            if (!provider || !model) continue;
+            const id = `${provider}/${model}`;
+            const available = keyIndexes.get(id);
+            if (!available) {
+              unknown.push(id);
+              continue;
+            }
+            if (!Array.isArray(raw?.keys)) continue;
+            const offending = [...new Set(raw.keys.filter((value) => {
+              const index = Number(value);
+              return !Number.isInteger(index) || index < 0 || !available.has(index);
+            }))];
+            if (offending.length > 0) {
+              badKeys.push({ provider, model, keys: offending, available: [...available].sort((a, b) => a - b) });
+            }
+          }
+
           if (unknown.length > 0) {
             return fail(
               req, res, 400,
               "entries contains models that are not configured for this pool",
               "invalid_request",
-              { pool, unknown: unknown.map((entry) => `${entry.provider}/${entry.model}`) }
+              { pool, unknown }
+            );
+          }
+          if (badKeys.length > 0) {
+            return fail(
+              req, res, 400,
+              "entries contains key indexes that are not configured for this pool",
+              "invalid_request",
+              { pool, keys: badKeys }
             );
           }
 
-          try { fallbackChain.set(pool, entries); }
-          catch { return fail(req, res, 500, "Could not save the fallback chain", "server_error"); }
-          // Drop the cached automatic order so the chain just saved is the one
-          // the very next request is planned against. Called AFTER the write, so
-          // a failed save cannot disturb the order already in force.
-          resetAutomaticOrderCache();
-          return sendJson(req, res, 200, fallbackPayload(now));
+          entries = normalizeEntries(body.entries);
         }
 
-        return fail(req, res, 400, "a pool or a mode is required", "invalid_request");
+        // Nothing above failed, so this is the only place anything is written.
+        try {
+          if (hasMode) fallbackChain.setMode(mode);
+          if (hasPool) fallbackChain.set(pool, entries);
+        } catch {
+          return fail(req, res, 500, "Could not save the fallback configuration", "server_error");
+        }
+        // The saved configuration is live from this moment. Invalidated only
+        // after the writes succeeded, so a rejected save cannot disturb the
+        // order already in force.
+        resetAutomaticOrderCache();
+        return sendJson(req, res, 200, fallbackPayload(now));
       }
     }
 
