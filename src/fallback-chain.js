@@ -82,19 +82,33 @@ export function normalizeMode(value) {
 }
 
 /**
- * `keys` accepts `null`/absent (every configured key) or an array of key
- * indexes. Anything else is treated as "every key": a malformed key list must
- * not silently narrow a model to a subset the operator never chose.
+ * Normalizes an entry's `keys` to one of exactly three states:
  *
- * This is the defensive reader for a file on disk, so it stays forgiving. It
- * will not, however, INVENT an index from a value that is not one: `true` and
- * `"1"` both coerce to 1 under `Number()`, and reading a boolean as "key 1"
- * would be a restriction nobody wrote. Callers that take input from a person
- * should reject such values outright instead of relying on this — see the
- * key-restriction validation in `api.js`.
+ *   null        no restriction was expressed — every configured key is allowed.
+ *               This is the case for an absent field and for an explicit null,
+ *               which are the documented ways to say "every key".
+ *   [n, ...]    a restriction, to the key indexes it names.
+ *   []          a restriction that could not be read (a non-array, or an array
+ *               naming no usable index). It is preserved as an EMPTY
+ *               restriction, never collapsed into `null`.
+ *
+ * The third state is the whole point. `null` means every key, so mapping an
+ * unreadable restriction onto it can only ever BROADEN routing: a persisted or
+ * hand-edited `keys: [true]`, `keys: ["1"]`, `keys: []` or `keys: "1"` would
+ * quietly route to keys the file never granted. An empty restriction instead
+ * resolves to zero eligible keys, so the entry is walked as unusable and the
+ * pool fails closed — which is the safe reading of a configuration nobody can
+ * interpret.
+ *
+ * This reader stays forgiving in the sense that matters at startup: it never
+ * throws, so a malformed file cannot stop the gateway. It is simply not
+ * generous with permissions.
  */
 function normalizeKeys(value) {
-  if (!Array.isArray(value)) return null;
+  if (value === undefined || value === null) return null;
+  // Meant as a restriction, but not one that can be read: allow nothing.
+  if (!Array.isArray(value)) return [];
+
   const keys = [];
   const seen = new Set();
   for (const raw of value) {
@@ -104,8 +118,8 @@ function normalizeKeys(value) {
     keys.push(raw);
   }
   keys.sort((a, b) => a - b);
-  // An empty array is indistinguishable from "no restriction was intended".
-  return keys.length > 0 ? keys : null;
+  // `[]` when nothing usable was named — an unusable restriction, not a free pass.
+  return keys;
 }
 
 export function normalizeEntry(value) {
@@ -154,7 +168,10 @@ export function entryId(entry) {
 
 /**
  * Key indexes an entry permits for a group of targets, still in key order.
- * `keys: null` means every key the provider/model actually has configured.
+ *
+ *   keys: null      every key the provider/model actually has configured
+ *   keys: [0, 2]    only those two, where the provider has them
+ *   keys: []        none at all — an unreadable restriction permits nothing
  */
 export function allowedKeyIndexes(entry, keyIndexes) {
   const available = [...new Set(keyIndexes)].filter((index) => Number.isInteger(index)).sort((a, b) => a - b);
@@ -234,7 +251,14 @@ export class FallbackChainStore {
   }
 
   get(pool) {
-    return (this.byPool[pool] ?? []).map((entry) => ({ ...entry, keys: entry.keys ? [...entry.keys] : null }));
+    // Copy the array so a caller cannot mutate stored state. `keys` is either an
+    // array — including the empty, unusable restriction — or the unrestricted
+    // `null`, and those two must stay distinguishable, so the test is on the
+    // type rather than on truthiness.
+    return (this.byPool[pool] ?? []).map((entry) => ({
+      ...entry,
+      keys: Array.isArray(entry.keys) ? [...entry.keys] : null
+    }));
   }
 
   snapshot() {

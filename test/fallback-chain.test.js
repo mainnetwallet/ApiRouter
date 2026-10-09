@@ -45,15 +45,35 @@ test("entries are unique by provider and model, in the order given", () => {
   assert.deepEqual(entries.map(entryId), ["b/B", "a/A", "c/C"]);
 });
 
-test("a missing or malformed key list means every key, never a narrower set", () => {
-  // Narrowing a model to a subset the operator never chose would silently drop
-  // working credentials, so anything unusable is read as "all keys".
-  assert.equal(normalizeEntry({ provider: "a", model: "A" }).keys, null);
-  assert.equal(normalizeEntry({ provider: "a", model: "A", keys: null }).keys, null);
-  assert.equal(normalizeEntry({ provider: "a", model: "A", keys: [] }).keys, null);
-  assert.equal(normalizeEntry({ provider: "a", model: "A", keys: "1,2" }).keys, null);
+test("omitted keys mean every key; a key list that cannot be read means none", () => {
+  // The two are deliberately different states, and the difference is what stops
+  // a malformed key restriction from silently widening to every key.
+  assert.equal(normalizeEntry({ provider: "a", model: "A" }).keys, null, "omitted means unrestricted");
+  assert.equal(normalizeEntry({ provider: "a", model: "A", keys: null }).keys, null, "null means unrestricted");
+
+  // Everything else was MEANT as a restriction, so one that cannot be read
+  // permits nothing rather than everything.
+  const unreadable = [[], "1,2", {}, 1, true, [true], ["1"], [1.5], [null], [""], [-1], [64]];
+  for (const keys of unreadable) {
+    assert.deepEqual(
+      normalizeEntry({ provider: "a", model: "A", keys }).keys,
+      [],
+      `keys ${JSON.stringify(keys)} must be an unusable restriction, never a free pass`
+    );
+  }
+
+  // A partly readable list keeps exactly what it could read.
   assert.deepEqual(normalizeEntry({ provider: "a", model: "A", keys: [0, "x", -1, 3.5] }).keys, [0]);
   assert.deepEqual(normalizeEntry({ provider: "a", model: "A", keys: [2, 0, 2] }).keys, [0, 2]);
+});
+
+test("an unreadable key restriction permits no key, while the unrestricted form permits every one", () => {
+  for (const keys of [[true], ["1"], [], "1"]) {
+    const entry = normalizeEntry({ provider: "a", model: "A", keys });
+    assert.deepEqual(allowedKeyIndexes(entry, [0, 1, 2]), [], `keys ${JSON.stringify(keys)} must permit nothing`);
+  }
+  assert.deepEqual(allowedKeyIndexes(normalizeEntry({ provider: "a", model: "A" }), [0, 1, 2]), [0, 1, 2]);
+  assert.deepEqual(allowedKeyIndexes(normalizeEntry({ provider: "a", model: "A", keys: [1] }), [0, 1, 2]), [1]);
 });
 
 test("enabled defaults to true and survives being switched off", () => {
@@ -323,6 +343,7 @@ test("a key list never invents an index from a value that is not one", () => {
   // be a restriction nobody wrote. The reader refuses to coerce.
   assert.deepEqual(normalizeEntry({ provider: "a", model: "A", keys: [true, "1", 0] }).keys, [0]);
   assert.deepEqual(normalizeEntry({ provider: "a", model: "A", keys: [1, false, "0"] }).keys, [1]);
-  // Values that were never indexes at all still fall back to "every key".
-  assert.equal(normalizeEntry({ provider: "a", model: "A", keys: [true, "1"] }).keys, null);
+  // And when coercion was the only thing that could have produced an index,
+  // there is no restriction left to honour — which permits nothing, not everything.
+  assert.deepEqual(normalizeEntry({ provider: "a", model: "A", keys: [true, "1"] }).keys, []);
 });

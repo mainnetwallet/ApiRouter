@@ -75,8 +75,20 @@ export function setKeys(list, index, keys) {
   return list.map((item, i) => (i === index ? { ...item, keys: next.length > 0 ? next : null } : item));
 }
 
-/** `null` and `[]` both mean "every key", so they must compare equal. */
-const keySet = (value) => (Array.isArray(value) && value.length > 0 ? [...value].sort((a, b) => a - b) : null);
+/**
+ * A comparable form of an entry's key restriction.
+ *
+ * `null` (unrestricted) and `[]` (a restriction that permits no key) are
+ * deliberately NOT collapsed together: the whole point of the empty array is
+ * that it is not a free pass, so a panel that treated them as equal would hide
+ * the difference it exists to show.
+ */
+const keySet = (value) => (Array.isArray(value) ? [...value].sort((a, b) => a - b) : null);
+
+/** An entry whose restriction permits no key, so it can never be routed to. */
+export function isUnusableKeys(keys) {
+  return Array.isArray(keys) && keys.length === 0;
+}
 
 /** True when two chains would be sent identically, so the panel can spot a no-op save. */
 export function sameChain(a, b) {
@@ -132,6 +144,12 @@ export function latencyOf(group) {
 export function entryState(entry, group) {
   if (!group) return { key: "missing", label: "Not configured in this pool", tone: "danger" };
   if (entry.enabled === false) return { key: "disabled", label: "Disabled — keeps its place, not routed to", tone: "muted" };
+  // An unreadable key restriction permits nothing, so the entry is unusable
+  // however healthy the provider is. Saying "Active" here would promise a
+  // routing the gateway will refuse.
+  if (isUnusableKeys(entry.keys)) {
+    return { key: "unusable", label: "No eligible key — this entry cannot be used", tone: "danger" };
+  }
   if (group.available === false) return { key: "cooldown", label: "Cooling down — skipped until it recovers", tone: "warn" };
   return { key: "active", label: "Active", tone: group.status === "healthy" ? "ok" : "neutral" };
 }
@@ -162,7 +180,9 @@ export function chainSummary(entries, catalogue = [], mode) {
     };
   }
 
-  const usable = saved.filter((entry) => entry.enabled !== false && index.has(entryId(entry)));
+  const usable = saved.filter((entry) => (
+    entry.enabled !== false && !isUnusableKeys(entry.keys) && index.has(entryId(entry))
+  ));
   if (usable.length === 0) {
     return {
       source: "fail-closed",

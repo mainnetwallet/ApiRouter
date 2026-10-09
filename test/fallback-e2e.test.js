@@ -1098,3 +1098,117 @@ test("a combined mode + pool save that cannot be persisted applies neither chang
     await router.close(); await groq.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// A persisted key restriction that cannot be read permits NOTHING
+//
+// These files are written by hand, the way a hand-edited or legacy chain file
+// arrives. The gateway must still start on them — and must not gain a single
+// key of routing permission from a value it could not interpret.
+// ---------------------------------------------------------------------------
+
+const MALFORMED_KEY_FORMS = [
+  { label: "keys: [true]", keys: [true] },
+  { label: 'keys: ["1"]', keys: ["1"] },
+  { label: "keys: []", keys: [] },
+  { label: 'keys: "1" (not an array)', keys: "1" },
+  { label: "keys: [null]", keys: [null] },
+  { label: "keys: [-1]", keys: [-1] }
+];
+
+for (const { label, keys } of MALFORMED_KEY_FORMS) {
+  test(`a persisted ${label} cannot route through any key`, async () => {
+    const dir = tmpDir("malformed-keys");
+    const chainFile = path.join(dir, "chain.json");
+    fs.writeFileSync(chainFile, JSON.stringify({
+      version: 2,
+      mode: "fixed",
+      text: [{ provider: "groq", model: "m1", keys, enabled: true }],
+      vision: []
+    }));
+
+    // Both groq keys work, so any widening would be visible as a served request.
+    const groq = await startMockUpstream(() => ok("m1"));
+    const router = await startRouter({
+      GROQ_API_KEYS: "g0,g1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+      FALLBACK_CHAIN_FILE: chainFile,
+      MANUAL_SELECTION_FILE: path.join(dir, "manual.json")
+    });
+    try {
+      // The gateway started, and the entry is loaded as an unusable restriction
+      // rather than as the unrestricted `null`.
+      const state = await getFallback(router);
+      assert.deepEqual(state.chain.text, [{ provider: "groq", model: "m1", keys: [], enabled: true }],
+        `${label} must be preserved as an empty restriction, not widened`);
+
+      // Nothing can serve it, and no key is touched.
+      const response = await chat(router);
+      assert.equal(response.status, 503);
+      assert.equal((await response.json()).error.type, "fallback_chain_unusable");
+      assert.deepEqual(posts(groq), [], `${label} must not route through any key`);
+
+      // And the health surface reports it as a configuration fault, per pool.
+      const payload = await healthPayload(router);
+      assert.equal(payload.fallback.pools.text.failClosed, true);
+      assert.equal(payload.fallback.pools.text.resolved, 1);
+    } finally {
+      await router.close(); await groq.close();
+    }
+  });
+}
+
+test("a persisted key restriction keeps exactly the indexes it could read", async () => {
+  const dir = tmpDir("partial-keys");
+  const chainFile = path.join(dir, "chain.json");
+  // One real index alongside a value that is not one: the usable part survives.
+  fs.writeFileSync(chainFile, JSON.stringify({
+    version: 2,
+    mode: "fixed",
+    text: [{ provider: "groq", model: "m1", keys: [true, 1], enabled: true }],
+    vision: []
+  }));
+
+  const groq = await startMockUpstream(() => ok("m1"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    FALLBACK_CHAIN_FILE: chainFile,
+    MANUAL_SELECTION_FILE: path.join(dir, "manual.json")
+  });
+  try {
+    const state = await getFallback(router);
+    assert.deepEqual(state.chain.text, [{ provider: "groq", model: "m1", keys: [1], enabled: true }]);
+
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(posts(groq), ["g1"], "only the index that could be read is used");
+  } finally {
+    await router.close(); await groq.close();
+  }
+});
+
+test("a persisted null key restriction still means every configured key", async () => {
+  const dir = tmpDir("null-keys");
+  const chainFile = path.join(dir, "chain.json");
+  fs.writeFileSync(chainFile, JSON.stringify({
+    version: 2,
+    mode: "fixed",
+    text: [{ provider: "groq", model: "m1", keys: null, enabled: true }],
+    vision: []
+  }));
+
+  const groq = await startMockUpstream((record) => (bearer(record) === "g0" ? down : ok("m1")));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0,g1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    FALLBACK_CHAIN_FILE: chainFile,
+    MANUAL_SELECTION_FILE: path.join(dir, "manual.json")
+  });
+  try {
+    const state = await getFallback(router);
+    assert.deepEqual(state.chain.text, [{ provider: "groq", model: "m1", keys: null, enabled: true }]);
+
+    // key 0 is down and key 1 answers, which only happens if BOTH are allowed.
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(posts(groq), ["g0", "g1"]);
+  } finally {
+    await router.close(); await groq.close();
+  }
+});
