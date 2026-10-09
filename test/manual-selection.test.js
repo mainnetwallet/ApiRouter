@@ -10,8 +10,6 @@ import {
   routeOrderByPool
 } from "../src/fallback-plan.js";
 import { RouteSession, STICKY_TTL_MS, withFallback } from "../src/router.js";
-import { loadConfig } from "../src/config.js";
-import { MANUAL_LIMITS, normalizeManualCycles } from "../src/fallback-chain.js";
 
 const MIN = 60 * 1000;
 const t = (provider, model, keyIndex = 0, pool = "text") => ({ provider, model, keyIndex, pool, protocols: ["openai-chat"] });
@@ -64,8 +62,7 @@ const plan = (overrides = {}) => {
     ...overrides
   });
 };
-/** The steps of one phase in one cycle (cycle 1 unless stated; `null` means every cycle). */
-const phaseSteps = (p, phase, cycle = 1) => p.steps.filter((step) => step.phase === phase && (cycle === null || step.cycle === cycle));
+const phaseSteps = (p, phase) => p.steps.filter((step) => step.phase === phase);
 const labels = (steps) => steps.map((step) => label(step.target));
 const models = (steps) => [...new Set(steps.map((step) => `${step.target.provider}/${step.target.model}`))];
 
@@ -185,122 +182,24 @@ test("a parked (disabled) entry and a key the operator excluded never reach phas
 // PHASE 3 — one final manual pass
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// The repeating Manual -> Health cycle
-// ---------------------------------------------------------------------------
+test("phase 3 is the same selection in the same order, flagged as the one bounded retry", () => {
+  const p = plan();
+  const last = phaseSteps(p, PHASES.MANUAL_RETRY);
+  assert.deepEqual(labels(last), MANUAL_ORDER);
+  assert.ok(last.every((step) => step.retry === true));
+  assert.ok(p.steps.filter((step) => step.phase !== PHASES.MANUAL_RETRY).every((step) => step.retry !== true));
 
-const PHASE_TWO_ORDER = ["gemini/X#0", "gemini/X#1", "openrouter/Y#0", "cerebras/Z#0"];
-const CYCLE_LEN = MANUAL_ORDER.length + PHASE_TWO_ORDER.length;
-
-/** The plan as `cycle:phase` runs, e.g. ["1:manual-selection", "1:health-fallback", "2:manual-selection", ...]. */
-const runs = (p) => p.steps
-  .map((step) => `${step.cycle}:${step.phase}`)
-  .filter((run, index, all) => run !== all[index - 1]);
-
-test("the plan repeats Manual -> Health for the configured number of cycles, and then ends", () => {
-  const p = plan({ maxCycles: 3 });
-  assert.deepEqual(runs(p), [
-    "1:manual-selection", "1:health-fallback",
-    "2:manual-selection", "2:health-fallback",
-    "3:manual-selection", "3:health-fallback"
-  ]);
-  assert.equal(p.cycles, 3);
-  assert.equal(p.steps.length, CYCLE_LEN * 3, "a finite plan: no cycle beyond the last one");
-  assert.deepEqual(runs(plan({ maxCycles: 1 })), ["1:manual-selection", "1:health-fallback"]);
-  assert.equal(plan({ maxCycles: 2 }).steps.length, CYCLE_LEN * 2);
-  assert.equal(plan().cycles, MANUAL_LIMITS.cycles.default, "the default is used when nothing is passed");
-  assert.equal(MANUAL_LIMITS.cycles.default, 3);
-  // Nothing in the plan is a phase this change retired.
-  assert.ok(!("MANUAL_RETRY" in PHASES));
-  assert.ok(p.steps.every((step) => step.phase !== "manual-retry"));
+  // The plan is exactly phase 1, then phase 2, then phase 3 — and no fourth phase.
+  assert.deepEqual([...new Set(p.steps.map((step) => step.phase))], [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY]);
+  assert.equal(p.steps.length, MANUAL_ORDER.length * 2 + 4);
 });
 
-test("cycle 1 is the first visit; every step of cycle 2 and later is flagged as a bounded repeat", () => {
-  const p = plan({ maxCycles: 3 });
-  assert.ok(p.steps.filter((step) => step.cycle === 1).every((step) => step.retry === false));
-  assert.ok(p.steps.filter((step) => step.cycle >= 2).every((step) => step.retry === true));
-});
-
-test("the Manual phase is the same selection, in the same order, with the same key order, in every cycle", () => {
-  const p = plan({ maxCycles: 4 });
-  for (let cycle = 1; cycle <= 4; cycle += 1) {
-    assert.deepEqual(labels(phaseSteps(p, PHASES.MANUAL, cycle)), MANUAL_ORDER, `cycle ${cycle}`);
-    assert.deepEqual(
-      models(phaseSteps(p, PHASES.MANUAL, cycle)),
-      ["gemini/A", "groq/B", "gemini/C", "mistral/D", "gemini/E"],
-      `cycle ${cycle}: providers stay interleaved`
-    );
-  }
-});
-
-test("the Health phase holds only unselected models, in the same health order, in every cycle", () => {
-  const health = new HealthRegistry();
-  health.markSuccess(t("openrouter", "Y", 0), { latencyMs: 40 });
-  health.markSuccess(t("cerebras", "Z", 0), { latencyMs: 90 });
-  const p = plan({ health, maxCycles: 3 });
-  const first = labels(phaseSteps(p, PHASES.HEALTH, 1));
-  assert.deepEqual(models(phaseSteps(p, PHASES.HEALTH, 1)), ["openrouter/Y", "cerebras/Z", "gemini/X"]);
-  for (let cycle = 1; cycle <= 3; cycle += 1) {
-    const health_ = phaseSteps(p, PHASES.HEALTH, cycle);
-    assert.deepEqual(labels(health_), first, `cycle ${cycle}: same order as cycle 1`);
-    for (const selected of ["gemini/A", "groq/B", "gemini/C", "mistral/D", "gemini/E"]) {
-      assert.ok(!models(health_).includes(selected), `cycle ${cycle}: ${selected} was manually selected`);
-    }
-    assert.ok(models(health_).includes("gemini/X"), `cycle ${cycle}: an unselected model of a selected provider stays`);
-  }
-});
-
-test("restrictions hold in every cycle: an excluded key and a parked model never appear anywhere", () => {
-  const chain = [
-    entry("gemini", "A", { keys: [1] }),
-    entry("groq", "B"),
-    entry("gemini", "C", { keys: [9] }),
-    entry("mistral", "D"),
-    entry("gemini", "E", { enabled: false })
-  ];
-  const p = plan({ chain, maxCycles: 3 });
-  const all = labels(p.steps);
-  for (const forbidden of ["gemini/A#0", "gemini/C#0", "gemini/C#1", "gemini/E#0", "gemini/E#1"]) {
-    assert.ok(!all.includes(forbidden), `${forbidden} leaked into the plan`);
-  }
-  for (let cycle = 1; cycle <= 3; cycle += 1) {
-    assert.deepEqual(labels(phaseSteps(p, PHASES.MANUAL, cycle)), ["gemini/A#1", "groq/B#0", "mistral/D#0"]);
-  }
-});
-
-test("the cycle count is clamped to its allowed range, and an unusable value falls back to the default", () => {
-  const { min, max, default: fallback } = MANUAL_LIMITS.cycles;
-  assert.equal(normalizeManualCycles(0), min);
-  assert.equal(normalizeManualCycles(-4), min);
-  assert.equal(normalizeManualCycles(max + 90), max);
-  assert.equal(normalizeManualCycles(2), 2);
-  for (const bad of [undefined, null, "x", NaN, 2.5]) assert.equal(normalizeManualCycles(bad), fallback, String(bad));
-  // An unbounded request cannot build an unbounded plan.
-  assert.equal(plan({ maxCycles: 1_000_000 }).steps.length, CYCLE_LEN * max);
-});
-
-test("the plan never lists a target twice within one phase of one cycle", () => {
+test("the plan never lists a target twice within one phase", () => {
   const dup = [...targets, t("gemini", "A", 0), t("gemini", "X", 1)];
   const p = plan({ targets: dup });
-  for (const phase of [PHASES.MANUAL, PHASES.HEALTH]) {
-    for (const cycle of [1, 2, 3]) {
-      const ids = labels(phaseSteps(p, phase, cycle));
-      assert.equal(new Set(ids).size, ids.length, `${phase} cycle ${cycle} has a duplicate`);
-    }
-  }
-});
-
-test("the two limits are real settings: documented defaults, and an out-of-range value stops startup", () => {
-  const config = loadConfig({});
-  assert.equal(config.manualMaxCycles, 3);
-  assert.equal(config.manualMaxAttempts, 100);
-  assert.equal(loadConfig({ MANUAL_MAX_CYCLES: "5", MANUAL_MAX_ATTEMPTS: "40" }).manualMaxCycles, 5);
-  assert.equal(loadConfig({ MANUAL_MAX_CYCLES: "5", MANUAL_MAX_ATTEMPTS: "40" }).manualMaxAttempts, 40);
-  for (const [name, value] of [
-    ["MANUAL_MAX_CYCLES", "0"], ["MANUAL_MAX_CYCLES", "11"], ["MANUAL_MAX_CYCLES", "many"], ["MANUAL_MAX_CYCLES", "2.5"],
-    ["MANUAL_MAX_ATTEMPTS", "0"], ["MANUAL_MAX_ATTEMPTS", "1001"], ["MANUAL_MAX_ATTEMPTS", "-1"]
-  ]) {
-    assert.throws(() => loadConfig({ [name]: value }), new RegExp(`Invalid ${name}`), `${name}=${value}`);
+  for (const phase of [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY]) {
+    const ids = labels(phaseSteps(p, phase));
+    assert.equal(new Set(ids).size, ids.length, `${phase} has a duplicate`);
   }
 });
 
@@ -311,7 +210,7 @@ test("the two limits are real settings: documented defaults, and an out-of-range
 test("with no selection saved, manual mode is the plain automatic order and has no phases", () => {
   const p = plan({ chain: [] });
   assert.equal(p.source, "auto");
-  assert.ok(p.steps.every((step) => step.phase === PHASES.AUTO && step.retry !== true && step.cycle === undefined));
+  assert.ok(p.steps.every((step) => step.phase === PHASES.AUTO && step.retry !== true));
 });
 
 test("manual mode fails closed when nothing selected can serve the request", () => {
@@ -320,11 +219,11 @@ test("manual mode fails closed when nothing selected can serve the request", () 
   assert.deepEqual(p.steps, [], "phase 2 must not substitute for a selection that cannot be honoured");
 });
 
-test("a pinned request ignores the selection: strict, no phases, no cycles, no retry", () => {
+test("a pinned request ignores the selection: strict, no phases, no retry", () => {
   const pin = [t("mistral", "D", 0)];
   const p = plan({ targets: pin, pinned: true });
   assert.deepEqual(labels(p.steps), ["mistral/D#0"]);
-  assert.ok(p.steps.every((step) => step.phase === PHASES.CHAIN && step.retry !== true && step.cycle === undefined));
+  assert.ok(p.steps.every((step) => step.phase === PHASES.CHAIN && step.retry !== true));
 });
 
 test("manual mode never lets a remembered target lead", () => {
@@ -334,12 +233,12 @@ test("manual mode never lets a remembered target lead", () => {
   assert.ok(p.steps.every((step) => step.phase !== PHASES.STICKY));
 });
 
-test("the other modes keep their plans: one pass, no health phase, no cycles", () => {
+test("the other modes keep their plans: no health phase, no final pass", () => {
   for (const mode of [FALLBACK_MODES.FIXED, FALLBACK_MODES.LAST_SUCCESS, FALLBACK_MODES.AUTO]) {
     const p = plan({ mode });
-    assert.ok(p.steps.every((step) => step.retry !== true && step.cycle === undefined), `${mode}: no retry steps, no cycles`);
+    assert.ok(p.steps.every((step) => step.retry !== true), `${mode}: no retry steps`);
     assert.ok(
-      p.steps.every((step) => ![PHASES.MANUAL, PHASES.HEALTH].includes(step.phase)),
+      p.steps.every((step) => ![PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY].includes(step.phase)),
       `${mode}: no manual phases`
     );
     assert.deepEqual(new Set(models(p.steps)), new Set(["gemini/A", "groq/B", "gemini/C", "mistral/D", "gemini/E"]),
@@ -370,121 +269,92 @@ test("text and vision pools stay separate under manual selection", () => {
 // The walker over the three phases
 // ---------------------------------------------------------------------------
 
-/**
- * Walks a manual plan, recording every call; `behavior(id, count, target)` decides each outcome.
- * `limits` are the walker's own bounds (`maxAttempts`, `maxTargetAttempts`), exactly as the server passes them.
- */
-async function walkManual(behavior, { health = new HealthRegistry(), chain = selection, onSkip = null, maxCycles, limits } = {}) {
-  const p = plan({ health, chain, ...(maxCycles === undefined ? {} : { maxCycles }) });
+/** Walks a manual plan, recording every call; `behavior(id, count)` decides each outcome. */
+async function walkManual(behavior, { health = new HealthRegistry(), chain = selection, onSkip = null } = {}) {
+  const p = plan({ health, chain });
   const calls = [];
   const counts = new Map();
   const phases = [];
-  const cycles = [];
   let result;
   let error = null;
   try {
     result = await withFallback(
       targets,
-      async (target, { phase, cycle }) => {
+      async (target, { phase }) => {
         const id = label(target);
         const n = (counts.get(id) ?? 0) + 1;
         counts.set(id, n);
         calls.push(id);
         phases.push(phase);
-        cycles.push(cycle);
         return behavior(id, n, target);
       },
       new Set([400, 401, 402, 403, 404, 408, 413, 429, 500, 502, 503]),
       new RouteSession(),
       health,
-      { plan: p.steps, onSkip, remember: false, ...(limits ?? {}) }
+      { plan: p.steps, onSkip, remember: false }
     );
   } catch (caught) {
     error = caught;
   }
-  return { calls, counts, phases, cycles, result, error, health, plan: p };
+  return { calls, counts, phases, result, error, health };
 }
 
-const PHASE_TWO = PHASE_TWO_ORDER;
-const everyCycle = (n) => Array.from({ length: n }, () => [...MANUAL_ORDER, ...PHASE_TWO]).flat();
-const MANUAL_MAX = MANUAL_LIMITS.cycles.default;
+const PHASE_TWO = ["gemini/X#0", "gemini/X#1", "openrouter/Y#0", "cerebras/Z#0"];
 
-test("Manual fails -> Health fails -> Manual runs again, then Health again, up to the cycle limit", async () => {
-  const { calls, error, phases, cycles } = await walkManual(() => { throw fail(500); });
-  assert.deepEqual(calls, everyCycle(MANUAL_MAX), "Manual, Health, Manual, Health, Manual, Health");
+test("all three phases run in order when everything fails with a transient error", async () => {
+  const { calls, error, phases } = await walkManual(() => { throw fail(500); });
+  assert.deepEqual(calls, [...MANUAL_ORDER, ...PHASE_TWO, ...MANUAL_ORDER]);
   assert.equal(error.status, 502);
-  const runsSeen = phases
-    .map((phase, index) => `${cycles[index]}:${phase}`)
-    .filter((run, index, all) => run !== all[index - 1]);
-  assert.deepEqual(runsSeen, [
-    "1:manual-selection", "1:health-fallback",
-    "2:manual-selection", "2:health-fallback",
-    "3:manual-selection", "3:health-fallback"
-  ], "the walker reports which phase AND which cycle every call belonged to");
+  assert.deepEqual(
+    [...new Set(phases)],
+    [PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY],
+    "the walker reports which phase every call belonged to"
+  );
 });
 
-test("the second Manual phase runs only after the first Health phase failed, the second Health only after the second Manual", async () => {
-  const { calls } = await walkManual(() => { throw fail(500); }, { maxCycles: 2 });
-  assert.deepEqual(calls.slice(0, MANUAL_ORDER.length), MANUAL_ORDER);
-  assert.deepEqual(calls.slice(MANUAL_ORDER.length, CYCLE_LEN), PHASE_TWO);
-  assert.deepEqual(calls.slice(CYCLE_LEN, CYCLE_LEN + MANUAL_ORDER.length), MANUAL_ORDER, "Manual again");
-  assert.deepEqual(calls.slice(CYCLE_LEN + MANUAL_ORDER.length), PHASE_TWO, "Health again, after the second Manual failed");
-  assert.equal(calls.length, CYCLE_LEN * 2);
-});
-
-test("every cycle keeps the manual model order and each model's key order", async () => {
-  const { calls, cycles } = await walkManual(() => { throw fail(503); });
-  for (let cycle = 1; cycle <= MANUAL_MAX; cycle += 1) {
-    const inCycle = calls.filter((_, index) => cycles[index] === cycle);
-    assert.deepEqual(inCycle.slice(0, MANUAL_ORDER.length), MANUAL_ORDER, `cycle ${cycle}`);
-    assert.deepEqual(inCycle.slice(MANUAL_ORDER.length), PHASE_TWO, `cycle ${cycle}: health order is not reshuffled`);
-  }
-});
-
-test("each target is called at most once per cycle, so at most `cycles` times in a request", async () => {
+test("the final pass is bounded: each manual target is called at most twice, every other at most once", async () => {
   const { counts } = await walkManual(() => { throw fail(500); });
-  for (const id of [...MANUAL_ORDER, ...PHASE_TWO]) assert.equal(counts.get(id), MANUAL_MAX, `${id}: one call per cycle`);
-  assert.equal([...counts.values()].reduce((a, b) => a + b, 0), CYCLE_LEN * MANUAL_MAX, "no infinite loop, no stray duplicates");
+  for (const id of MANUAL_ORDER) assert.equal(counts.get(id), 2, `${id}: first pass + one retry`);
+  for (const id of PHASE_TWO) assert.equal(counts.get(id), 1, `${id}: tried once`);
+  assert.equal([...counts.values()].reduce((a, b) => a + b, 0), 20, "no infinite loop, no stray duplicates");
 });
 
-test("a success in the first Manual phase stops the walk: nothing after it is ever called", async () => {
+test("a success in phase 1 stops the walk: phase 2 and 3 are never reached", async () => {
   const { calls, result } = await walkManual((id) => (id === "mistral/D#0" ? "ok" : (() => { throw fail(500); })()));
   assert.equal(result, "ok");
   assert.deepEqual(calls, ["gemini/A#0", "gemini/A#1", "groq/B#0", "gemini/C#0", "gemini/C#1", "mistral/D#0"]);
 });
 
-test("a Health success in cycle 1 stops the walk: no second Manual phase starts", async () => {
+test("phase 2 starts only after the whole selection failed, and phase 3 only after phase 2 did", async () => {
   const { calls, result } = await walkManual((id) => (id === "openrouter/Y#0" ? "fallback" : (() => { throw fail(500); })()));
   assert.equal(result, "fallback");
   assert.deepEqual(calls, [...MANUAL_ORDER, "gemini/X#0", "gemini/X#1", "openrouter/Y#0"]);
-  assert.ok(!calls.slice(MANUAL_ORDER.length).some((id) => MANUAL_ORDER.includes(id)), "no manual target after the Health phase began");
+  assert.ok(!calls.slice(MANUAL_ORDER.length).some((id) => MANUAL_ORDER.includes(id)), "no manual target before phase 2 ends");
 });
 
-test("a later Manual phase can still recover a target whose first failure was transient, and stops there", async () => {
+test("the final pass can still recover a target whose first failure was transient", async () => {
   const { calls, result, counts } = await walkManual((id, n) => {
     if (id === "gemini/E#1" && n === 2) return "recovered";
     throw fail(503);
   });
   assert.equal(result, "recovered");
   assert.equal(counts.get("gemini/E#1"), 2);
-  assert.deepEqual(calls.slice(-MANUAL_ORDER.length), MANUAL_ORDER, "the second Manual phase walked the original order up to the success");
-  assert.equal(calls.at(-1), "gemini/E#1", "the success is the last call: nothing further is attempted");
-  assert.equal(calls.length, CYCLE_LEN + MANUAL_ORDER.length);
+  assert.deepEqual(calls.slice(-MANUAL_ORDER.length), MANUAL_ORDER, "phase 3 walked the original order up to the success");
 });
 
-test("targets that fail for a non-transient reason are never repeated in a later cycle", async () => {
+test("targets that fail for a non-transient reason are not retried in the final pass", async () => {
   const { counts } = await walkManual((id) => {
     if (id === "groq/B#0") throw fail(404);   // the model is gone
     if (id === "mistral/D#0") throw fail(429); // transient: worth a second look
     throw fail(500);
   });
   assert.equal(counts.get("groq/B#0"), 1, "a 404 would only fail the same way again");
-  assert.equal(counts.get("mistral/D#0"), MANUAL_MAX, "a 429 is transient and is revisited once per later cycle");
+  assert.equal(counts.get("mistral/D#0"), 2, "a 429 is transient and gets its one retry");
 });
 
 test("a rejected request (400) is never forced through a second time, and still surfaces as a 400", async () => {
   const { calls, error } = await walkManual(() => { throw fail(400); });
-  assert.deepEqual(calls, [...MANUAL_ORDER, ...PHASE_TWO], "no later cycle repeats anything: every 400 is a genuine cooldown");
+  assert.deepEqual(calls, [...MANUAL_ORDER, ...PHASE_TWO], "phase 3 retries nothing: every 400 is a genuine cooldown");
   assert.equal(error.status, 400);
 });
 
@@ -499,7 +369,7 @@ test("a credential failure cools the whole key and is never retried or worked ar
     assert.ok(!calls.includes(id), `${id} shares the rejected credential and must be skipped, not retried`);
   }
   // Key 1 is a different credential and is unaffected.
-  assert.equal(counts.get("gemini/A#1"), MANUAL_MAX, "a different credential is revisited once per later cycle");
+  assert.equal(counts.get("gemini/A#1"), 2);
 });
 
 test("a cooldown that existed before the request is genuine: never attempted, never forced", async () => {
@@ -519,7 +389,7 @@ test("a cooldown someone else refreshed during the request is not looked past ei
     throw fail(500);
   }, { health });
   assert.equal(counts.get("gemini/A#0"), 1, "a genuine, newer cooldown beats the final pass");
-  assert.equal(counts.get("gemini/A#1"), MANUAL_MAX, "its sibling key is untouched and revisited once per later cycle");
+  assert.equal(counts.get("gemini/A#1"), 2, "its sibling key is untouched and retried once");
 });
 
 test("when every target is already cooling, nothing is called and the existing 503 is returned", async () => {
@@ -530,10 +400,10 @@ test("when every target is already cooling, nothing is called and the existing 5
   assert.equal(error.status, 503);
 });
 
-test("a repeated target that fails again gets a fresh cooldown and never exceeds the cycle limit", async () => {
+test("a retried target that fails again gets a fresh cooldown and is not called a third time", async () => {
   const health = new HealthRegistry();
   const { counts } = await walkManual(() => { throw fail(502); }, { health });
-  for (const id of MANUAL_ORDER) assert.ok(counts.get(id) <= MANUAL_MAX);
+  for (const id of MANUAL_ORDER) assert.ok(counts.get(id) <= 2);
   assert.ok(!health.isAvailable(t("gemini", "A", 0)), "the failure is still on record");
 });
 
@@ -561,155 +431,6 @@ test("outside manual mode a duplicate step is still skipped, never retried", asy
   ));
   assert.deepEqual(calls, MANUAL_ORDER, "the existing once-per-request rule is untouched");
   assert.ok(skips.includes("already_attempted"));
-});
-
-// ---------------------------------------------------------------------------
-// Bounds and safety across cycles
-// ---------------------------------------------------------------------------
-
-test("a success in a later cycle ends the request on the spot: no further attempt of any kind", async () => {
-  // Succeeds on the third visit to the last Health model: the very last call of the whole plan.
-  const { calls, result, counts } = await walkManual((id, n) => {
-    if (id === "cerebras/Z#0" && n === 3) return "late";
-    throw fail(500);
-  });
-  assert.equal(result, "late");
-  assert.equal(calls.at(-1), "cerebras/Z#0");
-  assert.equal(calls.length, CYCLE_LEN * MANUAL_MAX);
-
-  // And a success in the middle of cycle 2's Manual phase leaves everything after it untouched.
-  const early = await walkManual((id, n) => {
-    if (id === "mistral/D#0" && n === 2) return "mid";
-    throw fail(500);
-  });
-  assert.equal(early.result, "mid");
-  assert.equal(early.calls.at(-1), "mistral/D#0");
-  assert.equal(early.calls.length, CYCLE_LEN + MANUAL_ORDER.indexOf("mistral/D#0") + 1);
-  assert.equal(early.counts.get("gemini/E#0") ?? 0, 1, "gemini/E#0 was not reached in cycle 2");
-  assert.equal(early.counts.get("cerebras/Z#0"), 1, "the second Health phase never started");
-});
-
-test("a total attempt budget stops the walk at exactly that many upstream calls", async () => {
-  const { calls, error } = await walkManual(() => { throw fail(500); }, { limits: { maxAttempts: 10 } });
-  assert.equal(calls.length, 10);
-  assert.deepEqual(calls, everyCycle(1).slice(0, 10), "the budget ends the walk in plan order, mid-cycle if it must");
-  assert.equal(error.status, 502, "the existing error: All routing targets failed");
-  assert.equal(error.message, "All routing targets failed");
-  assert.equal(error.attemptBudgetExhausted, true);
-  assert.equal(error.failures.length, 10);
-
-  const spanning = await walkManual(() => { throw fail(500); }, { limits: { maxAttempts: CYCLE_LEN + 3 } });
-  assert.equal(spanning.calls.length, CYCLE_LEN + 3, "the budget is for the whole request, across cycles");
-  assert.deepEqual(spanning.calls.slice(CYCLE_LEN), MANUAL_ORDER.slice(0, 3));
-
-  // A budget larger than the plan changes nothing and is not reported as exhausted.
-  const roomy = await walkManual(() => { throw fail(500); }, { limits: { maxAttempts: 10_000 } });
-  assert.equal(roomy.calls.length, CYCLE_LEN * MANUAL_MAX);
-  assert.equal(roomy.error.attemptBudgetExhausted, undefined);
-});
-
-test("a per-target cap bounds how often one target may be called, whatever the plan lists", async () => {
-  const skips = [];
-  const { counts } = await walkManual(() => { throw fail(500); }, {
-    limits: { maxTargetAttempts: 2 },
-    onSkip: (target, info) => skips.push(`${label(target)}:${info.reason}`)
-  });
-  for (const id of [...MANUAL_ORDER, ...PHASE_TWO]) assert.equal(counts.get(id), 2, id);
-  assert.ok(skips.includes("gemini/A#0:retry_limit"), "the refused third visit is explained, not silent");
-});
-
-test("the cycle limit bounds the walk: one cycle means one pass and no repeat", async () => {
-  const one = await walkManual(() => { throw fail(500); }, { maxCycles: 1 });
-  assert.deepEqual(one.calls, everyCycle(1));
-  const five = await walkManual(() => { throw fail(500); }, { maxCycles: 5 });
-  assert.equal(five.calls.length, CYCLE_LEN * 5);
-  assert.deepEqual(five.calls, everyCycle(5));
-});
-
-test("a repeat never looks past a cooldown that existed before the request, in any cycle", async () => {
-  const health = new HealthRegistry();
-  health.markFailure(t("groq", "B", 0), 500);
-  health.markFailure(t("cerebras", "Z", 0), 429);
-  const skips = [];
-  const { calls } = await walkManual(() => { throw fail(500); }, {
-    health,
-    onSkip: (target, info) => skips.push(`${label(target)}:${info.reason}:${info.cycle}`)
-  });
-  assert.ok(!calls.includes("groq/B#0") && !calls.includes("cerebras/Z#0"), "neither is ever attempted, in any of the cycles");
-  assert.deepEqual(skips.filter((entry) => entry.startsWith("groq/B#0")), ["groq/B#0:cooldown:1"], "reported once, not once per cycle");
-  assert.equal(calls.length, (CYCLE_LEN - 2) * MANUAL_MAX, "every other target is still visited once per cycle");
-});
-
-test("a credential failure is never repeated, even if something clears the key's cooldown mid-request", async () => {
-  const health = new HealthRegistry();
-  const { calls, counts } = await walkManual((id) => {
-    if (id === "gemini/A#0") throw fail(401);
-    // End of cycle 1: another request (or a probe) clears the cooldown this request's 401 put on the
-    // rejected key's other models. Cycle 2 must still not send them anything.
-    if (id === "cerebras/Z#0") {
-      for (const sibling of [t("gemini", "C", 0), t("gemini", "E", 0), t("gemini", "X", 0), t("gemini", "A", 0)]) {
-        health.markSuccess(sibling, { source: "probe" });
-      }
-    }
-    throw fail(500);
-  }, { health });
-  assert.equal(counts.get("gemini/A#0"), 1, "the rejected credential is not retried, though its cooldown is gone");
-  for (const sibling of ["gemini/C#0", "gemini/E#0", "gemini/X#0"]) {
-    assert.ok(!calls.includes(sibling), `${sibling} shares the rejected key: never attempted, never repeated`);
-  }
-  assert.equal(counts.get("gemini/A#1"), MANUAL_MAX, "the other key is a different credential and is revisited per cycle");
-});
-
-test("402 and 403 are credential-level too: never repeated in a later cycle", async () => {
-  for (const status of [402, 403]) {
-    const { counts } = await walkManual((id) => {
-      if (id === "groq/B#0") throw fail(status);
-      throw fail(500);
-    });
-    assert.equal(counts.get("groq/B#0"), 1, `${status}`);
-  }
-});
-
-test("a target that refused the request without a cooldown (skipCooldown) is not repeated either", async () => {
-  const { counts, health } = await walkManual((id) => {
-    if (id === "groq/B#0") throw fail(400, { retryable: true, skipCooldown: true });
-    throw fail(500);
-  });
-  assert.equal(counts.get("groq/B#0"), 1, "it was never cooled, so only the retry policy keeps it from being forced again");
-  assert.ok(health.isAvailable(t("groq", "B", 0)), "and it is not marked unhealthy");
-  assert.equal(counts.get("mistral/D#0"), MANUAL_MAX);
-});
-
-test("a cycle in which nothing could be called ends the walk instead of spinning", async () => {
-  const skips = [];
-  const { calls, error } = await walkManual(() => { throw fail(400); }, { onSkip: (_target, info) => skips.push(info.reason) });
-  assert.equal(calls.length, CYCLE_LEN, "cycle 1 called everything; cycles 2 and 3 had nothing eligible");
-  assert.equal(error.status, 400);
-  assert.ok(skips.length <= CYCLE_LEN, "skips are reported once per target, not once per cycle");
-});
-
-test("when nothing at all can be called the existing 503 is returned, with no calls and no budget used", async () => {
-  const health = new HealthRegistry();
-  for (const target of targets) health.markFailure(target, 500);
-  const { calls, error } = await walkManual(() => "never", { health, limits: { maxAttempts: 5 } });
-  assert.equal(calls.length, 0);
-  assert.equal(error.status, 503);
-  assert.equal(error.attemptBudgetExhausted, undefined);
-});
-
-test("without limits the walker is bounded by the finite plan alone, as every other mode relies on", async () => {
-  const p = buildRoutePlan({ targets, chain: selection, mode: FALLBACK_MODES.FIXED, health: new HealthRegistry(), cacheKey: "plain" });
-  const calls = [];
-  await assert.rejects(withFallback(
-    targets,
-    async (target, info) => { calls.push([label(target), info.cycle]); throw fail(500); },
-    new Set([500]),
-    new RouteSession(),
-    new HealthRegistry(),
-    { plan: p.steps, remember: false }
-  ));
-  assert.deepEqual(calls.map(([id]) => id), MANUAL_ORDER, "Fixed Order: one pass, in the saved order");
-  assert.ok(calls.every(([, cycle]) => cycle === null), "no cycle outside Manual Model Selection");
 });
 
 test("effectiveOrder shows each target once, in phase order", () => {

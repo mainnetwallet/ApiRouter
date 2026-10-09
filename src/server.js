@@ -25,7 +25,7 @@ import { createApi } from "./api.js";
 import { createSseUsageTap, createJsonUsageTap, tapBytes, tapEvents, usageFrom } from "./usage.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
-import { PLAN_SOURCE, buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
+import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
 import {
   FallbackChainStore,
   hasLegacyConfig,
@@ -507,8 +507,6 @@ async function proxy(req, res, protocol, pathname) {
     pinned: pinned.pinned,
     health: pinned.pinned ? null : healthRegistry,
     cacheKey: `pool:${pool}`,
-    // Manual Model Selection repeats Manual -> Health this many times at most.
-    maxCycles: config.manualMaxCycles,
     stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
   });
 
@@ -559,7 +557,7 @@ async function proxy(req, res, protocol, pathname) {
   try {
     const result = await withFallback(
       selection.selected,
-      async (target, { phase, cycle } = {}) => {
+      async (target, { phase } = {}) => {
         const upstreamProtocol = bridged
           ? upstreamProtocolFor(target)
           : protocol;
@@ -590,7 +588,6 @@ async function proxy(req, res, protocol, pathname) {
         // provider/model/key was called a moment ago (or by an earlier request).
         const attemptId = startAttemptEvent(liveSeq, {
           phase: phase ?? null,
-          cycle: cycle ?? null,
           provider: target.provider,
           model: target.model,
           keyIndex: target.keyIndex,
@@ -608,7 +605,6 @@ async function proxy(req, res, protocol, pathname) {
           attempts.push({
             attemptId,
             phase: phase ?? null,
-            cycle: cycle ?? null,
             provider: target.provider,
             model: target.model,
             keyIndex: target.keyIndex,
@@ -719,16 +715,9 @@ async function proxy(req, res, protocol, pathname) {
         remember: !pinned.pinned,
         // A skipped target never reaches the network, but it is still shown
         // in the timeline so the walk is explained, not guessed at.
-        // Manual Model Selection only: the explicit bounds on one request. The
-        // plan is already finite (`manualMaxCycles` cycles); these cap the real
-        // upstream calls in total and per target. Every other mode is untouched.
-        ...(routePlan.source === PLAN_SOURCE.MANUAL
-          ? { maxAttempts: config.manualMaxAttempts, maxTargetAttempts: routePlan.cycles }
-          : {}),
-        onSkip: (target, { phase, cycle, reason }) => {
+        onSkip: (target, { phase, reason }) => {
           attempts.push({
             phase,
-            cycle: cycle ?? null,
             provider: target.provider,
             model: target.model,
             keyIndex: target.keyIndex,

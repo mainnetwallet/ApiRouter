@@ -97,8 +97,8 @@ export function classifyFailure(status, error = null) {
 /**
  * A failure that says "not right now" rather than "not this request / not this
  * credential": a timeout, rate limit, server error, or a call that never got an
- * HTTP answer at all. Only these are worth a second look in a later manual
- * cycle. Everything else (400/404/413/422 about the request or model, 401/402/403
+ * HTTP answer at all. Only these are worth a second look in the final manual
+ * pass. Everything else (400/404/413/422 about the request or model, 401/402/403
  * about the credential) would simply fail the same way again.
  */
 function isTransientStatus(status) {
@@ -223,38 +223,27 @@ export class RouteSession {
  * once; a repeat is reported through `onSkip`, never called. Targets cooling
  * down in the shared health registry are skipped the same way.
  *
- * The one exception is a step flagged `retry`: every step of the second and
- * later Manual -> Health cycles of Manual Model Selection (see fallback-plan.js).
- * It is a bounded repeat visit to a target, with these rules:
+ * The one exception is a step flagged `retry` (the final pass of Manual Model
+ * Selection, see fallback-plan.js). It is the single, bounded second look at a
+ * target, with these rules:
  *
- *   - a target is invoked at most `maxTargetAttempts` times in one request (the
- *     plan lists it once per cycle, so this is the number of cycles);
- *   - a target already cooling down when this request reached it is NEVER
- *     retried: that cooldown is a real health verdict, and a repeat does not
- *     override it;
- *   - a target whose failure in this request was credential-level or
- *     non-transient (401/402/403, 400, 404, 413, 422 ..., or an error that opted
- *     out of health tracking), and every sibling that failure cooled, is NEVER
- *     retried — whatever its cooldown says by then;
- *   - the one cooldown a repeat looks past is the one THIS request put on a
+ *   - each target is retried at most once, however often the plan lists it;
+ *   - a target already cooling down when this request reached it, and a target
+ *     cooled by a credential-level or non-transient failure (401/402/403, 400,
+ *     404, 413, 422 ...), is NEVER retried: that cooldown is a real health
+ *     verdict, and the pass does not override it;
+ *   - the one cooldown the pass looks past is the one THIS request put on a
  *     target through a transient, target-scoped failure (timeout, 429, 5xx,
  *     transport error), and only while nobody else has refreshed it since.
- *     Without this every target that failed in an earlier cycle would be sitting
- *     in the cooldown that failure just created, and a later cycle could never
+ *     Without this every target that failed in the first pass would be sitting
+ *     in the cooldown that failure just created, and the final pass could never
  *     retry anything. A retry success clears the cooldown; a retry failure
- *     starts a fresh one, which a still-later cycle may look past again;
- *   - a cycle in which not one target could be invoked ends the walk: the next
- *     cycle would be eligible for exactly the same nothing.
+ *     starts a fresh one.
  *
- * `maxAttempts` is the request's total budget of real upstream invocations. When
- * it is spent the walk stops and the ordinary "All routing targets failed" error
- * is returned (flagged `attemptBudgetExhausted`). Skips never count against it.
- * Both limits are optional: without them only the plan's own finite length
- * bounds the walk, which is what every non-manual mode relies on.
- *
- * Every success is recorded on the session as its remembered target when the
- * selected mode remembers one — the walker never edits the configured order, and
- * the record is per session, never global.
+ * Every success is
+ * recorded on the session as its remembered target when the selected mode
+ * remembers one — the walker never edits the configured order, and the record
+ * is per session, never global.
  */
 export async function withFallback(
   targets,
@@ -262,7 +251,7 @@ export async function withFallback(
   retryableStatus = DEFAULT_RETRY_STATUS_CODES,
   session = new RouteSession(),
   health = new HealthRegistry(),
-  { plan: steps = null, onSkip = null, remember = true, maxAttempts = null, maxTargetAttempts = null } = {}
+  { plan: steps = null, onSkip = null, remember = true } = {}
 ) {
   const ordered = Array.isArray(steps) && steps.length > 0
     ? steps
@@ -274,88 +263,54 @@ export async function withFallback(
     throw err;
   }
 
-  const attemptBudget = Number.isInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : Infinity;
-  const perTargetLimit = Number.isInteger(maxTargetAttempts) && maxTargetAttempts > 0 ? maxTargetAttempts : Infinity;
-
-  // target id -> how many times THIS request has invoked it.
-  const invocations = new Map();
-  // Targets that must never be repeated in this request: their failure was not
-  // a transient, target-scoped one (see the `retry` rules above).
-  const noRetry = new Set();
+  const attempted = new Set();
+  // Final-pass bookkeeping (see the `retry` rules above).
+  const retried = new Set();
   // target id -> the cooldownUntil THIS request set through a transient failure.
   const ownTransientCooldown = new Map();
-  const reported = new Set();
-  const invokedInCycle = new Map();
+  const cooldownReported = new Set();
   const failures = [];
   // Unique targets only: a target can appear in more than one phase, and a
   // sibling must be marked failed once, not once per appearance.
   const allTargets = [...new Map(ordered.map((step) => [health.key(step.target), step.target])).values()];
   let eligible = 0;
-  let budgetExhausted = false;
-  let currentCycle = null;
 
-  const cycleOf = (step) => (Number.isInteger(step.cycle) && step.cycle > 0 ? step.cycle : null);
   const skip = (step, reason) => {
-    // A cooling or refused target is reported once per request, not once per
-    // cycle: the repeat would be the same skip, and a long walk should not bury
-    // the timeline in copies of it.
-    const key = `${health.key(step.target)}|${reason}`;
-    if (reported.has(key)) return;
-    reported.add(key);
-    if (typeof onSkip === "function") onSkip(step.target, { phase: step.phase, cycle: cycleOf(step), reason });
+    if (typeof onSkip === "function") onSkip(step.target, { phase: step.phase, reason });
   };
 
   for (const step of ordered) {
     const target = step.target;
     const id = health.key(target);
-    const cycle = cycleOf(step);
-
-    // Entering a new cycle: if the one that just ended could not invoke anything,
-    // the next would not either (same targets, same cooldowns), so stop here.
-    if (cycle !== null && cycle !== currentCycle) {
-      if (currentCycle !== null && (invokedInCycle.get(currentCycle) ?? 0) === 0) break;
-      currentCycle = cycle;
-    }
 
     const isRetry = step.retry === true;
-    const used = invocations.get(id) ?? 0;
-    if (!isRetry && used > 0) {
-      skip(step, "already_attempted");
+    if (isRetry ? retried.has(id) : attempted.has(id)) {
+      skip(step, isRetry ? "already_retried" : "already_attempted");
       continue;
     }
-    if (isRetry) {
-      if (noRetry.has(id)) {
-        skip(step, "not_retryable");
-        continue;
-      }
-      if (used >= perTargetLimit) {
-        skip(step, "retry_limit");
-        continue;
-      }
-    }
     // The cooldown this request itself created by a transient failure does not
-    // block a repeat, as long as it is still exactly that cooldown.
+    // block the final pass, as long as it is still exactly that cooldown.
     const ownCooldown = isRetry
       && ownTransientCooldown.has(id)
       && Number(health.get(id)?.cooldownUntil) === ownTransientCooldown.get(id);
     if (!ownCooldown && !health.isAvailable(target)) {
-      skip(step, "cooldown");
+      // A cooling target is skipped here; it may appear again later in the
+      // plan, which is the same skip, not a retry.
+      if (!cooldownReported.has(id)) {
+        cooldownReported.add(id);
+        skip(step, "cooldown");
+      }
       continue;
     }
 
-    if (eligible >= attemptBudget) {
-      budgetExhausted = true;
-      break;
-    }
-
     eligible += 1;
-    invocations.set(id, used + 1);
-    if (cycle !== null) invokedInCycle.set(cycle, (invokedInCycle.get(cycle) ?? 0) + 1);
+    attempted.add(id);
+    if (isRetry) retried.add(id);
     ownTransientCooldown.delete(id);
     const startedAt = Date.now();
 
     try {
-      const result = await invoke(target, { phase: step.phase, cycle });
+      const result = await invoke(target, { phase: step.phase });
       health.markSuccess(target, { latencyMs: Date.now() - startedAt });
       if (remember) session.saveSuccess(target, health);
       return result;
@@ -367,13 +322,8 @@ export async function withFallback(
 
       // An error can opt out of health tracking entirely (skipCooldown). A
       // target that refused the request for its own reasons — an image it
-      // cannot carry, say — is not unhealthy, so it is not cooled down, and it
-      // is not a transient failure either: repeating it would only be refused
-      // again.
-      if (error?.skipCooldown) {
-        noRetry.add(id);
-        continue;
-      }
+      // cannot carry, say — is not unhealthy, so it is not cooled down.
+      if (error?.skipCooldown) continue;
 
       const { scope, kind } = describeFailure(status, error);
       // A failure narrowed to this target by its message carries a fixed,
@@ -385,8 +335,6 @@ export async function withFallback(
       if (scope === FAILURE_SCOPE.TARGET) {
         if (isTransientStatus(status)) {
           ownTransientCooldown.set(id, Number(health.get(id)?.cooldownUntil) || 0);
-        } else {
-          noRetry.add(id);
         }
         continue;
       }
@@ -394,8 +342,7 @@ export async function withFallback(
       // Key- and account-level failures describe the credential, so the sibling
       // models sharing it are cooled down too and this request stops burning
       // time on requests that are guaranteed to fail. Model-level failures
-      // deliberately do NOT do this. None of them is ever repeated.
-      noRetry.add(id);
+      // deliberately do NOT do this.
       const reason = `${status} on ${target.model} applies to the whole ${scope === FAILURE_SCOPE.PROVIDER ? "provider" : "key"}`;
       for (const sibling of allTargets) {
         if (health.key(sibling) === id) continue;
@@ -403,7 +350,6 @@ export async function withFallback(
         if (sibling.provider !== target.provider) continue;
         if (scope === FAILURE_SCOPE.KEY && sibling.keyIndex !== target.keyIndex) continue;
         health.markFailure(sibling, status, { reason });
-        noRetry.add(health.key(sibling));
       }
     }
   }
@@ -421,6 +367,5 @@ export async function withFallback(
   const err = new Error(allBadRequest ? failures[failures.length - 1].message : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;
   err.failures = failures;
-  if (budgetExhausted) err.attemptBudgetExhausted = true;
   throw err;
 }

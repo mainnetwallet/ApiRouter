@@ -41,26 +41,4 @@ describe("fallback-chain attempts and skipped rows", () => {
     expect(keys).not.toContain("priority");
     expect(keys).not.toContain("select");
   });
-
-  it("labels each Manual Model Selection attempt with its cycle and phase, in the order they happened", () => {
-    const base = { provider: "groq", model: "m", keyIndex: 0, ok: false, status: 500, latencyMs: 10 };
-    const stages = buildLifecycle({
-      receivedAt: 0,
-      protocol: "openai-chat",
-      attempts: [
-        { ...base, index: 1, phase: "manual-selection", cycle: 1 },
-        { ...base, index: 2, phase: "health-fallback", cycle: 1 },
-        { ...base, index: 3, phase: "manual-selection", cycle: 2 },
-        { ...base, index: 4, phase: "health-fallback", cycle: 2, ok: true, status: 200 }
-      ]
-    }).filter((stage) => stage.key.startsWith("attempt-"));
-    expect(stages.map((stage) => stage.stage)).toEqual([
-      "Cycle 1 · Manual selection · Target failed 1",
-      "Cycle 1 · Health-based fallback · Target failed 2",
-      "Cycle 2 · Manual selection · Target failed 3",
-      "Cycle 2 · Health-based fallback · Target 4"
-    ]);
-    expect(phaseLabel({ phase: "chain" })).toBe("Fallback chain");
-    expect(phaseLabel({ phase: "manual-selection", cycle: 3 })).toBe("Cycle 3 · Manual selection");
-  });
 });

@@ -16,25 +16,11 @@ export const PHASE_LABEL = {
   auto: "Automatic (health + latency)",
   "manual-selection": "Manual selection",
   "health-fallback": "Health-based fallback",
-  // No longer produced: a repeat is the same phase in a later cycle. Kept so a
-  // row recorded by an older gateway still reads sensibly.
   "manual-retry": "Final manual retry"
 };
 
 export function phaseLabel(phase) {
   return PHASE_LABEL[phase] ?? null;
-}
-
-/**
- * The phase of a Manual Model Selection attempt together with the Manual ->
- * Health cycle it belongs to: `Cycle 2 · Manual selection`. An attempt with no
- * cycle (every other mode, or an older gateway) is labelled by its phase alone,
- * and a cycle with no known phase still says which cycle it was.
- */
-export function phaseCycleLabel(phase, cycle) {
-  const name = phaseLabel(phase);
-  const n = Number.isInteger(cycle) && cycle > 0 ? `Cycle ${cycle}` : null;
-  return [n, name].filter(Boolean).join(" · ") || null;
 }
 
 export const entryId = (entry) => `${entry?.provider ?? ""}/${entry?.model ?? ""}`;

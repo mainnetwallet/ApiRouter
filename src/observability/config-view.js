@@ -161,8 +161,6 @@ export function describeEnvironment(config) {
       { name: "PORT", configured: true, kind: "number" },
       { name: "REQUEST_TIMEOUT_MS", configured: true, kind: "number" },
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
-      { name: "MANUAL_MAX_CYCLES", configured: true, kind: "number" },
-      { name: "MANUAL_MAX_ATTEMPTS", configured: true, kind: "number" },
       { name: "APIROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
     ],
     // Routing order is configuration now, not environment: it lives in the

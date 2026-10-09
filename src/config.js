@@ -1,5 +1,4 @@
 import { providerProtocols } from "./adapters.js";
-import { MANUAL_LIMITS } from "./fallback-chain.js";
 
 const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529];
 /**
@@ -172,18 +171,6 @@ export function loadConfig(env = process.env) {
     // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
     // exists so tests can use a short real-clock TTL).
     stickyTtlMs: readNumber(env, "STICKY_TTL_MS", 20 * 60 * 1000, { min: 1, expected: "a positive integer" }),
-    // Manual Model Selection repeats Manual -> Health cycles; both limits bound
-    // one request and are enforced by the planner (cycles) and the walker (attempts).
-    manualMaxCycles: readNumber(env, "MANUAL_MAX_CYCLES", MANUAL_LIMITS.cycles.default, {
-      min: MANUAL_LIMITS.cycles.min,
-      max: MANUAL_LIMITS.cycles.max,
-      expected: `an integer from ${MANUAL_LIMITS.cycles.min} to ${MANUAL_LIMITS.cycles.max}`
-    }),
-    manualMaxAttempts: readNumber(env, "MANUAL_MAX_ATTEMPTS", MANUAL_LIMITS.attempts.default, {
-      min: MANUAL_LIMITS.attempts.min,
-      max: MANUAL_LIMITS.attempts.max,
-      expected: `an integer from ${MANUAL_LIMITS.attempts.min} to ${MANUAL_LIMITS.attempts.max}`
-    }),
     maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", 10 * 1024 * 1024, { min: 1, max: 100 * 1024 * 1024, expected: "an integer from 1 to 104857600" }),
     // The Fallback Chain: the single source of truth for routing order, per
     // pool, plus the selected operating mode. Written by the control panel.

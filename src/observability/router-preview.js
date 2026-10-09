@@ -54,8 +54,7 @@ export function describeRouting({
   pool = "text",
   chain = [],
   mode = FALLBACK_MODES.FIXED,
-  retryableStatus = [],
-  maxCycles = undefined
+  retryableStatus = []
 } = {}) {
   const selection = selectTargetsForProtocol(targets, protocol, model);
   const { compatible, exact, selected, modelMatched } = selection;
@@ -74,8 +73,7 @@ export function describeRouting({
     stickyTargetId,
     health,
     now,
-    cacheKey: `preview:${pool}`,
-    ...(maxCycles === undefined ? {} : { maxCycles })
+    cacheKey: `preview:${pool}`
   });
   const automatic = plan.source === "auto";
   const eligible = selected.filter((target) => health.isAvailable(target, now));
@@ -183,7 +181,7 @@ export function describeRouting({
         ? `The saved Fallback Chain holds ${plan.entries} entr${plan.entries === 1 ? "y" : "ies"} but no target it names can serve this request, so nothing is walked. `
           + "The router will not substitute a model outside the chain — clear the chain to hand routing back to the automatic order"
         : plan.source === "manual"
-        ? `Manual Model Selection: your ${plan.configured} selected model(s) in the saved order, then every model you did not select ordered by measured health and latency; that Manual -> Health cycle repeats up to ${plan.cycles} time(s) in all, and the first model that answers ends the request. Every eligible key of a model is tried before the next model`
+        ? `Manual Model Selection: your ${plan.configured} selected model(s) in the saved order, then every model you did not select ordered by measured health and latency, then one final pass over your selection in its original order. Every eligible key of a model is tried before the next model`
         : automatic
         ? plan.configured > 0
           ? `Automatic Health-Based Fallback: the ${plan.configured} configured model(s) are ordered by measured health and latency (lower measured latency first; unmeasured models keep a stable configured order). Every eligible key of a model is tried before the next model`
