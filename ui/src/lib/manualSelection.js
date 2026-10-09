@@ -1,4 +1,4 @@
-/** Pure helpers for the Manual Selection page (kept separate so they are testable). */
+/** Pure helpers for the Model Manual Selection page (kept separate so they are testable). */
 
 export const entryId = (entry) => `${entry.provider}/${entry.model}`;
 

@@ -97,10 +97,10 @@ Sticky is a separate leading phase. It never edits the normal fallback list.
 - Fallback is strictly sequential, with no cap on the number of attempts other
   than the plan itself.
 
-## Manual Model Selection
+## Model Manual Selection
 
 Operators can pick an ordered list of provider/model entries per pool (Text and
-Vision are separate) on the **Manual Selection** page. The list is stored by the
+Vision are separate) on the **Model Manual Selection** page. The list is stored by the
 backend (`data/manual-selection.json`, override with `MANUAL_SELECTION_FILE`;
 ids only, never keys) and read by the existing planner in `src/routing-plan.js`
 as a leading `manual` phase:
