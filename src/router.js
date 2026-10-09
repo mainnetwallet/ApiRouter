@@ -10,7 +10,7 @@ const DEFAULT_MAX_SESSIONS = 10000;
 // model rejects a key, every other model on that provider + key will too.
 const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 
-const SIZE_LIMIT_COOLDOWN_MS = 60 * 1000;
+const SIZE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 
 // A 408 is a timeout (this router's own, or an upstream's). It says the call was
 // slow right now, not that the provider is down, so cool the target down
