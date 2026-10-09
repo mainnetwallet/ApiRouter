@@ -37,7 +37,12 @@ const normalizePool = (value) => (value === POOLS.VISION ? POOLS.VISION : POOLS.
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING = 200;
 
-const PHASES = ["manual", "sticky", "priority", "fallback"];
+/**
+ * The phases a recorded attempt may carry. This mirrors the vocabulary in
+ * fallback-plan.js by value; a phase that is not listed here is stored as null,
+ * so the two must be changed together.
+ */
+const PHASES = ["sticky", "chain", "auto"];
 const pad = (value) => String(value).padStart(6, "0");
 
 /**
@@ -49,7 +54,7 @@ function plainAttempt(attempt, index) {
   return {
     index: index + 1,
     attemptId: typeof attempt?.attemptId === "string" && attempt.attemptId ? attempt.attemptId : null,
-    // "sticky" | "priority" | "fallback" | null (older callers); and whether this row was
+    // "sticky" | "chain" | "auto" | null (older callers); and whether this row was
     // skipped without a network call (cooldown / already attempted).
     phase: PHASES.includes(attempt?.phase) ? attempt.phase : null,
     skipped: attempt?.skipped === true,

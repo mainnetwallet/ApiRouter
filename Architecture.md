@@ -34,94 +34,114 @@ AI Provider
 4. Configured provider/model/key combinations are expanded into independent targets.
 5. Targets incompatible with the client protocol are excluded.
 6. The request's pool (TEXT or VISION) is decided; only that pool's targets are used, never the other.
-7. A route plan is built (see "Priority and Key-Scoped Fallback"): a valid sticky target, then optional priority targets, then Provider -> Key -> Models.
-8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. 401/402/403 also cool the same key's sibling models (they describe the key, not the model); other keys and providers are unaffected.
+7. A route plan is built (see "The Fallback Chain"): the remembered target when the mode keeps one, then the operator's configured chain for that pool, or the automatic health-and-latency order when no chain is configured.
+8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. A failure cools down what it describes: 401/402/403 also cool the same key's sibling models, while a model-specific error (400/404/413/422) never does.
 9. The router calls targets sequentially.
 10. Retryable failures put the exact target into cooldown and move routing forward.
-11. A successful target becomes the session's sticky target.
+11. A successful target becomes the session's remembered target — in the modes that remember one.
 12. The upstream response is streamed back to the client.
 
-## Priority and Key-Scoped Fallback
+## The Fallback Chain
 
-Implemented in `src/routing-plan.js` (plan) and `withFallback` in
-`src/router.js` (walker). The same code serves both pools; only the target list
-differs.
+Implemented in `src/fallback-chain.js` (the persisted configuration),
+`src/fallback-plan.js` (the planner) and `withFallback` in `src/router.js` (the
+walker). One code path serves both pools; only the target list and the chain
+differ.
 
 ```text
 REQUEST -> TEXT pool | VISION pool (never mixed)
-  STICKY phase     the session's last successful target, only while its 20-minute TTL is valid
-  PRIORITY phase   TEXT_/VISION_PRIORITY_MODELS entries, exact env order (optional)
-  NORMAL fallback  Provider -> Key -> Models -> next Key -> Models -> next Provider
+  REMEMBERED  the session's last successful target, only in the modes that
+              remember one, and only while its 20-minute TTL is valid
+  CHAIN       the operator's saved order, entry by entry
+  AUTO        the same entries (or every configured target, when the chain is
+              empty) ordered by measured health and latency
 ```
 
-Sticky is a separate leading phase. It never edits the normal fallback list.
+A configured chain is the order, and it is the whole order: a model the operator
+left out of the chain is not routed to, because routing to it would be a routing
+path overriding the configured order. Health never re-sorts a chain; it only
+decides eligibility while the plan is walked. The automatic order is used when
+the chain is empty, or when the operator has explicitly selected the automatic
+mode.
 
-- `TEXT_PRIORITY_MODELS=gemini/G1,groq/GR2,gemini/G3` (text pool) and
-  `VISION_PRIORITY_MODELS` (vision pool). Empty = no
-  priority phase and no extra work. A priority entry is one
-  provider/model GROUP: every eligible key of it is attempted in key order
-  (`G1/key1, G1/key2, G1/key3`) until one succeeds, and only when all of them
-  fail or cool down does the walk advance to the next configured entry
-  (`groq/Q1` keys, then `gemini/G2` keys). The same exact target is never
-  called twice in a request, so priority targets met again in the normal
-  fallback are skipped as already attempted.
-- Normal fallback is **not** flattened. For every key, the provider's models run
-  in configured order before the next key starts, and each key restarts at its
-  first model (`K1: G1,G2,G3,G4` then `K2: G1,G2,G3,G4`). A requested model that
-  the provider has leads that provider's per-key chain, and providers that serve
-  it are tried first.
-- A per-request `attempted` set keyed by the health id (pool + provider + model +
-  keyIndex) means a target is never called twice in one request. Repeats are
-  recorded as `skipped` rows (`already_attempted`), cooling targets as
-  `skipped` (`cooldown`); neither counts as an upstream attempt.
-- Health is the existing `HealthRegistry`: it only decides eligibility (cooldown,
-  default 20 minutes) and no longer reorders the plan. Priority has no state of
-  its own, so a failed priority target is tried again on the next request once
-  its cooldown has elapsed.
-- Precedence: pin (strict: no sticky, no priority) > sticky > priority > normal.
-  A pin's success is never remembered as the session's sticky target, and an
-  explicit model the pool serves is honoured first: only priority entries of
-  that model apply, so a priority entry of a different model cannot outrank it.
-  Every success stores `provider + key + model` as the session's sticky target
-  with `expiresAt = now + 20 min` (a timestamp checked at request time, no timer;
-  `RouteSession.validTargetId`). Sticky is honoured only while valid, only for a
-  target of the request's own pool and protocol, never over cooldown, and not
-  over an explicit configured model the sticky target does not serve. If the
-  sticky target fails, routing continues with priority, then normal; a target is
-  never attempted twice in one request. The next success replaces the sticky and
-  restarts the TTL. Text and vision (and each client protocol) keep separate
-  sticky state. Health score and latency never reorder anything;
-  `/health` and `/api/health` `ranked` list the real route order.
-- Every real attempt is logged with its `phase` (`priority` | `fallback`); no
-  keys, headers, prompts or bodies are stored.
-- Fallback is strictly sequential, with no cap on the number of attempts other
-  than the plan itself.
+### Entries
 
-## Model Manual Selection
-
-Operators can pick an ordered list of provider/model entries per pool (Text and
-Vision are separate) on the **Model Manual Selection** page. The list is stored by the
-backend (`data/manual-selection.json`, override with `MANUAL_SELECTION_FILE`;
-ids only, never keys) and read by the existing planner in `src/routing-plan.js`
-as a leading `manual` phase:
+An entry is one provider/model GROUP with an optional key subset and an enabled
+flag:
 
 ```text
-MANUAL (UI order)  ->  PRIORITY (env)  ->  NORMAL fallback
+{ provider, model, keys: null | [0, 2], enabled: true }
 ```
 
-- Each selected entry is one provider/model group: every eligible key is tried
-  in key order before the walk advances to the next selected model; the first
-  success stops the walk. Cooling targets are skipped as usual.
-- After all manual candidates fail the existing priority and normal fallback
-  continue (targets already tried are skipped).
-- Empty list = no manual phase and unchanged routing. While a manual list is
-  active it leads priority and normal fallback in its exact order. Sticky still
-  applies, but only inside the selection: the last good manual target (then the
-  other keys of its model) is tried first and the saved order continues. A
-  sticky target outside the selection is ignored. Pinned requests stay strict
-  and ignore it.
-- API: `GET/PUT /api/manual-selection`, `DELETE /api/manual-selection?pool=`.
-  `/api/router/preview` shows the real order (phase `manual`).
+- `keys: null` means every key the provider has for that model, tried in key
+  order. Narrowing is always deliberate: a malformed key list is read as "every
+  key", never as a subset the operator did not choose.
+- Every eligible key of an entry is attempted, in key order, before the walk
+  advances to the next entry.
+- A disabled entry keeps its position and is simply not routed to. Disabling
+  every entry is the same position as having no chain at all, so the automatic
+  order takes over rather than the router having nothing to do.
+
+The file holds ids, key indexes and flags — never credentials.
+
+### Operating modes
+
+| Mode | Remembered target | Order |
+|---|---|---|
+| `fixed` | none | the saved chain |
+| `last-success` | leads the next request | the saved chain |
+| `auto` | leads the next request | health and latency |
+
+In `fixed`, the walker does not record a success at all, which is what makes the
+mode — and Reset — mean what they say. In the other modes the success is stored
+on the session (`RouteSession`), keyed by protocol + pool + session id, so a
+text success can never become a vision preference.
+
+Reset Fallback clears those session records and the automatic-order cache. It
+touches nothing else: not the chain, the mode, the providers, the keys, the
+configured models, valid health measurements or any cooldown.
+
+### Automatic ordering
+
+`orderGroupsByHealth` sorts model groups by:
+
+1. a group with an available key, before one whose every key is cooling down;
+2. lower measured latency first;
+3. higher health score first;
+4. the order the group appears in the target list — the deterministic tiebreak
+   that makes an unmeasured router stable rather than arbitrary.
+
+A group with no measurement sorts after every measured one. Latency is
+`requestLatencyMs` (a real generation, timed end to end) when there is one, else
+`probeLatencyMs` (a health probe), else nothing at all — the order never invents
+a number. The result is cached against the health registry's version counter and
+a 30-second time bucket, so a real health change takes effect immediately, a
+lapsed cooldown is picked up within the bucket, and a request never recomputes
+the order for no reason.
+
+### Precedence
+
+```text
+pin (strict: no chain, no automatic order, no memory)  >  remembered  >  chain  >  automatic
+```
+
+### Failure scope
+
+A failure cools down what it actually describes. `classifyFailure` reads an
+explicit `error.scope` when a provider adapter could determine one from the
+upstream error body, and otherwise decides from the status code:
+
+| Scope | Status codes | Effect |
+|---|---|---|
+| `key` | 401, 402, 403 | every model of that provider using that key |
+| `target` | 400, 404, 413, 422 | only that target |
+| `target` (default) | everything else | only that target |
+
+A 404 means "this model is gone", not "this key is bad", so it must never reach
+a sibling on the same key. Anything unrecognised is treated as `target`-scoped —
+the narrow answer, which can cost a retry but never a needlessly disabled model.
+`provider` scope exists in the vocabulary and is applied only when an adapter
+states it outright.
 
 ## Supported Endpoints
 
@@ -311,7 +331,7 @@ another provider, key or model, and cooldown is bypassed so a specific key can
 be tested. Outcomes still update the shared health registry. A pin matching no
 target returns `404 no_route`.
 
-## Sticky Sessions
+## Remember Last Successful
 
 The client may send:
 
@@ -325,7 +345,18 @@ If absent, the router creates a UUID and returns:
 x-multi-ai-session-id: <session-id>
 ```
 
-A successful target becomes the session's sticky target for 20 minutes (refreshed by each success). It is tried first while valid; if it fails or cools down, the other keys of the same provider/model are tried next (key order), then the priority models (when the sticky model is a priority entry, the entries ranked above it are tried first, so a recovered higher-priority model takes traffic back once its cooldown ends; the entries below it follow; with no priority sticky, the whole list applies), then the normal fallback. Requests without the header share one default session per protocol and pool. See "Priority and Key-Scoped Fallback". The sticky target is stored per session (keyed by protocol, pool and session id) as the exact `provider + key + model` health id; it is never shared between sessions and never reorders the priority list or the normal fallback list.
+In the `last-success` and `auto` modes, a successful target is remembered for
+that session for 20 minutes (refreshed by each success) and is tried first on the
+next request. When it fails or is cooling down, the walk continues from the chain
+in its saved order; the remembered target is never retried twice in one request,
+and the chain itself is never modified by a success.
+
+The record is scoped by protocol, pool and session id: text and vision keep
+separate remembered targets, and so does each client protocol. Requests without
+the header share one default session per protocol and pool.
+
+In the `fixed` mode nothing is remembered at all: every request starts at the
+first model of the chain and its first eligible key.
 
 ## Security
 
@@ -356,7 +387,9 @@ src/
 ├── api.js                 read-only control-panel API (/api/*)
 ├── static-files.js        static handler for the built control panel
 ├── config.js              environment + target construction
-├── router.js              fallback + sticky routing
+├── router.js              the plan walker, failure scope and session memory
+├── fallback-chain.js      the persisted Fallback Chain and its mode
+├── fallback-plan.js       the one routing planner (chain / automatic)
 ├── health.js              health + ranking + cooldown
 ├── health-checks.js       provider-aware health probes
 ├── adapters.js            protocol + upstream request adapter
@@ -447,8 +480,10 @@ The core implementation is separated by responsibility:
 - `src/server.js` — HTTP gateway, endpoints, authentication, sessions and proxy execution.
 - `src/api.js` — the read-only control-panel API and its safe projections.
 - `src/static-files.js` — static serving for `ui/dist`, with traversal protection.
+- `src/fallback-chain.js` — the persisted Fallback Chain, its mode and the one-time legacy import.
+- `src/fallback-plan.js` — the routing planner: the configured chain, the automatic health-based order, and the remembered target.
 - `src/config.js` — environment parsing and routing-target construction.
-- `src/router.js` — health-ranked fallback and sticky routing.
+- `src/router.js` — the sequential plan walker, failure classification and session memory.
 - `src/health.js` — target health, scoring, cooldown and health-refresh infrastructure.
 - `src/health-checks.js` — provider-aware health probes (no generation quota, except Cohere — see "Provider-aware probing") and status classification.
 - `src/adapters.js` — client protocol detection and upstream request construction.

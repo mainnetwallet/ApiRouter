@@ -1,5 +1,4 @@
 import { providerProtocols } from "./adapters.js";
-import { readPriority } from "./routing-plan.js";
 
 const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529];
 /**
@@ -173,10 +172,13 @@ export function loadConfig(env = process.env) {
     // exists so tests can use a short real-clock TTL).
     stickyTtlMs: readNumber(env, "STICKY_TTL_MS", 20 * 60 * 1000, { min: 1, expected: "a positive integer" }),
     maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", 10 * 1024 * 1024, { min: 1, max: 100 * 1024 * 1024, expected: "an integer from 1 to 104857600" }),
-    // Priority is optional: an empty list means no priority phase at all.
-    priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
-    // Where operator-selected manual models are persisted (provider + model ids only).
-    manualSelectionFile: String(env.MANUAL_SELECTION_FILE || "").trim() || "data/manual-selection.json",
+    // The Fallback Chain: the single source of truth for routing order, per
+    // pool, plus the selected operating mode. Written by the control panel.
+    fallbackChainFile: String(env.FALLBACK_CHAIN_FILE || "").trim() || "data/fallback-chain.json",
+    // Legacy, read ONCE to seed the chain above when no chain has been saved
+    // yet. Never consulted again afterwards: the old systems cannot override
+    // the configured chain.
+    legacyManualSelectionFile: String(env.MANUAL_SELECTION_FILE || "").trim() || "data/manual-selection.json",
     providers,
     visionProviders
   };

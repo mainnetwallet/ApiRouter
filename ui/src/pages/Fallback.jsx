@@ -370,15 +370,15 @@ function HowFallbackWorks() {
       </div>
       <div className="panel__body">
         <ol className="small muted" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.9 }}>
-          <li>The request enters exactly one pool: text, or vision for image requests.</li>
+          <li>The request enters exactly one pool: text, or vision for image requests. It never crosses over.</li>
           <li>Targets that cannot speak the client's protocol are removed.</li>
-          <li>Targets inside a cooldown window are removed.</li>
-          <li>The session's sticky target (last success, valid for 20 minutes) is tried first, if it is eligible.</li>
-          <li>Then priority targets (TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS), in their configured order; every eligible key of an entry is tried before the next entry.</li>
-          <li>The rest follow Provider → Key → Models: every model of a key runs in order before the next key, and each key restarts at its first model.</li>
-          <li>Sticky is a separate first step and never reorders the chain; health only skips cooling targets.</li>
+          <li>The Fallback Chain for that pool is walked in exactly its saved order.</li>
+          <li>Every eligible API key of a model is tried, in key order, before the walk moves to the next model.</li>
+          <li>The remembered target (last success, valid for 20 minutes) is tried first — only in the modes that remember one.</li>
+          <li>When no chain is configured, or the automatic mode is selected, the order is built from measured health and latency instead.</li>
+          <li>Targets inside a cooldown window are skipped, and reported as skipped rather than hidden.</li>
           <li>Each target is tried at most once per request, in order, until one succeeds.</li>
-          <li>A retryable failure cools that exact target down and moves on — only within the same pool.</li>
+          <li>A retryable failure cools down what it actually describes: the model, the key, or (only when the provider says so) the provider.</li>
         </ol>
       </div>
     </div>

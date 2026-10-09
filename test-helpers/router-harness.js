@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { getFreePort } from "./mock-upstream.js";
 
@@ -11,6 +13,10 @@ const SERVER_PATH = fileURLToPath(new URL("../src/server.js", import.meta.url));
  */
 export async function startRouter(env = {}) {
   const port = await getFreePort();
+  // Routing configuration is persisted, so every router gets its own file. A
+  // test must never read (or write) the developer's real chain, and no test may
+  // seed another's — both would make the suite depend on the order it ran in.
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "apirouter-config-"));
 
   const child = spawn(process.execPath, [SERVER_PATH], {
     cwd: path.dirname(SERVER_PATH),
@@ -19,6 +25,8 @@ export async function startRouter(env = {}) {
       PORT: String(port),
       // Clear every provider so each test fully controls its own config.
       ...clearProviderEnv(),
+      FALLBACK_CHAIN_FILE: path.join(configDir, "fallback-chain.json"),
+      MANUAL_SELECTION_FILE: path.join(configDir, "manual-selection.json"),
       ...env
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -82,6 +90,11 @@ function clearProviderEnv() {
   }
   env.APIROUTER_API_KEYS = "";
   env.RETRY_STATUS_CODES = "";
+  // The legacy routing sources. Cleared so an ambient variable on the
+  // developer's machine can never seed or influence a test's routing; a test
+  // that wants to exercise the migration sets them explicitly afterwards.
+  env.TEXT_PRIORITY_MODELS = "";
+  env.VISION_PRIORITY_MODELS = "";
   return env;
 }
 

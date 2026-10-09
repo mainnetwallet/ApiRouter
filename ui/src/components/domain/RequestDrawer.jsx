@@ -3,7 +3,7 @@ import { StatusBadge } from "../ui/StatusBadge.jsx";
 import { PoolBadge } from "../ui/PoolBadge.jsx";
 import { CopyableId } from "../ui/CopyableId.jsx";
 import { ErrorState } from "../ui/ErrorState.jsx";
-import { RequestTimeline } from "./RequestTimeline.jsx";
+import { RequestTimeline, phaseLabel } from "./RequestTimeline.jsx";
 import { formatDateTime, formatLatency, formatTokens, protocolLabel, providerLabel, EMPTY } from "../../lib/format.js";
 import { ApiError, classifyFailure, failureLabel } from "../../lib/errors.js";
 
@@ -123,7 +123,7 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
                       <span className="chain__provider">{providerLabel(attempt.provider)}</span> / {attempt.model ?? EMPTY}
                     </div>
                     <div className="chain__meta">
-                      {attempt.phase ? <span>{attempt.phase === "manual" ? "Manual" : attempt.phase === "sticky" ? "Sticky" : attempt.phase === "priority" ? "Priority" : "Normal fallback"}</span> : null}
+                      {attempt.phase ? <span>{phaseLabel({ phase: attempt.phase })}</span> : null}
                       <span>key {attempt.keyIndex ?? "?"}</span>
                       {attempt.status ? <span>HTTP {attempt.status}</span> : null}
                       {Number.isFinite(attempt.latencyMs) ? <span>{formatLatency(attempt.latencyMs)}</span> : null}

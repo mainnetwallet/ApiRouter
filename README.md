@@ -1,15 +1,17 @@
 # ApiRouter
 
-**Multi-provider AI gateway with intelligent routing, health-aware fallback, sticky sessions, and a built-in control panel.**
+**Multi-provider AI gateway with a UI-controlled fallback chain, health-aware routing, remembered successes, and a built-in control panel.**
 
 ApiRouter gives OpenAI-compatible and native AI clients one local endpoint while handling provider selection, model routing, key rotation, cooldowns, retries, and observability.
 
 ## Features
 
 - **Multi-provider routing** — route requests across configured AI providers and models.
-- **Priority routing** — define ordered text and vision targets.
-- **Health-aware fallback** — unhealthy or cooled-down targets are skipped automatically.
-- **Sticky sessions** — successful targets can remain sticky for 20 minutes per session.
+- **UI-controlled fallback chain** — one ordered list per pool, edited in the control panel, followed exactly.
+- **Multi-key fallback** — every eligible API key of a model is tried before the next model.
+- **Health-aware fallback** — cooling targets are skipped and reported, never hidden.
+- **Automatic ordering** — with no chain configured, models are ordered by measured health and latency.
+- **Remember Last Successful** — optionally start from the model and key that last answered (20-minute TTL).
 - **Key-aware routing** — keys are handled independently within each provider/model target.
 - **Text + vision separation** — vision requests stay in the vision pool; they do not silently fall back to text-only targets.
 - **Multiple client protocols** — Claude Messages, OpenAI Responses, OpenAI Chat Completions, Gemini, and generic OpenAI-compatible clients.
@@ -145,40 +147,81 @@ Use `Router --prod` for production mode.
 
 ## Routing
 
-Priority routing can be configured independently for text and vision:
+Routing is decided by the **Fallback Chain** — one ordered list per pool (Text and
+Vision), configured in the control panel under **Configure → Fallback Chain**.
+It is the single source of truth: there is no separate priority list and no
+separate normal-fallback path, and nothing re-sorts a chain you have configured.
 
-```env
-TEXT_PRIORITY_MODELS=gemini/G1,groq/GR2,openrouter/G3
-VISION_PRIORITY_MODELS=gemini/V1,openrouter/V2
+```text
+Configured chain, for the request's own pool:
+
+  Gemini — Model 2
+    key 1 -> fail
+    key 2 -> success            (stop: the request is served)
+  Groq — Model 3                 (only reached if every key of Model 2 failed)
+    ...
 ```
 
-Targets are attempted in the configured order. Once a target succeeds, the request ends.
+- Every eligible API key of a model is tried, in key order, before the walk
+  moves on to the next model.
+- A model can be narrowed to specific keys, and can be disabled without losing
+  its position in the list.
+- Targets already attempted in the request are never attempted twice.
+- Cooling targets are skipped, and reported as skipped rather than hidden.
 
-If priority targets are exhausted, ApiRouter enters normal fallback routing.
+### When no chain is configured
+
+With an empty chain the router builds the order itself, from measured health and
+latency: healthy models with lower measured latency first, models with no
+measurement at all after those, in a stable configured order. Latency comes from
+real request timings first and health-probe timings second — never from a value
+the router does not have. The panel shows this as **Automatic Health-Based
+Fallback**. Text and Vision are ordered separately, from their own measurements.
+
+### Fallback modes
+
+| Mode | Behaviour |
+|---|---|
+| **Fixed Order** (default) | Every request starts at the first model of the chain and its first eligible key. A success never changes what is tried next. |
+| **Remember Last Successful** | The model and key that last answered are tried first. If they fail or are cooling down, the chain continues in its saved order. The saved order is never modified. |
+| **Automatic Health-Based Fallback** | The chain is re-ordered from measured health and latency on each cycle. Selecting this mode is what allows re-sorting. |
+
+**Reset Fallback** clears the remembered model/key preferences immediately, with
+no restart. It never deletes the saved chain, the selected mode, the providers,
+the API keys, the configured models, valid health measurements or a genuine
+cooldown.
 
 ### Sticky sessions
 
-A successful target can remain sticky for **20 minutes** for the same session.
-
-Sessions are identified with:
+The remembered target is scoped per session, protocol and pool, and lasts
+**20 minutes** after its last success. Sessions are identified with:
 
 ```text
 X-Multi-AI-Session-ID
 ```
 
-The response also returns the session ID so clients can reuse it.
+The response also returns the session ID so clients can reuse it. A Text success
+never becomes a Vision preference.
 
-Sticky routing is isolated by protocol/pool and remembers the exact provider, key, and model.
+### Text and Vision
 
-### Fallback
+Text and Vision share one algorithm and one set of rules, but never share
+targets. Each has its own chain, its own health, its own cooldowns, its own
+latency measurements and its own remembered target. A vision request can never
+reach a model that does not support vision, and the two pools never cross over.
 
-Normal fallback is key-scoped:
+### Failures and cooldowns
 
-```text
-Provider → Key → Models → next Key → Models → next Provider
-```
+A failure cools down what it actually describes:
 
-Targets already attempted during the request are not retried later in the same request.
+| Failure | Cools down |
+|---|---|
+| Key/account rejection (`401`, `402`, `403`) | Every model of that provider using that key |
+| Request or model problem (`400`, `404`, `413`, `422`) | Only that target — never a sibling that shares the key |
+| Anything else (`429`, `5xx`, timeouts) | Only that target |
+
+A provider adapter that can read the upstream error body may state the scope
+outright, and that wins over the status code.
 
 ## API Endpoints
 
@@ -204,6 +247,9 @@ Targets already attempted during the request are not retried later in the same r
 | GET | `/api/requests` | Request history |
 | GET | `/api/requests/stream` | Live request events |
 | GET | `/api/requests/:id` | Request lifecycle |
+| GET | `/api/fallback` | The Fallback Chain, the mode and the model catalogue with health and latency |
+| PUT | `/api/fallback` | Save one pool's chain, or select the operating mode |
+| POST | `/api/fallback/reset` | Clear remembered model/key preferences (Reset Fallback) |
 | GET | `/api/router/preview` | Preview routing decisions |
 | GET | `/api/analytics` | Usage and performance analytics |
 | GET | `/api/config` | Effective configuration without secrets |

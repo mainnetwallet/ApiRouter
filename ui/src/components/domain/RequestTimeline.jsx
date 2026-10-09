@@ -1,6 +1,7 @@
 import { Icon } from "../ui/Icon.jsx";
 import { formatLatency, formatTime, protocolLabel, providerLabel } from "../../lib/format.js";
 import { describeAttempt } from "../../lib/errors.js";
+import { phaseLabel as phaseName } from "../../lib/fallbackChain.js";
 
 /**
  * The lifecycle of one routed request.
@@ -10,9 +11,8 @@ import { describeAttempt } from "../../lib/errors.js";
  * actually happened, including the fallback hops. A request that fell back
  * twice shows two failed targets and the fallback between them.
  */
-/** "Priority" / "Fallback" prefix for a recorded attempt; empty for old rows without a phase. */
-export const phaseLabel = (attempt) =>
-  attempt?.phase === "manual" ? "Manual" : attempt?.phase === "sticky" ? "Sticky" : attempt?.phase === "priority" ? "Priority" : attempt?.phase === "fallback" ? "Normal fallback" : "";
+/** "Fallback chain" / "Remembered" prefix for a recorded attempt; empty for rows without one. */
+export const phaseLabel = (attempt) => phaseName(attempt?.phase) ?? "";
 
 export function buildLifecycle(entry) {
   if (!entry) return [];

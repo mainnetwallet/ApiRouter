@@ -357,6 +357,31 @@ export default function Configuration() {
                 </table>
               </div>
 
+              {data.environment.legacy?.length ? (
+                <>
+                  <div className="section__title">Legacy routing variables (no longer read)</div>
+                  <div className="table-wrap" style={{ marginBottom: "var(--sp-4)" }}>
+                    <table className="table table--compact">
+                      <caption className="sr-only">Legacy environment variables</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Variable</th>
+                          <th scope="col">Note</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.environment.legacy.map((variable) => (
+                          <tr key={variable.name}>
+                            <td className="mono">{variable.name}</td>
+                            <td className="tiny dim">{variable.note}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : null}
+
               <div className="section__title">Provider variables</div>
               <div className="table-wrap">
                 <table className="table table--compact">

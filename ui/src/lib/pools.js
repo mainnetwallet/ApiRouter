@@ -267,8 +267,8 @@ export const CROSS_POOL_FALLBACK = Object.freeze({
 export const ROUTING_FLOW_STEPS = Object.freeze([
   { key: "incoming", step: 1, label: "Incoming Request", detail: "TEXT or VISION" },
   { key: "detect", step: 2, label: "Detect Request Type", detail: "Text: chat / coding / reasoning · Vision: image / multimodal" },
-  { key: "pool", step: 3, label: "Route to Correct Pool", detail: "The request enters exactly one pool" },
-  { key: "priority", step: 4, label: "Priority Targets (optional)", detail: "TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS in exact env order; skipped entirely when empty. Stops on first success" },
-  { key: "select", step: 5, label: "Normal Fallback: Provider → Key → Models", detail: "Every model of a key is tried in order before the next key; each key restarts at its first model, then the next provider. Targets already attempted are skipped; cooling targets are skipped" },
+  { key: "pool", step: 3, label: "Route to Correct Pool", detail: "The request enters exactly one pool, and never crosses over" },
+  { key: "chain", step: 4, label: "Walk the Fallback Chain", detail: "The configured order for this pool, exactly as saved. Every eligible API key of a model is tried, in key order, before the next model. Health only skips targets that are cooling down" },
+  { key: "auto", step: 5, label: "Automatic Health-Based Fallback", detail: "Used when no chain is configured, or when the automatic mode is selected: healthy models with lower measured latency first, unmeasured models in a stable configured order" },
   { key: "fallback", step: 6, label: "Fallback (Same Pool Only)", detail: CROSS_POOL_FALLBACK.label, warn: true }
 ]);

@@ -6,9 +6,51 @@ const DEFAULT_RETRY_STATUS_CODES = new Set([401, 402, 403, 404, 408, 409, 425, 4
 // an unbounded map would grow without limit on a long-running gateway.
 const DEFAULT_MAX_SESSIONS = 10000;
 
-// These statuses describe the API key / account, not the model: once one
-// model rejects a key, every other model on that provider + key will too.
+/**
+ * How far a failure reaches.
+ *
+ * This is the distinction that keeps one bad model from taking out its
+ * siblings: a failure that names the model cools THAT target down, while a
+ * failure that describes the credential or the account cools every model
+ * sharing that key. Getting it wrong in either direction is expensive — too
+ * narrow and a dead key is retried once per model, too wide and one withdrawn
+ * model disables a provider's whole catalogue.
+ */
+export const FAILURE_SCOPE = Object.freeze({
+  TARGET: "target",
+  KEY: "key",
+  PROVIDER: "provider"
+});
+
+// These statuses describe the API key / account, not the model: once one model
+// rejects a key, every other model on that provider + key will too.
 const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
+
+// These describe the request or the model rather than the credential or the
+// provider, and must never reach a sibling: a withdrawn model (404) or a
+// request this model cannot accept (400, 413, 422) says nothing about the
+// other models on the same key.
+const MODEL_LEVEL_STATUS_CODES = new Set([400, 404, 413, 422]);
+
+/**
+ * Classifies a failed attempt from the metadata actually available.
+ *
+ * A provider adapter that can read the upstream error body may state the scope
+ * outright (`error.scope`); that wins, because it is the provider's own account
+ * of what went wrong. Otherwise the status code decides, and anything
+ * unrecognised is treated as target-scoped — the narrow answer, which can only
+ * cost a retry, never a needlessly disabled model.
+ */
+export function classifyFailure(status, error = null) {
+  const explicit = error?.scope;
+  if (explicit === FAILURE_SCOPE.KEY || explicit === FAILURE_SCOPE.PROVIDER || explicit === FAILURE_SCOPE.TARGET) {
+    return explicit;
+  }
+  const code = Number(status);
+  if (KEY_LEVEL_STATUS_CODES.has(code)) return FAILURE_SCOPE.KEY;
+  if (MODEL_LEVEL_STATUS_CODES.has(code)) return FAILURE_SCOPE.TARGET;
+  return FAILURE_SCOPE.TARGET;
+}
 
 const SIZE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 
@@ -66,11 +108,20 @@ export class SessionStore {
 
     return value;
   }
+
+  values() {
+    return [...this.entries.values()];
+  }
 }
 
-/** A sticky target stays preferred for 20 minutes after its last success. */
+/** A remembered target stays preferred for 20 minutes after its last success. */
 export const STICKY_TTL_MS = 20 * 60 * 1000;
 
+/**
+ * Per-session "remember last successful". Scoped by the caller's key (protocol
+ * + pool + session id), so a text success can never become a vision preference
+ * and the two pools' remembered targets stay independent.
+ */
 export class RouteSession {
   constructor({ targetId = null, expiresAt = null, ttlMs = STICKY_TTL_MS } = {}) {
     this.targetId = targetId;
@@ -81,54 +132,45 @@ export class RouteSession {
   }
 
   /**
-   * The sticky target id, only while its TTL is active. An expired (or never
-   * timestamped) sticky is cleared and reported as absent, so the request
-   * routes Priority -> Normal and the expired target is never used again.
+   * The remembered target id, only while its TTL is active. An expired (or
+   * never timestamped) target is cleared and reported as absent, so the request
+   * walks the chain from its start and the stale target is never used again.
    */
   validTargetId(now = Date.now()) {
     if (!this.targetId) return null;
     if (this.expiresAt === null || !(now < this.expiresAt)) {
-      this.targetId = null;
-      this.expiresAt = null;
+      this.clear();
       return null;
     }
     return this.targetId;
   }
 
-  current(targets, health) {
-    if (!Array.isArray(targets) || targets.length === 0) {
-      const err = new Error("No fully configured routing targets available");
-      err.status = 503;
-      throw err;
-    }
-
-    if (this.targetId) {
-      const target = targets.find((item) => health.key(item) === this.targetId);
-      if (target && health.isAvailable(target)) return target;
-    }
-
-    return health.rank(targets)[0];
-  }
-
-  /** A success makes this target sticky and starts a fresh TTL from `now`. */
+  /** A success makes this target the remembered one and starts a fresh TTL. */
   saveSuccess(target, health, now = Date.now()) {
     this.targetId = health.key(target);
     this.expiresAt = now + this.ttlMs;
   }
+
+  /** Forgets the remembered target. Used by Reset Fallback. */
+  clear() {
+    this.targetId = null;
+    this.expiresAt = null;
+  }
 }
 
 /**
- * Walks the candidate targets until one answers.
+ * Walks an explicit, already-ordered plan (see fallback-plan.js) sequentially.
  *
- * `groups` — supplied by the caller as `fallbackGroups(selection)` — splits the
- * candidates into ordered tiers. Every target in a tier is exhausted, whether
- * by being tried or by being skipped while it cools down, before the next tier
- * is looked at. That is what keeps an available exact model match ahead of a
- * different-model fallback no matter what the health scores say, while ranking
- * and the session's sticky target still decide the order *within* a tier.
+ * The order is authoritative: nothing is re-ranked. A model's eligible keys are
+ * all tried, in key order, before the walk advances to the next model, and the
+ * next model starts at its own first eligible key.
  *
- * Without `groups` the whole target list behaves as a single tier, which is
- * what the callers that have no notion of an exact match want.
+ * Per request, a target (pool + provider + model + keyIndex) is invoked at most
+ * once; a repeat is reported through `onSkip`, never called. Targets cooling
+ * down in the shared health registry are skipped the same way. Every success is
+ * recorded on the session as its remembered target when the selected mode
+ * remembers one — the walker never edits the configured order, and the record
+ * is per session, never global.
  */
 export async function withFallback(
   targets,
@@ -136,126 +178,13 @@ export async function withFallback(
   retryableStatus = DEFAULT_RETRY_STATUS_CODES,
   session = new RouteSession(),
   health = new HealthRegistry(),
-  { groups = null, plan: steps = null, onSkip = null } = {}
+  { plan: steps = null, onSkip = null, remember = true } = {}
 ) {
-  if (Array.isArray(steps)) {
-    return walkPlan(steps, invoke, retryableStatus, session, health, onSkip);
-  }
+  const ordered = Array.isArray(steps) && steps.length > 0
+    ? steps
+    : (Array.isArray(targets) ? targets : []).map((target) => ({ target, phase: null }));
 
-  const plan = (Array.isArray(groups) && groups.length > 0 ? groups : [targets])
-    .filter((group) => Array.isArray(group) && group.length > 0);
-
-  if (plan.length === 0) {
-    const err = new Error("No fully configured routing targets available");
-    err.status = 503;
-    throw err;
-  }
-
-  const failures = [];
-  let available = 0;
-
-  for (const group of plan) {
-    const ranked = health.rank(group);
-    if (ranked.length === 0) continue;
-    available += ranked.length;
-
-    // Try the session's sticky target first, then every other ranked target.
-    // Scanning forward from the sticky target's rank would silently abandon
-    // better-ranked healthy targets whenever the sticky target fails. A sticky
-    // target outside this group is simply not found, so it cannot reach across
-    // the tier boundary.
-    const preferred = session.current(ranked, health);
-    const preferredId = health.key(preferred);
-    const order = [
-      preferred,
-      ...ranked.filter((target) => health.key(target) !== preferredId)
-    ];
-
-    for (const target of order) {
-      if (!health.isAvailable(target)) continue;
-
-      const startedAt = Date.now();
-
-      try {
-        const result = await invoke(target);
-        health.markSuccess(target, { latencyMs: Date.now() - startedAt });
-        session.saveSuccess(target, health);
-        return result;
-      } catch (error) {
-        const status = Number(error?.status || 0);
-
-        failures.push({
-          target,
-          status,
-          message: error?.message || String(error)
-        });
-
-        if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) {
-          throw error;
-        }
-
-        // An error can opt out of health tracking entirely (skipCooldown).
-        // Upstream 400s no longer do: they cool the model down for 8 minutes.
-        if (error?.skipCooldown) continue;
-
-        // A 413 depends on the size of this one request (per-minute token caps
-        // reset quickly), so cool the target down briefly, not for 20 minutes.
-        health.markFailure(target, status, cooldownOptions(status));
-
-        // Quota/auth failures hit the whole key. Cool the sibling models on the
-        // same provider + key down too, so this request (and the next ones)
-        // skip them instead of burning time on a guaranteed failure or a hang.
-        if (KEY_LEVEL_STATUS_CODES.has(status)) {
-          const reason = `${status} on ${target.model} applies to the whole key`;
-          for (const sibling of plan.flat()) {
-            if (sibling === target) continue;
-            if (sibling.provider !== target.provider || sibling.keyIndex !== target.keyIndex) continue;
-            if (health.key(sibling) === health.key(target)) continue;
-            health.markFailure(sibling, status, { reason });
-          }
-        }
-      }
-    }
-  }
-
-  if (available === 0) {
-    const err = new Error("No routing targets are currently available");
-    err.status = 503;
-    err.failures = [];
-    throw err;
-  }
-
-  // Every target answered 400: the request itself is almost certainly invalid,
-  // so report that to the client instead of masking it as a 502 gateway error.
-  const allBadRequest = failures.length > 0 && failures.every((failure) => failure.status === 400);
-  const err = new Error(allBadRequest
-    ? failures[failures.length - 1].message
-    : "All routing targets failed");
-  err.status = allBadRequest ? 400 : 502;
-  err.failures = failures;
-  throw err;
-}
-
-/**
- * Walks an explicit, already-ordered plan (see routing-plan.js) sequentially.
- *
- * The order is authoritative: nothing is re-ranked, so a key's models run in
- * configured order and the next key restarts at its own first model. Per
- * request, a target (pool + provider + model + keyIndex, i.e. the health id)
- * is invoked at most once; a repeat is reported through `onSkip`, never called.
- * Targets cooling down in the shared health registry are skipped the same way.
- * A priority entry is one provider/model group: ALL of its eligible keys are
- * attempted, in key order, before the walk advances to the next configured
- * entry. Priority is not remembered:
- * a failure only affects this request and whatever cooldown the health
- * registry itself decides on. Every success is recorded on the session as its
- * sticky target (provider + key + model, via the health id). The sticky target
- * leads the NEXT request of that same session as the plan's first phase; this
- * walker never reorders anything itself, and the record is per session, never
- * global.
- */
-async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip) {
-  if (steps.length === 0) {
+  if (ordered.length === 0) {
     const err = new Error("No fully configured routing targets available");
     err.status = 503;
     throw err;
@@ -264,16 +193,16 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
   const attempted = new Set();
   const cooldownReported = new Set();
   const failures = [];
-  // Unique targets only: a priority target also appears in the normal phase,
-  // and a sibling must be marked failed once, not once per appearance.
-  const allTargets = [...new Map(steps.map((step) => [health.key(step.target), step.target])).values()];
+  // Unique targets only: a target can appear in more than one phase, and a
+  // sibling must be marked failed once, not once per appearance.
+  const allTargets = [...new Map(ordered.map((step) => [health.key(step.target), step.target])).values()];
   let eligible = 0;
 
   const skip = (step, reason) => {
     if (typeof onSkip === "function") onSkip(step.target, { phase: step.phase, reason });
   };
 
-  for (const step of steps) {
+  for (const step of ordered) {
     const target = step.target;
     const id = health.key(target);
 
@@ -282,8 +211,8 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
       continue;
     }
     if (!health.isAvailable(target)) {
-      // A priority target in cooldown is skipped here; the normal phase will
-      // meet it again and skip it for the same reason, which is not a retry.
+      // A cooling target is skipped here; it may appear again later in the
+      // plan, which is the same skip, not a retry.
       if (!cooldownReported.has(id)) {
         cooldownReported.add(id);
         skip(step, "cooldown");
@@ -298,25 +227,35 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
     try {
       const result = await invoke(target, { phase: step.phase });
       health.markSuccess(target, { latencyMs: Date.now() - startedAt });
-      session.saveSuccess(target, health);
+      if (remember) session.saveSuccess(target, health);
       return result;
     } catch (error) {
       const status = Number(error?.status || 0);
       failures.push({ target, status, message: error?.message || String(error) });
 
       if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) throw error;
+
+      // An error can opt out of health tracking entirely (skipCooldown). A
+      // target that refused the request for its own reasons — an image it
+      // cannot carry, say — is not unhealthy, so it is not cooled down.
       if (error?.skipCooldown) continue;
 
       health.markFailure(target, status, cooldownOptions(status));
 
-      if (KEY_LEVEL_STATUS_CODES.has(status)) {
-        const reason = `${status} on ${target.model} applies to the whole key`;
-        for (const sibling of allTargets) {
-          if (sibling.provider !== target.provider || sibling.keyIndex !== target.keyIndex) continue;
-          if ((sibling.pool ?? "text") !== (target.pool ?? "text")) continue;
-          if (health.key(sibling) === id) continue;
-          health.markFailure(sibling, status, { reason });
-        }
+      const scope = classifyFailure(status, error);
+      if (scope === FAILURE_SCOPE.TARGET) continue;
+
+      // Key- and account-level failures describe the credential, so the sibling
+      // models sharing it are cooled down too and this request stops burning
+      // time on requests that are guaranteed to fail. Model-level failures
+      // deliberately do NOT do this.
+      const reason = `${status} on ${target.model} applies to the whole ${scope === FAILURE_SCOPE.PROVIDER ? "provider" : "key"}`;
+      for (const sibling of allTargets) {
+        if (health.key(sibling) === id) continue;
+        if ((sibling.pool ?? "text") !== (target.pool ?? "text")) continue;
+        if (sibling.provider !== target.provider) continue;
+        if (scope === FAILURE_SCOPE.KEY && sibling.keyIndex !== target.keyIndex) continue;
+        health.markFailure(sibling, status, { reason });
       }
     }
   }
@@ -328,6 +267,8 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
     throw err;
   }
 
+  // Every target answered 400: the request itself is almost certainly invalid,
+  // so report that to the client instead of masking it as a 502 gateway error.
   const allBadRequest = failures.length > 0 && failures.every((failure) => failure.status === 400);
   const err = new Error(allBadRequest ? failures[failures.length - 1].message : "All routing targets failed");
   err.status = allBadRequest ? 400 : 502;

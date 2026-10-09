@@ -25,8 +25,13 @@ import { createApi } from "./api.js";
 import { createSseUsageTap, createJsonUsageTap, tapBytes, tapEvents, usageFrom } from "./usage.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
-import { buildRoutePlan, routeOrderByPool } from "./routing-plan.js";
-import { ManualSelectionStore } from "./manual-selection.js";
+import { buildRoutePlan, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
+import {
+  FallbackChainStore,
+  hasLegacyConfig,
+  readLegacyConfig,
+  remembersSuccess
+} from "./fallback-chain.js";
 import { selectPool } from "./vision.js";
 import {
   bridgeProtocol,
@@ -78,8 +83,23 @@ registerConfiguredSecrets([
   ...[config.providers, config.visionProviders].flatMap((group) => Object.values(group || {}).flatMap((p) => p?.apiKeys || [])),
   ...[config.providers, config.visionProviders].flatMap((group) => group?.cloudflare?.accountIds || [])
 ]);
-// Operator-selected manual models (ids only, persisted to disk, no secrets).
-const manualSelection = new ManualSelectionStore({ file: config.manualSelectionFile });
+// The Fallback Chain: the single source of truth for routing order, per pool.
+// On first run it is seeded from the legacy manual-selection file and priority
+// env vars, so an upgrade keeps the operator's routing; after that the legacy
+// sources are never read again and cannot override what is configured here.
+const fallbackChain = new FallbackChainStore({
+  file: config.fallbackChainFile,
+  migrate: () => readLegacyConfig({ manualFile: config.legacyManualSelectionFile, env: process.env })
+});
+if (fallbackChain.migrated) {
+  console.log("fallback chain: migrated the legacy manual selection / priority configuration");
+}
+if (hasLegacyConfig({ manualFile: config.legacyManualSelectionFile, env: process.env })) {
+  console.warn(
+    "fallback chain: MANUAL_SELECTION_FILE / TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS are legacy and are now ignored. "
+    + "Configure the fallback chain in the control panel instead."
+  );
+}
 const textTargets = buildTargets(config.providers);
 const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
 // Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
@@ -475,16 +495,18 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "chat"
       ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true }
       : null;
-  // Sticky (valid TTL) -> Priority -> Provider -> Key -> Models -> next Key ->
-  // next Provider, built from this request's own pool only. A pinned request is strict and never
-  // gets a priority phase.
+  // The Fallback Chain, built from this request's own pool only: the remembered
+  // target first (in the modes that remember one), then the operator's
+  // configured order — or the automatic health-based order when the chain is
+  // empty or the mode asks for it. A pinned request is strict and walks its
+  // targets in key order with no chain, no automatic order and no memory.
   const routePlan = buildRoutePlan({
     targets: selection.selected,
-    requestedModel,
-    priority: pinned.pinned ? [] : (config.priority?.[pool] ?? []),
-    // Manual selection leads the plan; a pinned request is strict and ignores it.
-    manual: pinned.pinned ? [] : manualSelection.get(pool),
-    // Sticky is a first phase, only while its TTL is valid; a pin is strict.
+    chain: fallbackChain.get(pool),
+    mode: fallbackChain.mode,
+    pinned: pinned.pinned,
+    health: pinned.pinned ? null : healthRegistry,
+    cacheKey: `pool:${pool}`,
     stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
   });
 
@@ -660,6 +682,10 @@ async function proxy(req, res, protocol, pathname) {
       pinned.pinned ? pinnedHealth : healthRegistry,
       {
         plan: routePlan.steps,
+        // Fixed Order never remembers a success: every request starts at the
+        // chain's first target, which is what makes the mode (and its Reset)
+        // mean what it says. A pin is equally stateless.
+        remember: !pinned.pinned && remembersSuccess(fallbackChain.mode),
         // A skipped target never reaches the network, but it is still shown
         // in the timeline so the walk is explained, not guessed at.
         onSkip: (target, { phase, reason }) => {
@@ -864,11 +890,40 @@ async function proxy(req, res, protocol, pathname) {
 
 const handleApi = createApi({
   config,
-  manualSelection,
+  fallbackChain,
   targets,
   health: healthRegistry,
   requestLog,
   monitor,
+  // Reset Fallback clears what the router REMEMBERS, never what it was told:
+  // the saved chain, the providers, the keys, the health measurements and any
+  // genuine cooldown are all left exactly as they are.
+  resetFallbackState: () => {
+    const cleared = sessions.values().filter((entry) => {
+      const had = Boolean(entry?.session?.targetId);
+      entry?.session?.clear?.();
+      return had;
+    }).length;
+    resetAutomaticOrderCache();
+    return { clearedSessions: cleared, sessions: sessions.size };
+  },
+  // What is remembered right now, per pool. Read as the router reads it, so an
+  // expired target is reported as absent rather than as still preferred.
+  describeFallbackState: () => {
+    const remembered = [];
+    for (const entry of sessions.values()) {
+      const targetId = entry?.session?.validTargetId?.() ?? null;
+      if (!targetId) continue;
+      remembered.push({ sessionId: entry.id, protocol: entry.protocol, pool: entry.pool, targetId });
+    }
+    return {
+      sessions: sessions.size,
+      remembered: {
+        text: remembered.filter((item) => (item.pool ?? "text") === "text"),
+        vision: remembered.filter((item) => item.pool === "vision")
+      }
+    };
+  },
   refreshHealth: () => refreshAllHealth(targets, trackedCheckTargetHealth)
 });
 
@@ -919,9 +974,14 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === "GET" && pathname === "/health") {
-    // Deterministic route order (priority, then Provider -> Key -> Models), not a
-    // health-score sort; cooling targets are excluded exactly as routing skips them.
-    const ranked = routeOrderByPool(targets, config.priority, (target) => healthRegistry.isAvailable(target), manualSelection.snapshot()).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
+    // The real route order the Fallback Chain produces, not a health-score sort;
+    // cooling targets are excluded exactly as routing skips them.
+    const ranked = routeOrderByPool(targets, {
+      chains: fallbackChain.snapshot(),
+      mode: fallbackChain.mode,
+      health: healthRegistry,
+      isEligible: (target) => healthRegistry.isAvailable(target)
+    }).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
     const health = describeHealth(targets);
     const inPool = (pool) => health.filter((entry) => entry.pool === pool);
     return json(res, 200, {
@@ -938,6 +998,17 @@ async function handleRequest(req, res) {
         vision: { targets: visionTargets.length, health: inPool("vision") }
       },
       rankedTargets: ranked,
+      // Which ordering the router is actually using right now, and how many
+      // entries each pool's chain holds. A chain of zero entries in every pool
+      // means the automatic health-based order is in force.
+      fallback: {
+        mode: fallbackChain.mode,
+        remembersSuccess: remembersSuccess(fallbackChain.mode),
+        chains: {
+          text: fallbackChain.get("text").length,
+          vision: fallbackChain.get("vision").length
+        }
+      },
       retryableStatus: [...config.retryableStatus]
     });
   }

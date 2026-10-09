@@ -36,6 +36,13 @@ export class HealthRegistry {
   constructor({ cooldownMs = DEFAULT_COOLDOWN_MS } = {}) {
     this.cooldownMs = cooldownMs;
     this.states = new Map();
+    /**
+     * Bumped on every accepted health observation. The automatic fallback order
+     * is derived from health, so it is cached against this counter rather than
+     * recomputed per request: the order can only change when this changes (or
+     * when a cooldown lapses, which the caller checks separately).
+     */
+    this.version = 0;
   }
 
   key(target) {
@@ -58,6 +65,21 @@ export class HealthRegistry {
         failures: 0,
         consecutiveFailures: 0,
         latencyMs: null,
+        /**
+         * Latency, split by where it was measured, because the two answer
+         * different questions and the automatic fallback order prefers the one
+         * that reflects real traffic:
+         *
+         *   requestLatencyMs  a real generation request, timed end to end
+         *   probeLatencyMs    a health probe against the provider's model list
+         *
+         * `latencyMs` remains the most recent observation of either, which is
+         * what the panels have always displayed. Routing reads the split.
+         */
+        requestLatencyMs: null,
+        requestLatencyAt: null,
+        probeLatencyMs: null,
+        probeLatencyAt: null,
         lastStatus: null,
         lastReason: null,
         /**
@@ -161,12 +183,13 @@ export class HealthRegistry {
 
   markSuccess(
     target,
-    { latencyMs = null, status = 200, reason = null } = {},
+    { latencyMs = null, status = 200, reason = null, source = "request" } = {},
     now = Date.now()
   ) {
     const state = this.ensureTarget(target);
     if (!this.acceptObservation(state, now)) return state;
 
+    this.version += 1;
     state.status = HEALTH_STATES.HEALTHY;
     state.score = Math.min(100, state.score * 0.75 + 25);
     state.cooldownUntil = 0;
@@ -176,6 +199,16 @@ export class HealthRegistry {
     state.lastStatus = Number.isInteger(status) ? status : 200;
     state.lastReason = reason;
     state.latencyMs = Number.isFinite(latencyMs) ? latencyMs : state.latencyMs;
+    if (Number.isFinite(latencyMs)) {
+      const at = new Date(now).toISOString();
+      if (source === "probe") {
+        state.probeLatencyMs = latencyMs;
+        state.probeLatencyAt = at;
+      } else {
+        state.requestLatencyMs = latencyMs;
+        state.requestLatencyAt = at;
+      }
+    }
     state.updatedAt = new Date(now).toISOString();
     return state;
   }
@@ -189,6 +222,7 @@ export class HealthRegistry {
     const state = this.ensureTarget(target);
     if (!this.acceptObservation(state, now)) return state;
 
+    this.version += 1;
     state.status = HEALTH_STATES.FAILED;
     state.score = Math.max(0, state.score * 0.7 - 10);
     state.cooldownUntil = now + cooldownMs;

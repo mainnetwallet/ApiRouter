@@ -243,8 +243,9 @@ export default function RouterControl() {
                 </div>
               </div>
               <p className="tiny dim" style={{ marginTop: "var(--sp-2)" }}>
-                Pass a sticky target id to see the sticky phase: it is tried first (20-minute TTL),
-                then priority and the normal fallback, which are never reordered.
+                Pass a remembered target id to see the sticky phase: in the modes that remember one it is
+                tried first (20-minute TTL), and the Fallback Chain then resumes in its saved order, which is
+                never reordered by health or latency.
               </p>
             </div>
           </div>

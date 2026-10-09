@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
-import { routeOrderByPool } from "./routing-plan.js";
-import { MANUAL_POOLS } from "./manual-selection.js";
+import { routeOrderByPool } from "./fallback-plan.js";
+import {
+  FALLBACK_MODE_INFO,
+  FALLBACK_MODES,
+  FALLBACK_POOLS,
+  normalizeEntries,
+  normalizeMode,
+  remembersSuccess
+} from "./fallback-chain.js";
 import { readJsonBody } from "./adapters.js";
 import { describeConfig, describeEnvironment } from "./observability/config-view.js";
 import { describeRouting } from "./observability/router-preview.js";
@@ -93,7 +100,17 @@ function fail(req, res, status, message, type, details = null) {
 const MAX_LIVE_STREAMS = 50;
 const STREAM_HEARTBEAT_MS = 15_000;
 
-export function createApi({ config, targets, health, requestLog, monitor, refreshHealth, manualSelection = null }) {
+export function createApi({
+  config,
+  targets,
+  health,
+  requestLog,
+  monitor,
+  refreshHealth,
+  fallbackChain = null,
+  resetFallbackState = null,
+  describeFallbackState = null
+}) {
   const liveStreams = new Set();
 
   /**
@@ -152,12 +169,24 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
 
   const describeAll = (now = Date.now()) => health.describe(targets, now);
 
+  // The chain store is the single source of truth for order and mode. These two
+  // read it defensively so the API module stays usable when it is constructed
+  // without one (a test harness, or a future embedder).
+  const fallbackSnapshot = () => (fallbackChain ? { text: fallbackChain.get("text"), vision: fallbackChain.get("vision") } : {});
+  const fallbackMode = () => fallbackChain?.mode ?? FALLBACK_MODES.FIXED;
+
   // --- /api/health -------------------------------------------------------
   function healthPayload(now = Date.now()) {
     const entries = describeAll(now);
-    // The real route order per pool (priority first, then Provider -> Key ->
-    // Models); health only removes cooling targets. Not a health-score sort.
-    const ranked = routeOrderByPool(targets, config.priority, (target) => health.isAvailable(target, now), manualSelection?.snapshot?.() ?? {});
+    // The real route order per pool, exactly as the Fallback Chain produces it;
+    // health only removes cooling targets. Not a health-score sort.
+    const ranked = routeOrderByPool(targets, {
+      chains: fallbackSnapshot(),
+      mode: fallbackMode(),
+      health,
+      now,
+      isEligible: (target) => health.isAvailable(target, now)
+    });
 
     // Text and vision are reported separately as well as together. The combined
     // rollup answers "how is this provider doing overall"; the per-pool figures
@@ -282,20 +311,92 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     };
   }
 
-  // --- /api/manual-selection ---------------------------------------------
-  /** Saved selections plus the selectable provider/model pairs per pool. Ids only. */
-  function manualSelectionPayload() {
-    const available = { text: [], vision: [] };
-    const seen = new Set();
-    for (const target of targets) {
-      const pool = target.pool ?? "text";
-      if (!available[pool]) continue;
-      const id = `${pool}/${target.provider}/${target.model}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      available[pool].push({ provider: target.provider, model: target.model });
+  // --- /api/fallback -----------------------------------------------------
+  /**
+   * Everything the Fallback Configuration page needs, in one payload: the saved
+   * chain per pool, the selected mode, and the catalogue of models that can be
+   * added — each with its per-key health and its measured latency.
+   *
+   * Latency is reported WITH its source (`request` = a real generation, `probe`
+   * = a health probe, `null` = never measured). The panel must be able to say
+   * "not measured yet" rather than show a number the router does not have.
+   */
+  function fallbackPayload(now = Date.now()) {
+    const health = describeAll(now);
+    const byPool = { text: [], vision: [] };
+    const index = new Map();
+
+    for (const entry of health) {
+      const pool = entry.pool ?? "text";
+      if (!byPool[pool]) continue;
+      const id = `${pool}/${entry.provider}/${entry.model}`;
+      let group = index.get(id);
+      if (!group) {
+        group = { id, provider: entry.provider, model: entry.model, pool, keyStates: [], protocols: [] };
+        index.set(id, group);
+        byPool[pool].push(group);
+      }
+      // Every key of one model in one pool serves the same protocols; the union
+      // is taken anyway so a partially configured provider cannot understate it.
+      for (const protocol of entry.protocols ?? []) {
+        if (!group.protocols.includes(protocol)) group.protocols.push(protocol);
+      }
+      const available = !(Number(entry.cooldownUntil) > now);
+      group.keyStates.push({
+        id: entry.id,
+        keyIndex: entry.keyIndex,
+        status: available ? entry.status : "cooldown",
+        score: entry.score,
+        available,
+        cooldownUntil: entry.cooldownUntil,
+        latencyMs: entry.latencyMs,
+        requestLatencyMs: entry.requestLatencyMs ?? null,
+        probeLatencyMs: entry.probeLatencyMs ?? null,
+        lastStatus: entry.lastStatus,
+        modelListed: entry.modelListedConfirmed ?? null
+      });
+      if (!group.protocols.includes) group.protocols = [...(entry.protocols ?? [])];
     }
-    return { selection: manualSelection.snapshot(), available };
+
+    for (const pool of FALLBACK_POOLS) {
+      for (const group of byPool[pool] ?? []) {
+        group.keyStates.sort((a, b) => a.keyIndex - b.keyIndex);
+        // The key indexes this model actually has, which is what an entry's own
+        // `keys` narrows. Kept separate from `keyStates` so an entry's saved
+        // subset can never be confused with the provider's key inventory.
+        group.keyIndexes = group.keyStates.map((key) => key.keyIndex);
+        const measured = group.keyStates.find((key) => Number.isFinite(key.requestLatencyMs));
+        const probed = group.keyStates.find((key) => Number.isFinite(key.probeLatencyMs));
+        group.measuredLatencyMs = measured?.requestLatencyMs ?? null;
+        group.probeLatencyMs = probed?.probeLatencyMs ?? null;
+        // The number routing actually orders by, and where it came from.
+        group.latencyMs = group.measuredLatencyMs ?? group.probeLatencyMs;
+        group.latencySource = group.measuredLatencyMs !== null ? "request" : group.probeLatencyMs !== null ? "probe" : null;
+        group.available = group.keyStates.some((key) => key.available);
+        group.status = rollupStatus(group.keyStates);
+      }
+    }
+
+    return {
+      mode: fallbackMode(),
+      remembersSuccess: remembersSuccess(fallbackMode()),
+      modes: FALLBACK_MODE_INFO,
+      chain: { text: fallbackChain?.get?.("text") ?? [], vision: fallbackChain?.get?.("vision") ?? [] },
+      catalogue: byPool,
+      pools: FALLBACK_POOLS,
+      poolsSeparate: true,
+      // What the router is currently remembering, so the panel can show it and
+      // Reset Fallback can be seen to have worked rather than merely claimed.
+      remembered: typeof describeFallbackState === "function" ? describeFallbackState() : null
+    };
+  }
+
+  /** One status for a model, from its keys. Cooling keys are never reported healthy. */
+  function rollupStatus(keys) {
+    if (keys.some((key) => key.available && key.status === "healthy")) return "healthy";
+    if (keys.every((key) => !key.available)) return "cooldown";
+    if (keys.some((key) => key.status === "failed")) return "failed";
+    return "unknown";
   }
 
   // --- /api/router/preview -----------------------------------------------
@@ -353,11 +454,12 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       protocols: [...supported].sort(),
       ...describeRouting({
         targets: poolTargets,
-        config,
         health,
         protocol,
         pool,
-        manual: manualSelection?.get?.(pool) ?? [],
+        chain: fallbackChain?.get?.(pool) ?? [],
+        mode: fallbackMode(),
+        retryableStatus: config.retryableStatus,
         model: (searchParams.get("model") || "").trim(),
         stickyTargetId: (searchParams.get("session") || "").trim() || null, // observability text only
         now
@@ -468,30 +570,75 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
       return sendJson(req, res, 200, modelsPayload(now));
     }
 
-    if (pathname === "/api/manual-selection" && manualSelection) {
-      if (req.method === "GET") return sendJson(req, res, 200, manualSelectionPayload());
+    if (pathname === "/api/fallback" && fallbackChain) {
+      if (req.method === "GET") return sendJson(req, res, 200, fallbackPayload(now));
+
       if (req.method === "PUT") {
         let body;
         try { body = await readJsonBody(req, config.maxBodyBytes); }
         catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
-        const pool = String(body?.pool ?? "").trim().toLowerCase();
-        if (!MANUAL_POOLS.includes(pool)) return fail(req, res, 400, `unknown pool "${pool}"`, "invalid_request", { pools: MANUAL_POOLS });
-        if (!Array.isArray(body?.models)) return fail(req, res, 400, "models must be an array", "invalid_request");
-        // Only configured provider/model pairs of this pool can be saved.
-        const known = new Set(targets.filter((t) => (t.pool ?? "text") === pool).map((t) => `${t.provider}/${t.model}`));
-        const unknown = body.models.filter((m) => !known.has(`${String(m?.provider ?? "").trim().toLowerCase()}/${String(m?.model ?? "").trim()}`));
-        if (unknown.length > 0) return fail(req, res, 400, "models contains entries that are not configured for this pool", "invalid_request");
-        try { manualSelection.set(pool, body.models); }
-        catch { return fail(req, res, 500, "Could not save the manual selection", "server_error"); }
-        return sendJson(req, res, 200, manualSelectionPayload());
+
+        // The mode is its own setting and can be saved on its own, so the panel
+        // does not have to post a whole chain just to flip a switch.
+        if (body?.mode !== undefined) {
+          const mode = normalizeMode(body.mode);
+          if (body.mode !== null && String(body.mode).trim() !== "" && mode !== String(body.mode).trim().toLowerCase()) {
+            return fail(req, res, 400, `unknown mode "${body.mode}"`, "invalid_request", { modes: FALLBACK_MODES });
+          }
+          try { fallbackChain.setMode(mode); }
+          catch { return fail(req, res, 500, "Could not save the fallback mode", "server_error"); }
+          if (body?.pool === undefined) return sendJson(req, res, 200, fallbackPayload(now));
+        }
+
+        if (body?.pool !== undefined) {
+          const pool = String(body.pool ?? "").trim().toLowerCase();
+          if (!FALLBACK_POOLS.includes(pool)) {
+            return fail(req, res, 400, `unknown pool "${pool}"`, "invalid_request", { pools: FALLBACK_POOLS });
+          }
+          if (!Array.isArray(body?.entries)) return fail(req, res, 400, "entries must be an array", "invalid_request");
+
+          const entries = normalizeEntries(body.entries);
+          // Reject only what cannot be routed at all: an entry naming a model
+          // that is not configured in this pool. This is what stops the UI from
+          // saving a vision model into the text chain.
+          const known = new Set(
+            targets.filter((target) => (target.pool ?? "text") === pool).map((target) => `${target.provider}/${target.model}`)
+          );
+          const unknown = entries.filter((entry) => !known.has(`${entry.provider}/${entry.model}`));
+          if (unknown.length > 0) {
+            return fail(
+              req, res, 400,
+              "entries contains models that are not configured for this pool",
+              "invalid_request",
+              { pool, unknown: unknown.map((entry) => `${entry.provider}/${entry.model}`) }
+            );
+          }
+
+          try { fallbackChain.set(pool, entries); }
+          catch { return fail(req, res, 500, "Could not save the fallback chain", "server_error"); }
+          return sendJson(req, res, 200, fallbackPayload(now));
+        }
+
+        return fail(req, res, 400, "a pool or a mode is required", "invalid_request");
       }
-      if (req.method === "DELETE") {
-        const pool = (searchParams.get("pool") || "").trim().toLowerCase();
-        if (!MANUAL_POOLS.includes(pool)) return fail(req, res, 400, `unknown pool "${pool}"`, "invalid_request", { pools: MANUAL_POOLS });
-        try { manualSelection.clear(pool); }
-        catch { return fail(req, res, 500, "Could not clear the manual selection", "server_error"); }
-        return sendJson(req, res, 200, manualSelectionPayload());
+    }
+
+    if (pathname === "/api/fallback/reset" && req.method === "POST" && fallbackChain) {
+      // Reset clears what the router REMEMBERS. It must not touch the saved
+      // chain, the mode, the providers, the keys, the health measurements or a
+      // genuine cooldown — those are all still true after the button is pressed.
+      if (typeof resetFallbackState !== "function") {
+        return fail(req, res, 503, "Reset is not available in this process", "unavailable");
       }
+      let result;
+      try { result = resetFallbackState(); }
+      catch { return fail(req, res, 500, "Could not reset the fallback state", "server_error"); }
+      return sendJson(req, res, 200, {
+        ok: true,
+        message: "Remembered targets cleared. The next request starts from the first target of the active chain.",
+        reset: result,
+        ...fallbackPayload(now)
+      });
     }
 
     if (pathname === "/api/router/preview" && req.method === "GET") {

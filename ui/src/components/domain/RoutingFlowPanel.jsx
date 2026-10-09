@@ -69,7 +69,7 @@ export function RoutingFlowPanel({ ranked = [] }) {
                     </div>
                   ) : null}
 
-                  {step.key === "priority" || step.key === "select" ? (
+                  {step.key === "chain" || step.key === "auto" ? (
                     <div className="flow__detail">{step.detail}</div>
                   ) : null}
 

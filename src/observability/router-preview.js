@@ -1,5 +1,6 @@
 import { selectTargetsForProtocol } from "./route-select.js";
-import { buildRoutePlan, effectiveOrder } from "../routing-plan.js";
+import { buildRoutePlan, effectiveOrder } from "../fallback-plan.js";
+import { FALLBACK_MODES, fallbackModeLabel } from "../fallback-chain.js";
 
 /** Client protocols whose requests can be bridged to a non-native provider. */
 const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses", "gemini"]);
@@ -43,17 +44,38 @@ function describeCandidate(target, health, { rank = null, available, status, pha
   };
 }
 
-export function describeRouting({ targets = [], config, health, protocol, model = "", stickyTargetId = null, now = Date.now(), pool = "text", manual = [] } = {}) {
+export function describeRouting({
+  targets = [],
+  health,
+  protocol,
+  model = "",
+  stickyTargetId = null,
+  now = Date.now(),
+  pool = "text",
+  chain = [],
+  mode = FALLBACK_MODES.FIXED,
+  retryableStatus = []
+} = {}) {
   const selection = selectTargetsForProtocol(targets, protocol, model);
   const { compatible, exact, selected, modelMatched } = selection;
   const bridged = BRIDGED_PROTOCOLS.has(protocol);
   const poolLabel = pool === "vision" ? "VISION" : "TEXT";
 
-  // The same plan the proxy walks: priority targets first (env order), then
-  // Provider -> Key -> Models. Health only decides eligibility here, exactly as
-  // it does when the plan is walked; it never reorders the plan.
-  const priority = config?.priority?.[pool] ?? [];
-  const plan = buildRoutePlan({ targets: selected, requestedModel: model, priority, manual, stickyTargetId });
+  // The same plan the proxy walks: the operator's Fallback Chain, or the
+  // automatic health-based order when the chain is empty or the mode asks for
+  // it, preceded by the remembered target in the modes that remember one.
+  // Health decides eligibility here exactly as it does on the live path; it
+  // never reorders a configured chain.
+  const plan = buildRoutePlan({
+    targets: selected,
+    chain,
+    mode,
+    stickyTargetId,
+    health,
+    now,
+    cacheKey: `preview:${pool}`
+  });
+  const automatic = plan.source === "auto";
   const eligible = selected.filter((target) => health.isAvailable(target, now));
   const rankedIds = new Set(eligible.map((target) => health.key(target)));
   const ranked = eligible;
@@ -153,24 +175,24 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     {
       key: "ranking",
       label: "Route order",
-      detail: plan.manualCount > 0
-        ? `${plan.manualCount} manually selected model(s) first, in saved order (every eligible key of a model before the next); then ${plan.priorityCount} priority model(s), then Provider -> Key -> Models. Sticky only reorders inside the manual selection`
-        : plan.priorityCount > 0
-        ? `${plan.priorityCount} priority target(s) first, in TEXT_/VISION_PRIORITY_MODELS order; then Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets`
-        : "no priority configured; Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets",
+      detail: automatic
+        ? plan.configured > 0
+          ? `Automatic Health-Based Fallback: the ${plan.configured} configured model(s) are ordered by measured health and latency (lower measured latency first; unmeasured models keep a stable configured order). Every eligible key of a model is tried before the next model`
+          : "no fallback chain is configured, so the automatic health-based order applies: healthy models with lower measured latency first, unmeasured models in a stable configured order. Every eligible key of a model is tried before the next model"
+        : `${plan.configured} configured model(s), in the saved Fallback Chain order; every eligible key of a model is tried before the next model. Health only skips cooling targets`,
       count: ranked.length,
       state: "info"
     },
     {
-      key: "sticky",
-      label: "Session preference",
-      detail: plan.manualCount > 0
-        ? "manual selection is active and leads in its saved order; a valid sticky target inside it is tried first"
+      key: "remembered",
+      label: "Remembered target",
+      detail: mode === FALLBACK_MODES.FIXED
+        ? `Fixed Order: every request starts at the first model of the chain and its first eligible key. Nothing is remembered (mode: ${fallbackModeLabel(mode)})`
         : plan.sticky
-        ? "valid sticky target (20-minute TTL) is the first phase; priority and normal fallback follow unchanged"
-        : stickyTargetId
-          ? "the given sticky target does not apply to this request (other pool, not reachable, or a different explicit model)"
-          : "no valid sticky target; routing starts at priority, then normal fallback",
+          ? `the target that last answered (20-minute TTL) is tried first, then the chain resumes in its saved order (mode: ${fallbackModeLabel(mode)})`
+          : stickyTargetId
+            ? "the given target is not part of this request's chain, pool or protocol, so it is ignored"
+            : `nothing remembered for this session yet, so the chain starts at its first model (mode: ${fallbackModeLabel(mode)})`,
       state: "info"
     },
     {
@@ -195,11 +217,20 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     requestedModel: selection.requestedModel,
     modelMatched,
     targetIdentity: "provider + model + keyIndex",
-    priority: priority.map((entry) => ({ provider: entry.provider, model: entry.model })),
-    priorityTargets: plan.priorityCount,
-    manual: manual.map((entry) => ({ provider: entry.provider, model: entry.model })),
-    manualTargets: plan.manualCount,
-    retryableStatus: config ? [...config.retryableStatus].sort((a, b) => a - b) : [],
+    // The ordering actually in force, so the panel never has to guess between a
+    // configured chain and the automatic health-based order.
+    mode,
+    modeLabel: fallbackModeLabel(mode),
+    orderSource: plan.source,
+    automatic,
+    chain: (Array.isArray(chain) ? chain : []).map((entry) => ({
+      provider: entry.provider,
+      model: entry.model,
+      enabled: entry.enabled !== false,
+      keys: entry.keys ?? null
+    })),
+    chainTargets: plan.configured,
+    retryableStatus: Array.isArray(retryableStatus) ? [...retryableStatus].sort((a, b) => a - b) : [],
     stages,
     candidates,
     unavailable,

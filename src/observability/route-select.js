@@ -2,7 +2,6 @@ import { bridgeProtocol, selectBridgeTargets } from "../anthropic-bridge.js";
 import { codexProtocol, selectCodexTargets } from "../codex-bridge.js";
 import { chatProtocol, selectChatTargets } from "../chat-bridge.js";
 import { geminiProtocol, selectGeminiTargets } from "../gemini-bridge.js";
-import { targetId } from "../health.js";
 
 export function selectRouteTargets(targets, protocol, requestedModel) {
   const all = Array.isArray(targets) ? targets : [];
@@ -85,64 +84,4 @@ export function servableProtocols(targets) {
   if (all.some((target) => chatProtocol(target))) protocols.add("openai-chat");
   if (all.some((target) => geminiProtocol(target))) protocols.add("gemini");
   return protocols;
-}
-
-/**
- * The groups the router walks, in order.
- *
- * Every selector returns the requested model's targets first and the remaining
- * reachable targets after them (`selected = [...exact, ...rest]`). That split
- * has to survive ranking: a health score decides the order *within* a group,
- * but it may never promote a different-model fallback ahead of an exact match
- * the client asked for and that is still available. Sticky sessions are scoped
- * to a group for the same reason.
- *
- * `withFallback` walks these groups and `/api/router/preview` renders them, so
- * the panel cannot show an order the proxy would not use.
- */
-export function fallbackGroups(selection) {
-  const selected = Array.isArray(selection?.selected) ? selection.selected : [];
-  if (selected.length === 0) return [];
-
-  const exact = Array.isArray(selection?.exact) ? selection.exact : [];
-  if (exact.length === 0) return [selected];
-
-  const exactIds = new Set(exact.map(targetId));
-  const primary = selected.filter((target) => exactIds.has(targetId(target)));
-  // A selector that disagrees with the contract above still routes; it just
-  // routes as one undivided group rather than silently dropping targets.
-  if (primary.length === 0) return [selected];
-
-  const rest = selected.filter((target) => !exactIds.has(targetId(target)));
-  return rest.length > 0 ? [primary, rest] : [primary];
-}
-
-export function planFallbackOrder(ranked, health, stickyTargetId = null) {
-  if (ranked.length === 0) return [];
-  if (!stickyTargetId) return ranked;
-  const preferredIndex = ranked.findIndex((target) => health.key(target) === stickyTargetId);
-  if (preferredIndex <= 0) return ranked;
-  const preferred = ranked[preferredIndex];
-  return [preferred, ...ranked.filter((_, index) => index !== preferredIndex)];
-}
-
-/**
- * The full order `withFallback` will walk, across every group: each group is
- * ranked and sticky-preferenced on its own, then the groups are concatenated.
- */
-export function planFallbackGroups(groups, health, stickyTargetId = null, now = Date.now()) {
-  const order = [];
-  const seen = new Set();
-
-  for (const group of Array.isArray(groups) ? groups : []) {
-    const ranked = health.rank(group, now);
-    for (const target of planFallbackOrder(ranked, health, stickyTargetId)) {
-      const id = health.key(target);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      order.push(target);
-    }
-  }
-
-  return order;
 }

@@ -100,12 +100,16 @@ export function describeConfig(config, targets = []) {
     },
     routing: {
       retryableStatus: [...config.retryableStatus].sort((a, b) => a - b),
-      strategy: "health-ranked with sticky session and automatic fallback",
+      strategy: "single Fallback Chain per pool, with optional remembered success",
       targetIdentity: "provider + model + keyIndex",
-      exactModelPreferred: true,
+      exactModelPreferred: false,
       // The two pools are routed independently; a request never crosses over.
       pools: ["text", "vision"],
-      crossPoolFallback: "blocked"
+      crossPoolFallback: "blocked",
+      // Where the order comes from. The strategy itself is not environment
+      // configuration any more, so it is reported by /api/fallback.
+      orderSource: "fallback-chain",
+      chainFile: config.fallbackChainFile
     },
     providers,
     // Image requests use this separate pool (own keys, base URLs and models).
@@ -157,9 +161,15 @@ export function describeEnvironment(config) {
       { name: "PORT", configured: true, kind: "number" },
       { name: "REQUEST_TIMEOUT_MS", configured: true, kind: "number" },
       { name: "RETRY_STATUS_CODES", configured: true, kind: "list" },
-      { name: "TEXT_PRIORITY_MODELS", configured: config.priority?.text?.length > 0, kind: "list" },
-      { name: "VISION_PRIORITY_MODELS", configured: config.priority?.vision?.length > 0, kind: "list" },
       { name: "APIROUTER_API_KEYS", configured: config.routerApiKeys.length > 0, kind: "secret" }
+    ],
+    // Routing order is configuration now, not environment: it lives in the
+    // Fallback Chain, which the control panel owns. Listed here so an operator
+    // can see exactly which legacy variables are read no more.
+    legacy: [
+      { name: "TEXT_PRIORITY_MODELS", configured: false, kind: "list", note: "removed — use the Fallback Chain" },
+      { name: "VISION_PRIORITY_MODELS", configured: false, kind: "list", note: "removed — use the Fallback Chain" },
+      { name: "MANUAL_SELECTION_FILE", configured: false, kind: "text", note: "read once, to seed the Fallback Chain" }
     ],
     providers: providerVars,
     visionProviders: visionProviderVars
