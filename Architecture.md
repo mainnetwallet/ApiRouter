@@ -97,6 +97,30 @@ Sticky is a separate leading phase. It never edits the normal fallback list.
 - Fallback is strictly sequential, with no cap on the number of attempts other
   than the plan itself.
 
+## Manual Model Selection
+
+Operators can pick an ordered list of provider/model entries per pool (Text and
+Vision are separate) on the **Manual Selection** page. The list is stored by the
+backend (`data/manual-selection.json`, override with `MANUAL_SELECTION_FILE`;
+ids only, never keys) and read by the existing planner in `src/routing-plan.js`
+as a leading `manual` phase:
+
+```text
+MANUAL (UI order)  ->  PRIORITY (env)  ->  NORMAL fallback
+```
+
+- Each selected entry is one provider/model group: every eligible key is tried
+  in key order before the walk advances to the next selected model; the first
+  success stops the walk. Cooling targets are skipped as usual.
+- After all manual candidates fail the existing priority and normal fallback
+  continue (targets already tried are skipped).
+- Empty list = no manual phase and unchanged routing. While a manual list is
+  active it leads in its exact order, so the sticky target is not placed ahead
+  of it (sticky works as before when manual selection is empty). Pinned
+  requests stay strict and ignore it.
+- API: `GET/PUT /api/manual-selection`, `DELETE /api/manual-selection?pool=`.
+  `/api/router/preview` shows the real order (phase `manual`).
+
 ## Supported Endpoints
 
 | Method | Endpoint | Protocol |

@@ -43,7 +43,7 @@ function describeCandidate(target, health, { rank = null, available, status, pha
   };
 }
 
-export function describeRouting({ targets = [], config, health, protocol, model = "", stickyTargetId = null, now = Date.now(), pool = "text" } = {}) {
+export function describeRouting({ targets = [], config, health, protocol, model = "", stickyTargetId = null, now = Date.now(), pool = "text", manual = [] } = {}) {
   const selection = selectTargetsForProtocol(targets, protocol, model);
   const { compatible, exact, selected, modelMatched } = selection;
   const bridged = BRIDGED_PROTOCOLS.has(protocol);
@@ -53,7 +53,7 @@ export function describeRouting({ targets = [], config, health, protocol, model 
   // Provider -> Key -> Models. Health only decides eligibility here, exactly as
   // it does when the plan is walked; it never reorders the plan.
   const priority = config?.priority?.[pool] ?? [];
-  const plan = buildRoutePlan({ targets: selected, requestedModel: model, priority, stickyTargetId });
+  const plan = buildRoutePlan({ targets: selected, requestedModel: model, priority, manual, stickyTargetId });
   const eligible = selected.filter((target) => health.isAvailable(target, now));
   const rankedIds = new Set(eligible.map((target) => health.key(target)));
   const ranked = eligible;
@@ -153,7 +153,9 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     {
       key: "ranking",
       label: "Route order",
-      detail: plan.priorityCount > 0
+      detail: plan.manualCount > 0
+        ? `${plan.manualCount} manually selected model(s) first, in saved order (every eligible key of a model before the next); then ${plan.priorityCount} priority model(s), then Provider -> Key -> Models. Sticky is not applied while manual selection is active`
+        : plan.priorityCount > 0
         ? `${plan.priorityCount} priority target(s) first, in TEXT_/VISION_PRIORITY_MODELS order; then Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets`
         : "no priority configured; Provider -> Key -> Models in configured order (each key restarts at its first model). Health only skips cooling targets",
       count: ranked.length,
@@ -162,7 +164,9 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     {
       key: "sticky",
       label: "Session preference",
-      detail: plan.sticky
+      detail: plan.manualCount > 0
+        ? "manual selection is active, so it leads in its saved order and sticky is not applied"
+        : plan.sticky
         ? "valid sticky target (20-minute TTL) is the first phase; priority and normal fallback follow unchanged"
         : stickyTargetId
           ? "the given sticky target does not apply to this request (other pool, not reachable, or a different explicit model)"
@@ -193,6 +197,8 @@ export function describeRouting({ targets = [], config, health, protocol, model 
     targetIdentity: "provider + model + keyIndex",
     priority: priority.map((entry) => ({ provider: entry.provider, model: entry.model })),
     priorityTargets: plan.priorityCount,
+    manual: manual.map((entry) => ({ provider: entry.provider, model: entry.model })),
+    manualTargets: plan.manualCount,
     retryableStatus: config ? [...config.retryableStatus].sort((a, b) => a - b) : [],
     stages,
     candidates,

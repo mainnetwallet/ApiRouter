@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
 import { routeOrderByPool } from "./routing-plan.js";
+import { MANUAL_POOLS } from "./manual-selection.js";
+import { readJsonBody } from "./adapters.js";
 import { describeConfig, describeEnvironment } from "./observability/config-view.js";
 import { describeRouting } from "./observability/router-preview.js";
 import { servableProtocols } from "./observability/route-select.js";
@@ -91,7 +93,7 @@ function fail(req, res, status, message, type, details = null) {
 const MAX_LIVE_STREAMS = 50;
 const STREAM_HEARTBEAT_MS = 15_000;
 
-export function createApi({ config, targets, health, requestLog, monitor, refreshHealth }) {
+export function createApi({ config, targets, health, requestLog, monitor, refreshHealth, manualSelection = null }) {
   const liveStreams = new Set();
 
   /**
@@ -155,7 +157,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     const entries = describeAll(now);
     // The real route order per pool (priority first, then Provider -> Key ->
     // Models); health only removes cooling targets. Not a health-score sort.
-    const ranked = routeOrderByPool(targets, config.priority, (target) => health.isAvailable(target, now));
+    const ranked = routeOrderByPool(targets, config.priority, (target) => health.isAvailable(target, now), manualSelection?.snapshot?.() ?? {});
 
     // Text and vision are reported separately as well as together. The combined
     // rollup answers "how is this provider doing overall"; the per-pool figures
@@ -280,6 +282,22 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
     };
   }
 
+  // --- /api/manual-selection ---------------------------------------------
+  /** Saved selections plus the selectable provider/model pairs per pool. Ids only. */
+  function manualSelectionPayload() {
+    const available = { text: [], vision: [] };
+    const seen = new Set();
+    for (const target of targets) {
+      const pool = target.pool ?? "text";
+      if (!available[pool]) continue;
+      const id = `${pool}/${target.provider}/${target.model}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      available[pool].push({ provider: target.provider, model: target.model });
+    }
+    return { selection: manualSelection.snapshot(), available };
+  }
+
   // --- /api/router/preview -----------------------------------------------
   const POOLS = ["text", "vision"];
 
@@ -339,6 +357,7 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
         health,
         protocol,
         pool,
+        manual: manualSelection?.get?.(pool) ?? [],
         model: (searchParams.get("model") || "").trim(),
         stickyTargetId: (searchParams.get("session") || "").trim() || null, // observability text only
         now
@@ -447,6 +466,32 @@ export function createApi({ config, targets, health, requestLog, monitor, refres
 
     if (pathname === "/api/models" && req.method === "GET") {
       return sendJson(req, res, 200, modelsPayload(now));
+    }
+
+    if (pathname === "/api/manual-selection" && manualSelection) {
+      if (req.method === "GET") return sendJson(req, res, 200, manualSelectionPayload());
+      if (req.method === "PUT") {
+        let body;
+        try { body = await readJsonBody(req, config.maxBodyBytes); }
+        catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
+        const pool = String(body?.pool ?? "").trim().toLowerCase();
+        if (!MANUAL_POOLS.includes(pool)) return fail(req, res, 400, `unknown pool "${pool}"`, "invalid_request", { pools: MANUAL_POOLS });
+        if (!Array.isArray(body?.models)) return fail(req, res, 400, "models must be an array", "invalid_request");
+        // Only configured provider/model pairs of this pool can be saved.
+        const known = new Set(targets.filter((t) => (t.pool ?? "text") === pool).map((t) => `${t.provider}/${t.model}`));
+        const unknown = body.models.filter((m) => !known.has(`${String(m?.provider ?? "").trim().toLowerCase()}/${String(m?.model ?? "").trim()}`));
+        if (unknown.length > 0) return fail(req, res, 400, "models contains entries that are not configured for this pool", "invalid_request");
+        try { manualSelection.set(pool, body.models); }
+        catch { return fail(req, res, 500, "Could not save the manual selection", "server_error"); }
+        return sendJson(req, res, 200, manualSelectionPayload());
+      }
+      if (req.method === "DELETE") {
+        const pool = (searchParams.get("pool") || "").trim().toLowerCase();
+        if (!MANUAL_POOLS.includes(pool)) return fail(req, res, 400, `unknown pool "${pool}"`, "invalid_request", { pools: MANUAL_POOLS });
+        try { manualSelection.clear(pool); }
+        catch { return fail(req, res, 500, "Could not clear the manual selection", "server_error"); }
+        return sendJson(req, res, 200, manualSelectionPayload());
+      }
     }
 
     if (pathname === "/api/router/preview" && req.method === "GET") {

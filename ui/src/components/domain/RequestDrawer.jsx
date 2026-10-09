@@ -123,7 +123,7 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
                       <span className="chain__provider">{providerLabel(attempt.provider)}</span> / {attempt.model ?? EMPTY}
                     </div>
                     <div className="chain__meta">
-                      {attempt.phase ? <span>{attempt.phase === "sticky" ? "Sticky" : attempt.phase === "priority" ? "Priority" : "Normal fallback"}</span> : null}
+                      {attempt.phase ? <span>{attempt.phase === "manual" ? "Manual" : attempt.phase === "sticky" ? "Sticky" : attempt.phase === "priority" ? "Priority" : "Normal fallback"}</span> : null}
                       <span>key {attempt.keyIndex ?? "?"}</span>
                       {attempt.status ? <span>HTTP {attempt.status}</span> : null}
                       {Number.isFinite(attempt.latencyMs) ? <span>{formatLatency(attempt.latencyMs)}</span> : null}

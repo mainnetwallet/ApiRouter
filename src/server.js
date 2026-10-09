@@ -26,6 +26,7 @@ import { createSseUsageTap, createJsonUsageTap, tapBytes, tapEvents, usageFrom }
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, routeOrderByPool } from "./routing-plan.js";
+import { ManualSelectionStore } from "./manual-selection.js";
 import { selectPool } from "./vision.js";
 import {
   bridgeProtocol,
@@ -76,6 +77,8 @@ registerConfiguredSecrets([
   ...[config.providers, config.visionProviders].flatMap((group) => Object.values(group || {}).flatMap((p) => p?.apiKeys || [])),
   ...[config.providers, config.visionProviders].flatMap((group) => group?.cloudflare?.accountIds || [])
 ]);
+// Operator-selected manual models (ids only, persisted to disk, no secrets).
+const manualSelection = new ManualSelectionStore({ file: config.manualSelectionFile });
 const textTargets = buildTargets(config.providers);
 const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
 // Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
@@ -478,6 +481,8 @@ async function proxy(req, res, protocol, pathname) {
     targets: selection.selected,
     requestedModel,
     priority: pinned.pinned ? [] : (config.priority?.[pool] ?? []),
+    // Manual selection leads the plan; a pinned request is strict and ignores it.
+    manual: pinned.pinned ? [] : manualSelection.get(pool),
     // Sticky is a first phase, only while its TTL is valid; a pin is strict.
     stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
   });
@@ -853,6 +858,7 @@ async function proxy(req, res, protocol, pathname) {
 
 const handleApi = createApi({
   config,
+  manualSelection,
   targets,
   health: healthRegistry,
   requestLog,
@@ -909,7 +915,7 @@ async function handleRequest(req, res) {
   if (req.method === "GET" && pathname === "/health") {
     // Deterministic route order (priority, then Provider -> Key -> Models), not a
     // health-score sort; cooling targets are excluded exactly as routing skips them.
-    const ranked = routeOrderByPool(targets, config.priority, (target) => healthRegistry.isAvailable(target)).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
+    const ranked = routeOrderByPool(targets, config.priority, (target) => healthRegistry.isAvailable(target), manualSelection.snapshot()).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
     const health = describeHealth(targets);
     const inPool = (pool) => health.filter((entry) => entry.pool === pool);
     return json(res, 200, {

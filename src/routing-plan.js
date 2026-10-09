@@ -9,6 +9,8 @@ import { targetId } from "./health.js";
  * vision targets. Nothing here looks at health: eligibility (cooldown) is
  * applied while the plan is walked, against the one shared HealthRegistry.
  *
+ *   MANUAL phase     operator-selected models (UI), exact saved order, optional; when
+ *                    present it leads everything and sticky is not applied
  *   PRIORITY phase   TEXT_/VISION_PRIORITY_MODELS entries, in exactly the configured order
  *   FALLBACK phase   Provider -> Key -> Models (config order) -> next Key
  *                    -> next Provider. Each key restarts at its own first model.
@@ -34,7 +36,7 @@ import { targetId } from "./health.js";
  * record, which keeps the skip visible in the request timeline.
  */
 
-export const PHASES = Object.freeze({ STICKY: "sticky", PRIORITY: "priority", FALLBACK: "fallback" });
+export const PHASES = Object.freeze({ MANUAL: "manual", STICKY: "sticky", PRIORITY: "priority", FALLBACK: "fallback" });
 
 /**
  * Parses "gemini/G1,groq/GR2". The model keeps everything after the FIRST "/",
@@ -157,7 +159,7 @@ export function resolvePriorityTargets(targets, priority = []) {
  * Its later appearance in the priority/normal phases is skipped by the walker
  * as already attempted; the normal list itself is never reordered.
  */
-export function buildRoutePlan({ targets = [], requestedModel = "", priority = [], stickyTargetId = null } = {}) {
+export function buildRoutePlan({ targets = [], requestedModel = "", priority = [], manual = [], stickyTargetId = null } = {}) {
   const all = Array.isArray(targets) ? targets : [];
   const named = typeof requestedModel === "string" ? requestedModel : "";
   // An explicit model the pool actually serves is the client's choice: neither
@@ -168,8 +170,16 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
     .filter(({ target }) => !modelConfigured || target.model === named);
   const normal = buildHierarchicalOrder(all, requestedModel);
 
+  // Manual selection: each entry is one provider/model group, every eligible key
+  // in key order, entries in saved order. It deliberately ignores the client's
+  // requested model (the operator's explicit order wins) and leads the plan, so
+  // sticky is not applied while it is active. Later appearances of the same
+  // targets in priority/normal are skipped by the walker as already attempted.
+  const manualEntries = resolvePriorityTargets(all, manual);
+  const manualActive = manualEntries.length > 0;
+
   let sticky = null;
-  if (stickyTargetId) {
+  if (stickyTargetId && !manualActive) {
     const candidate = all.find((target) => targetId(target) === stickyTargetId) ?? null;
     if (candidate && (!modelConfigured || candidate.model === named)) sticky = candidate;
   }
@@ -200,6 +210,7 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
   const priorityPhase = priorityEntries.filter(({ group }) => groupOrder.indexOf(group) >= resumeAt);
 
   const steps = [
+    ...manualEntries.map(({ target, group }) => ({ target, phase: PHASES.MANUAL, group })),
     ...(sticky ? [{ target: sticky, phase: PHASES.STICKY }] : []),
     // Labelled for what they are in the timeline: the other keys of a configured
     // priority entry are priority attempts; for any other sticky model they are
@@ -213,7 +224,12 @@ export function buildRoutePlan({ targets = [], requestedModel = "", priority = [
     ...priorityPhase.map(({ target, group }) => ({ target, phase: PHASES.PRIORITY, group })),
     ...normal.map((target) => ({ target, phase: PHASES.FALLBACK }))
   ];
-  return { steps, priorityCount: new Set(priorityEntries.map((entry) => entry.group)).size, sticky };
+  return {
+    steps,
+    priorityCount: new Set(priorityEntries.map((entry) => entry.group)).size,
+    manualCount: new Set(manualEntries.map((entry) => entry.group)).size,
+    sticky
+  };
 }
 
 /**
@@ -240,12 +256,12 @@ export function effectiveOrder(steps, isEligible = () => true) {
  * router would walk it for a request that names no model. Used by the health
  * endpoints so "ranked" is the real route order, not a health-score sort.
  */
-export function routeOrderByPool(targets, priorityByPool = {}, isEligible = () => true) {
+export function routeOrderByPool(targets, priorityByPool = {}, isEligible = () => true, manualByPool = {}) {
   const all = Array.isArray(targets) ? targets : [];
   const out = [];
   for (const pool of ["text", "vision"]) {
     const inPool = all.filter((target) => (target.pool ?? "text") === pool);
-    const { steps } = buildRoutePlan({ targets: inPool, priority: priorityByPool?.[pool] ?? [] });
+    const { steps } = buildRoutePlan({ targets: inPool, priority: priorityByPool?.[pool] ?? [], manual: manualByPool?.[pool] ?? [] });
     out.push(...effectiveOrder(steps, isEligible).map((step) => step.target));
   }
   return out;

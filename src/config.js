@@ -140,6 +140,8 @@ export function loadConfig(env = process.env) {
     maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", 10 * 1024 * 1024, { min: 1, max: 100 * 1024 * 1024, expected: "an integer from 1 to 104857600" }),
     // Priority is optional: an empty list means no priority phase at all.
     priority: { text: readPriority(env, "text"), vision: readPriority(env, "vision") },
+    // Where operator-selected manual models are persisted (provider + model ids only).
+    manualSelectionFile: String(env.MANUAL_SELECTION_FILE || "").trim() || "data/manual-selection.json",
     providers,
     visionProviders
   };

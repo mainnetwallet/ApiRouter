@@ -37,7 +37,7 @@ const normalizePool = (value) => (value === POOLS.VISION ? POOLS.VISION : POOLS.
 const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_PENDING = 200;
 
-const PHASES = ["sticky", "priority", "fallback"];
+const PHASES = ["manual", "sticky", "priority", "fallback"];
 const pad = (value) => String(value).padStart(6, "0");
 
 /**

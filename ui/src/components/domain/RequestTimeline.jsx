@@ -12,7 +12,7 @@ import { describeAttempt } from "../../lib/errors.js";
  */
 /** "Priority" / "Fallback" prefix for a recorded attempt; empty for old rows without a phase. */
 export const phaseLabel = (attempt) =>
-  attempt?.phase === "sticky" ? "Sticky" : attempt?.phase === "priority" ? "Priority" : attempt?.phase === "fallback" ? "Normal fallback" : "";
+  attempt?.phase === "manual" ? "Manual" : attempt?.phase === "sticky" ? "Sticky" : attempt?.phase === "priority" ? "Priority" : attempt?.phase === "fallback" ? "Normal fallback" : "";
 
 export function buildLifecycle(entry) {
   if (!entry) return [];
