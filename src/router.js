@@ -12,6 +12,19 @@ const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 
 const SIZE_LIMIT_COOLDOWN_MS = 60 * 1000;
 
+// A 408 is a timeout (this router's own, or an upstream's). It says the call was
+// slow right now, not that the provider is down, so cool the target down
+// briefly instead of for the full 20 minutes. Otherwise one slow network
+// moment puts every provider and model into cooldown at once.
+const TIMEOUT_COOLDOWN_MS = 60 * 1000;
+
+/** `markFailure` options for a failed attempt: short cooldowns for transient statuses. */
+function cooldownOptions(status) {
+  if (status === 413) return { cooldownMs: SIZE_LIMIT_COOLDOWN_MS };
+  if (status === 408) return { cooldownMs: TIMEOUT_COOLDOWN_MS };
+  return {};
+}
+
 export function isRetryableStatus(status, retryableStatus = DEFAULT_RETRY_STATUS_CODES) {
   return retryableStatus.has(Number(status));
 }
@@ -183,7 +196,7 @@ export async function withFallback(
 
         // A 413 depends on the size of this one request (per-minute token caps
         // reset quickly), so cool the target down briefly, not for 20 minutes.
-        health.markFailure(target, status, status === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : {});
+        health.markFailure(target, status, cooldownOptions(status));
 
         // Quota/auth failures hit the whole key. Cool the sibling models on the
         // same provider + key down too, so this request (and the next ones)
@@ -290,7 +303,7 @@ async function walkPlan(steps, invoke, retryableStatus, session, health, onSkip)
       if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) throw error;
       if (error?.skipCooldown) continue;
 
-      health.markFailure(target, status, status === 413 ? { cooldownMs: SIZE_LIMIT_COOLDOWN_MS } : {});
+      health.markFailure(target, status, cooldownOptions(status));
 
       if (KEY_LEVEL_STATUS_CODES.has(status)) {
         const reason = `${status} on ${target.model} applies to the whole key`;
