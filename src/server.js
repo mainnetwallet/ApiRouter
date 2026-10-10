@@ -390,9 +390,13 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 400, { error: { message: shapeError, type: "invalid_request_error" } });
   }
 
-  const geminiPathModel = protocol === "gemini"
+  // The model id is one path segment, so a client may percent-encode the "/" in
+  // ids such as "vendor/model" as %2F. Decode it, or it never matches a target.
+  const geminiPathModelRaw = protocol === "gemini"
     ? pathname.match(/^\/v1beta\/models\/([^:]+):(?:stream)?[Gg]enerateContent$/)?.[1] || ""
     : "";
+  let geminiPathModel = geminiPathModelRaw;
+  try { geminiPathModel = decodeURIComponent(geminiPathModelRaw); } catch { /* malformed escape: keep raw */ }
   const requestedModel = typeof body.model === "string" ? body.model : geminiPathModel;
 
   // A Gemini client selects streaming with the method name rather than a body
