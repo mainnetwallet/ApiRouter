@@ -5,6 +5,7 @@ import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
+import { OrderLatency } from "../components/domain/OrderLatency.jsx";
 import { Icon } from "../components/ui/Icon.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
@@ -396,9 +397,7 @@ export default function FallbackChainConfig() {
                       <span className="ms-num ms-num--sm">{i + 1}</span>
                       <ModelName entry={item} />
                       <span className="tiny dim">key {item.keyIndex}</span>
-                      <span title={item.orderLatencySource === "probe" ? "ordered by the health-probe latency" : item.orderLatencySource === "request" ? "ordered by the request-measured latency" : "not measured — placed after measured models"}>
-                        <LatencyBadge ms={item.orderLatencyMs} />
-                      </span>
+                      <OrderLatency item={item} showUnmeasured />
                       {item.phase ? (
                         <span className={`badge ${item.phase === "sticky" ? "badge--info" : "badge--neutral"}`}>
                           {phaseLabel(item.phase) ?? item.phase}

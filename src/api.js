@@ -6,6 +6,9 @@ import {
   FALLBACK_MODES,
   FALLBACK_POOLS,
   MAX_KEYS,
+  activeEntries,
+  allowedKeyIndexes,
+  entryId,
   normalizeEntries,
   normalizeMode,
   remembersSuccess
@@ -392,6 +395,9 @@ export function createApi({
     }
 
     for (const pool of FALLBACK_POOLS) {
+      // The entries the planner narrows by, read exactly as `chainGroups` reads
+      // them: enabled entries only, one per provider/model.
+      const entries = new Map(activeEntries(fallbackChain?.get?.(pool) ?? []).map((entry) => [entryId(entry), entry]));
       for (const group of byPool[pool] ?? []) {
         group.keyStates.sort((a, b) => a.keyIndex - b.keyIndex);
         // The key indexes this model actually has, which is what an entry's own
@@ -399,9 +405,18 @@ export function createApi({
         // subset can never be confused with the provider's key inventory.
         group.keyIndexes = group.keyStates.map((key) => key.keyIndex);
         // The number routing actually orders by, and where it came from: the
-        // planner's own definition (`modelLatency`), not a second one. The two
-        // component figures are the lowest per kind across the model's keys.
-        const ordering = modelLatency(group.keyStates);
+        // planner's own definition (`modelLatency`), not a second one, applied to
+        // the keys the planner orders this model by. When the chain restricts the
+        // entry to a subset of keys, only those keys are eligible and only they
+        // count: key 0 at 50 ms must not speed up an entry that allows key 1 only
+        // (900 ms). A model with no enabled entry is ordered over all its keys.
+        // The two component figures below stay provider-wide: the lowest per kind
+        // across every key the model has.
+        const entry = entries.get(entryId(group));
+        const eligible = entry ? new Set(allowedKeyIndexes(entry, group.keyIndexes)) : null;
+        const ordering = modelLatency(
+          eligible ? group.keyStates.filter((key) => eligible.has(key.keyIndex)) : group.keyStates
+        );
         const lowest = (field) => {
           const values = group.keyStates.map((key) => key[field]).filter((value) => Number.isFinite(value));
           return values.length > 0 ? Math.min(...values) : null;

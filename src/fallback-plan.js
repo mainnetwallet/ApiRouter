@@ -1,4 +1,4 @@
-import { targetId } from "./health.js";
+import { targetId, validLatencyMs } from "./health.js";
 import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId } from "./fallback-chain.js";
 
 /**
@@ -138,8 +138,14 @@ export function chainGroups(chain, targets) {
  * display can say "measured from requests" or "from the health probe" truthfully.
  */
 export function stateLatency(state) {
-  if (Number.isFinite(state?.requestLatencyMs)) return { latencyMs: state.requestLatencyMs, source: "request" };
-  if (Number.isFinite(state?.probeLatencyMs)) return { latencyMs: state.probeLatencyMs, source: "probe" };
+  // `validLatencyMs` is the one definition of a usable measurement: zero,
+  // negative and non-finite figures are "unmeasured", not fast. An unusable
+  // request figure therefore falls through to the probe figure exactly as an
+  // absent one always has; the request-over-probe precedence itself is unchanged.
+  const request = validLatencyMs(state?.requestLatencyMs);
+  if (request !== null) return { latencyMs: request, source: "request" };
+  const probe = validLatencyMs(state?.probeLatencyMs);
+  if (probe !== null) return { latencyMs: probe, source: "probe" };
   return { latencyMs: null, source: null };
 }
 
@@ -245,11 +251,39 @@ function coolingFingerprint(groups, health, now) {
  * objects — are cached, so a caller whose target list narrowed (a pin, a
  * protocol filter) simply ignores ids it no longer has.
  */
-const AUTO_CACHE = new Map();
 export const AUTO_ORDER_BUCKET_MS = 30_000;
+const AUTO_CACHE_LIMIT = 64;
+
+/**
+ * The cache is scoped to the health registry the order was computed from.
+ *
+ * The key below carries a registry's `version`, but a version is only a counter:
+ * two independent registries can sit at the same version with entirely different
+ * health, and a shared cache would hand one the other's order. So each registry
+ * owns its own cache, found by the registry object itself (identity, not a
+ * name or a counter that can collide). A WeakMap holds them, so a registry that
+ * is discarded takes its cache with it — nothing here can outlive or leak a
+ * registry — and each cache is still bounded by `AUTO_CACHE_LIMIT`.
+ *
+ * Callers that pass no registry share one small bounded cache: with no health to
+ * read, the order is a function of the groups alone, which the key fingerprints.
+ */
+let REGISTRY_CACHES = new WeakMap();
+const UNSCOPED_CACHE = new Map();
+
+function cacheFor(health) {
+  if (health === null || (typeof health !== "object" && typeof health !== "function")) return UNSCOPED_CACHE;
+  let cache = REGISTRY_CACHES.get(health);
+  if (!cache) {
+    cache = new Map();
+    REGISTRY_CACHES.set(health, cache);
+  }
+  return cache;
+}
 
 export function resetAutomaticOrderCache() {
-  AUTO_CACHE.clear();
+  REGISTRY_CACHES = new WeakMap();
+  UNSCOPED_CACHE.clear();
 }
 
 export function automaticGroupIds({ cacheKey, groups, health, now, bucketMs = AUTO_ORDER_BUCKET_MS }) {
@@ -261,14 +295,15 @@ export function automaticGroupIds({ cacheKey, groups, health, now, bucketMs = AU
   // at different moments of one bucket (the router, the preview) could be given
   // different orders for identical health.
   const key = `${cacheKey}|${version}|${bucket}|${coolingFingerprint(groups, health, now)}|${groupFingerprint(groups)}`;
-  const cached = AUTO_CACHE.get(key);
+  const cache = cacheFor(health);
+  const cached = cache.get(key);
   if (cached) return cached;
 
   const ids = orderGroupsByHealth(groups, health, now).map((group) => group.id);
   // One entry per key would grow without bound on a long-running gateway; the
   // cache only ever needs the current bucket and a handful of recent versions.
-  if (AUTO_CACHE.size > 64) AUTO_CACHE.clear();
-  AUTO_CACHE.set(key, ids);
+  if (cache.size > AUTO_CACHE_LIMIT) cache.clear();
+  cache.set(key, ids);
   return ids;
 }
 

@@ -22,6 +22,25 @@ export const targetId = (target) =>
   target.id || `${target.provider}:${target.model}:key-${target.keyIndex}`;
 
 /**
+ * THE validity rule for a latency measurement, and the only one. A latency is a
+ * usable measurement only if it is a finite number strictly greater than zero.
+ *
+ * Why zero and below are not measurements: every latency here is an elapsed time
+ * taken as a difference of two millisecond clock reads. `0` therefore means "too
+ * fast for the clock to resolve" (it carries no ordering information and would
+ * sort ahead of every real figure), and a negative value means the clock stepped
+ * backwards. Neither is a timing of anything. Non-numbers are rejected without
+ * coercion (`"40"` is not 40), and so are NaN and +/-Infinity.
+ *
+ * Returns the number when it is usable and `null` otherwise, so a caller can
+ * treat "invalid" and "absent" identically: the target is simply unmeasured for
+ * that source and the router never invents a figure for it.
+ */
+export function validLatencyMs(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
  * Time-aware state: a failed target that is still cooling down reads as
  * `cooldown`. Routing never consults this — it uses `isAvailable` — so this
  * only affects reporting.
@@ -153,8 +172,8 @@ export class HealthRegistry {
         // The same two figures the router orders by (see `stateLatency` in
         // fallback-plan.js). Reported so a panel can show the number a model was
         // actually sorted on instead of the latest observation of either kind.
-        requestLatencyMs: Number.isFinite(state.requestLatencyMs) ? state.requestLatencyMs : null,
-        probeLatencyMs: Number.isFinite(state.probeLatencyMs) ? state.probeLatencyMs : null,
+        requestLatencyMs: validLatencyMs(state.requestLatencyMs),
+        probeLatencyMs: validLatencyMs(state.probeLatencyMs),
         lastStatus: state.lastStatus,
         lastReason: state.lastReason,
         // The LATEST observation, and separately the last CONFIRMED one. A `null`
@@ -203,14 +222,18 @@ export class HealthRegistry {
     // Record the status actually observed; a 2xx success defaults to 200.
     state.lastStatus = Number.isInteger(status) ? status : 200;
     state.lastReason = reason;
-    state.latencyMs = Number.isFinite(latencyMs) ? latencyMs : state.latencyMs;
-    if (Number.isFinite(latencyMs)) {
+    // An unusable figure (see `validLatencyMs`) is not a measurement: it leaves
+    // every latency field exactly as it was, so it can neither displace a real
+    // figure nor be mistaken for one. The success itself is still recorded above.
+    const measured = validLatencyMs(latencyMs);
+    state.latencyMs = measured ?? state.latencyMs;
+    if (measured !== null) {
       const at = new Date(now).toISOString();
       if (source === "probe") {
-        state.probeLatencyMs = latencyMs;
+        state.probeLatencyMs = measured;
         state.probeLatencyAt = at;
       } else {
-        state.requestLatencyMs = latencyMs;
+        state.requestLatencyMs = measured;
         state.requestLatencyAt = at;
       }
     }
@@ -307,9 +330,11 @@ export class HealthRegistry {
     }
 
     if (ok === true) {
+      // A health probe is not a request: it must land in `probeLatencyMs`, never
+      // overwrite the `requestLatencyMs` that real traffic measured.
       return this.markSuccess(
         target,
-        { latencyMs, status: Number.isInteger(status) ? status : 200, reason },
+        { latencyMs, status: Number.isInteger(status) ? status : 200, reason, source: "probe" },
         now
       );
     }
@@ -381,9 +406,7 @@ async function refreshTarget(target, check) {
 
   try {
     const result = await check(target);
-    const latencyMs = Number.isFinite(result?.latencyMs)
-      ? result.latencyMs
-      : Date.now() - observedAt;
+    const latencyMs = validLatencyMs(result?.latencyMs) ?? Date.now() - observedAt;
 
     const state = recordHealthCheck(target, {
       ok: result?.ok ?? null,

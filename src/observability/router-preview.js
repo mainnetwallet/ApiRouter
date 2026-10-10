@@ -92,11 +92,24 @@ export function describeRouting({
   const order = effective.map((step) => step.target);
   const phaseById = new Map(effective.map((step) => [health.key(step.target), step.phase]));
 
-  // The ordering latency per model, taken from the groups exactly as the plan
+  // The ordering latency per TARGET, taken from the groups exactly as the plan
   // holds them (narrowed by the chain's key restrictions), so the preview shows
   // the number the planner sorted on rather than recomputing its own.
-  const orderingByGroup = new Map((plan.groups ?? []).map((group) => [group.id, groupLatency(group, health)]));
-  const orderingOf = (target) => orderingByGroup.get(`${target.provider}/${target.model}`) ?? null;
+  //
+  // It is keyed by target, not by model: a key the chain entry excludes is not in
+  // its narrowed group, so the planner never ordered it and there is no ordering
+  // to report for it. Looking the figure up by provider/model alone would let
+  // that excluded key (rank `null`) inherit the latency of its model's eligible
+  // keys. Every key the plan does hold still carries its model's one figure.
+  const orderingByTarget = new Map();
+  for (const group of plan.groups ?? []) {
+    const ordering = groupLatency(group, health);
+    for (const target of group.targets ?? []) {
+      const id = health.key(target);
+      if (!orderingByTarget.has(id)) orderingByTarget.set(id, ordering);
+    }
+  }
+  const orderingOf = (target) => orderingByTarget.get(health.key(target)) ?? null;
 
   /**
    * The reporting status of a target. Derived the same way for every list on

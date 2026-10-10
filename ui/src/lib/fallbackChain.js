@@ -24,6 +24,72 @@ export function phaseLabel(phase) {
   return PHASE_LABEL[phase] ?? null;
 }
 
+/**
+ * The phases whose POSITION was decided by measured latency. In every other
+ * phase the position comes from something else — the saved Fallback Chain, the
+ * saved Manual Model Selection order, or the remembered target — and a latency
+ * shown beside it is information, not the reason it sits where it does.
+ *
+ * This mirrors the planner (src/fallback-plan.js): the automatic order, and the
+ * health batch of Manual Model Selection (and its retry of that batch), are
+ * sorted by `orderGroupsByHealth`; nothing else is.
+ */
+export const LATENCY_ORDERED_PHASES = Object.freeze(["auto", "health-fallback", "health-retry"]);
+
+/** Why a position is NOT latency-ordered, for the phases that are not. */
+const POSITION_REASON = {
+  chain: "the saved Fallback Chain order",
+  "manual-selection": "your saved Manual Model Selection order",
+  "manual-retry": "your saved Manual Model Selection order",
+  sticky: "the remembered target, which is tried first"
+};
+
+/** True only when latency is what placed this step. An unknown phase never claims it. */
+export function latencyDecidesOrder(item) {
+  return LATENCY_ORDERED_PHASES.includes(item?.phase);
+}
+
+/**
+ * How to describe the latency shown next to a planned step, in one vocabulary
+ * for every screen. `ordered by latency` is said ONLY where latency decided the
+ * position; elsewhere the same figure is labelled plainly as `latency`.
+ *
+ * `ms` is the figure the planner sorted the step's model on (`orderLatencyMs`),
+ * `null` when the model has never been measured. `title` is the longer
+ * explanation, and always agrees with `label`.
+ */
+export function orderLatencyInfo(item) {
+  const ms = Number.isFinite(item?.orderLatencyMs) ? item.orderLatencyMs : null;
+  const source = item?.orderLatencySource === "request" || item?.orderLatencySource === "probe"
+    ? item.orderLatencySource
+    : null;
+  const decides = latencyDecidesOrder(item);
+  const kind = source === "probe" ? "health-probe" : "request-measured";
+
+  if (decides) {
+    return {
+      ms,
+      source,
+      decides,
+      label: "ordered by latency",
+      title: ms === null
+        ? "Not measured — placed after measured models"
+        : `Ordered by latency — the ${kind} figure`
+    };
+  }
+
+  const reason = POSITION_REASON[item?.phase] ?? null;
+  return {
+    ms,
+    source,
+    decides,
+    label: "latency",
+    title: ms === null
+      ? "Not measured. Latency does not decide this position"
+      : `Latency information only (${kind}). ${reason ? `This position comes from ${reason}, not from latency` : "Latency does not decide this position"}`
+  };
+}
+
 export const entryId = (entry) => `${entry?.provider ?? ""}/${entry?.model ?? ""}`;
 
 /**
@@ -162,6 +228,11 @@ export function latencyOf(group) {
       ? { ms: group.latencyMs, source: "request", label: "measured from requests" }
       : { ms: group.latencyMs, source: "probe", label: "from the health probe" };
   }
+  // A payload that carries `latencySource` has already said what the router orders
+  // this model by — `null` meaning it has no figure for the keys it orders it by.
+  // The provider-wide component figures below cover EVERY key of the model,
+  // including keys a chain entry excludes, so they must not stand in for it.
+  if ("latencySource" in group) return { ms: null, source: null, label: "not measured" };
   if (Number.isFinite(group.measuredLatencyMs)) {
     return { ms: group.measuredLatencyMs, source: "request", label: "measured from requests" };
   }
