@@ -7,9 +7,9 @@ import { orderLatencyInfo } from "../../lib/fallbackChain.js";
  *
  * One component, used by every screen that lists the planned order, so the
  * wording cannot drift between them. "ordered by latency" appears only for a
- * step whose position latency decided (Automatic, and the health batch of Manual
- * Model Selection); in Fixed Order, in the saved Manual Model Selection steps and
- * for a remembered target the same figure is labelled plainly as "latency".
+ * step whose position latency decided (the automatic order, and the health
+ * batch of Manual Model Selection); in the saved Manual Model Selection steps
+ * and for a remembered target the same figure is labelled plainly as "latency".
  *
  * The visible text carries the claim, so it reads the same on touch and with a
  * screen reader; the `title` only adds the source and the reason.

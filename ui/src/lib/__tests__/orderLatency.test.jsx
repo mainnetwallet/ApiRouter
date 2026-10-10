@@ -19,12 +19,12 @@ describe("when latency decides a position", () => {
     expect(latencyDecidesOrder(undefined)).toBe(false);
   });
 
-  it("Fixed Order: the figure is latency information, never 'ordered by'", () => {
-    const info = orderLatencyInfo(step("chain"));
+  it("a saved selection: the figure is latency information, never 'ordered by'", () => {
+    const info = orderLatencyInfo(step("manual-selection"));
     expect(info.decides).toBe(false);
     expect(info.label).toBe("latency");
     expect(info.ms).toBe(900);
-    expect(info.title).toContain("saved Fallback Chain order");
+    expect(info.title).toContain("saved Manual Model Selection order");
     expect(`${info.label} ${info.title}`.toLowerCase()).not.toContain("ordered by");
   });
 
@@ -58,9 +58,9 @@ describe("when latency decides a position", () => {
     expect(unmeasuredAuto.title).toBe("Not measured — placed after measured models");
 
     // In a saved order an unmeasured model keeps its saved place: it is NOT "placed after measured models".
-    const unmeasuredFixed = orderLatencyInfo(step("chain", { orderLatencyMs: null, orderLatencySource: null }));
-    expect(unmeasuredFixed.ms).toBeNull();
-    expect(unmeasuredFixed.title).not.toContain("placed after");
+    const unmeasuredSaved = orderLatencyInfo(step("manual-selection", { orderLatencyMs: null, orderLatencySource: null }));
+    expect(unmeasuredSaved.ms).toBeNull();
+    expect(unmeasuredSaved.title).not.toContain("placed after");
   });
 
   it("ignores a non-numeric figure instead of showing it", () => {

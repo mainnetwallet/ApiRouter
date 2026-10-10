@@ -26,9 +26,6 @@ const json = async (response) => {
 const saveChain = (router, pool, entries, headers = {}) => router.request("/api/fallback", {
   method: "PUT", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ pool, entries })
 });
-const saveMode = (router, mode, headers = {}) => router.request("/api/fallback", {
-  method: "PUT", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ mode })
-});
 const getFallback = (router) => router.request("/api/fallback").then(json);
 const resetFallback = (router) => router.request("/api/fallback/reset", { method: "POST" }).then(json);
 
@@ -152,7 +149,7 @@ test("a chain that fails falls through to the next model, which retries its own 
 // Operating modes and Reset
 // ---------------------------------------------------------------------------
 
-test("Fixed Order never lets a remembered target lead; Remember Last Successful does", async () => {
+test("a remembered target leads the next request, and the mode is derived from the selection", async () => {
   // groq is down on BOTH keys, so the walk really does reach mistral.
   const groq = await startMockUpstream(() => down);
   const mistral = await startMockUpstream(() => ok("m2"));
@@ -166,26 +163,21 @@ test("Fixed Order never lets a remembered target lead; Remember Last Successful 
       { provider: "mistral", model: "m2" }
     ]);
 
-    // Fixed Order (the default): groq fails over to mistral. The success is recorded,
-    // but in Fixed Order it never leads the next request (see the in-place tests below).
+    // A saved selection means the pool is walked manually; the success is recorded.
     assert.equal((await chat(router)).status, 200);
     assert.deepEqual(posts(mistral), ["s0"]);
-    let state = await getFallback(router);
-    assert.equal(state.mode, "fixed");
-    assert.equal(state.remembersSuccess, false, "a remembered target does not lead in Fixed Order");
-    assert.equal(state.remembered.remembered.text.length, 1, "Fixed Order records the success to prefer its key in place");
-
-    // Remember Last Successful: the same request now records the target that answered.
-    assert.equal((await saveMode(router, "last-success")).status, 200);
-    state = await getFallback(router);
-    assert.equal(state.mode, "last-success");
-    assert.equal(state.remembersSuccess, true);
-
-    assert.equal((await chat(router)).status, 200);
-    state = await getFallback(router);
+    const state = await getFallback(router);
+    assert.equal(state.mode, "manual", "a saved selection is the manual mode");
+    assert.equal(state.remembersSuccess, true, "and the last success now leads the next request");
     assert.equal(state.remembered.remembered.text.length, 1, "the success is remembered");
     assert.match(state.remembered.remembered.text[0].targetId, /^mistral:m2:key-0$/);
     assert.equal(state.remembered.remembered.text[0].pool, "text");
+
+    // Clearing both pools returns the router to the automatic order, which still remembers.
+    await saveChain(router, "text", []);
+    const cleared = await getFallback(router);
+    assert.equal(cleared.mode, "auto", "with nothing selected the pool routes automatically");
+    assert.equal(cleared.remembersSuccess, true, "and still remembers the last success");
   } finally {
     await router.close(); await groq.close(); await mistral.close();
   }
@@ -207,7 +199,6 @@ test("Reset Fallback clears what was remembered and leaves the configuration alo
       { provider: "mistral", model: "m2", keys: [0] }
     ];
     await saveChain(router, "text", chain);
-    await saveMode(router, "last-success");
     assert.equal((await chat(router)).status, 200);
     assert.equal((await getFallback(router)).remembered.remembered.text.length, 1);
 
@@ -220,8 +211,8 @@ test("Reset Fallback clears what was remembered and leaves the configuration alo
     const after = await getFallback(router);
     assert.deepEqual(after.remembered.remembered.text, [], "nothing is remembered after a reset");
     // Everything the router was TOLD survives untouched.
-    assert.deepEqual(after.chain, before.chain, "the saved chain is not deleted");
-    assert.equal(after.mode, "last-success", "the selected mode is not deleted");
+    assert.deepEqual(after.chain, before.chain, "the saved selection is not deleted");
+    assert.equal(after.mode, "manual", "the selection (and so the derived mode) is not deleted");
     assert.deepEqual(after.catalogue.text.map((group) => group.id), before.catalogue.text.map((group) => group.id),
       "the configured models are not deleted");
     assert.ok(fs.existsSync(path.join(dir, "fallback-chain.json")), "the persisted chain file still exists");
@@ -235,7 +226,7 @@ test("Reset Fallback clears what was remembered and leaves the configuration alo
   }
 });
 
-test("the chain and the mode survive a restart, while remembered state does not", async () => {
+test("the chain, and so the derived mode, survive a restart, while remembered state does not", async () => {
   const dir = tmpDir("restart");
   const groq = await startMockUpstream(() => down);
   const mistral = await startMockUpstream(() => ok("m2"));
@@ -252,7 +243,6 @@ test("the chain and the mode survive a restart, while remembered state does not"
       { provider: "mistral", model: "m2" },
       { provider: "groq", model: "m1" }
     ])).status, 200);
-    await saveMode(first, "last-success");
     assert.equal((await chat(first)).status, 200);
     assert.equal((await getFallback(first)).remembered.remembered.text.length, 1);
   } finally {
@@ -262,7 +252,7 @@ test("the chain and the mode survive a restart, while remembered state does not"
   const second = await startRouter(env);
   try {
     const state = await getFallback(second);
-    assert.equal(state.mode, "last-success", "the mode survives a restart");
+    assert.equal(state.mode, "manual", "the derived mode survives a restart because the selection does");
     assert.deepEqual(state.chain.text.map((entry) => `${entry.provider}/${entry.model}`), ["mistral/m2", "groq/m1"],
       "the chain survives a restart");
     // Remembered targets are in-memory routing state, not configuration: a
@@ -289,7 +279,6 @@ test("text and vision keep separate chains, separate orders and separate memory"
   try {
     await saveChain(router, "text", [{ provider: "groq", model: "m1" }]);
     await saveChain(router, "vision", [{ provider: "groq", model: "vm1" }]);
-    await saveMode(router, "last-success");
 
     // Vision: its own keys, its own multi-key retry.
     assert.equal((await chatImage(router)).status, 200);
@@ -373,7 +362,7 @@ test("the legacy manual selection seeds the chain once, then stops being read", 
   try {
     const state = await getFallback(router);
     assert.deepEqual(state.chain.text.map((entry) => entry.model), ["m2"], "the legacy selection becomes the chain");
-    assert.equal(state.mode, "last-success", "seeded in the mode the legacy behaviour actually used");
+    assert.equal(state.mode, "manual", "seeded in the mode the legacy selection actually produces");
 
     // The operator replaces the chain; the legacy file must not come back.
     await saveChain(router, "text", [{ provider: "groq", model: "m1" }]);
@@ -419,7 +408,7 @@ test("the configuration API validates what it is given", async () => {
     // Nothing above was saved.
     const state = await getFallback(router);
     assert.deepEqual(state.chain.text, []);
-    assert.equal(state.mode, "fixed");
+    assert.equal(state.mode, "auto", "an empty selection is the automatic mode");
   } finally {
     await router.close(); await groq.close(); await mistral.close();
   }
@@ -458,7 +447,7 @@ test("streaming, authentication and the request log are unaffected", async () =>
     const log = await router.request("/api/requests?limit=5", { headers }).then(json);
     const attempts = log.attempts ?? [];
     assert.ok(attempts.length > 0, "the attempt is logged");
-    assert.equal(attempts[0].phase, "chain");
+    assert.equal(attempts[0].phase, "manual-selection");
   } finally {
     await router.close(); await groq.close();
   }
@@ -472,7 +461,6 @@ test("a remembered key excluded by the current chain is not attempted", async ()
   // groq key 0 is down, key 1 works; mistral always works.
   const { router, groq, mistral } = await startTwoProviderRouter();
   try {
-    await saveMode(router, "last-success");
     // Start with only key 1 allowed, so key 1 answers and is remembered.
     assert.equal((await saveChain(router, "text", [
       { provider: "groq", model: "m1", keys: [1] },
@@ -509,7 +497,6 @@ test("a remembered model with a restricted subset uses only allowed keys", async
     MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`
   });
   try {
-    await saveMode(router, "last-success");
     // Every key is allowed at first, so key 2 answers and is remembered.
     assert.equal((await saveChain(router, "text", [
       { provider: "groq", model: "m1" },
@@ -539,7 +526,7 @@ test("a remembered model with a restricted subset uses only allowed keys", async
 // A saved configuration takes effect without waiting for the order cache
 // ---------------------------------------------------------------------------
 
-test("a model added to the chain is used on the very next request in Automatic mode", async () => {
+test("a model added to the selection is used on the very next request, without waiting for the order cache", async () => {
   const groq = await startMockUpstream(() => down);
   const mistral = await startMockUpstream(() => ok("m2"));
   const router = await startRouter({
@@ -547,12 +534,18 @@ test("a model added to the chain is used on the very next request in Automatic m
     MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`
   });
   try {
-    await saveMode(router, "auto");
-    assert.equal((await saveChain(router, "text", [{ provider: "groq", model: "m1" }])).status, 200);
-    // groq is entirely down and is the only configured model: nothing can serve.
-    assert.equal((await chat(router)).status, 502);
+    const order = async () => [...new Set(
+      (await router.request("/api/router/preview?pool=text&protocol=openai-chat").then(json))
+        .fallbackOrder.map((item) => item.model)
+    )];
 
-    // Adding mistral must take effect at once, in the same 30-second bucket.
+    assert.equal((await saveChain(router, "text", [{ provider: "groq", model: "m1" }])).status, 200);
+    // groq is entirely down and is the only selected model; the unselected
+    // mistral is still reached by the automatic health-based fallback.
+    assert.deepEqual(await order(), ["m1", "m2"], "the unselected model is planned after the selection");
+
+    // Adding mistral to the selection must take effect at once, in the same
+    // 30-second bucket, and it is then served as part of the selection.
     assert.equal((await saveChain(router, "text", [
       { provider: "groq", model: "m1" },
       { provider: "mistral", model: "m2" }
@@ -572,7 +565,6 @@ test("disabling an entry removes it from the effective order immediately", async
     MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`
   });
   try {
-    await saveMode(router, "auto");
     await saveChain(router, "text", [
       { provider: "groq", model: "m1" },
       { provider: "mistral", model: "m2" }
@@ -594,27 +586,33 @@ test("disabling an entry removes it from the effective order immediately", async
   }
 });
 
-test("a mode change is reflected in the routing decision immediately", async () => {
+test("the derived mode follows the selection immediately", async () => {
   const { router, groq, mistral } = await startTwoProviderRouter();
   try {
-    await saveChain(router, "text", [
-      { provider: "groq", model: "m1" },
-      { provider: "mistral", model: "m2" }
-    ]);
     const preview = () => router.request("/api/router/preview?pool=text&protocol=openai-chat").then(json);
 
-    assert.equal((await saveMode(router, "fixed")).status, 200);
-    const fixed = await preview();
-    assert.equal(fixed.mode, "fixed");
-    assert.equal(fixed.orderSource, "chain");
-    assert.equal(fixed.automatic, false);
+    // Nothing selected: the automatic order, with no switch to set.
+    const automatic = await preview();
+    assert.equal(automatic.mode, "auto");
+    assert.equal(automatic.orderSource, "auto");
+    assert.equal(automatic.automatic, true);
 
-    // No sleep: the switch must be live on the very next read.
-    assert.equal((await saveMode(router, "auto")).status, 200);
-    const auto = await preview();
-    assert.equal(auto.mode, "auto");
-    assert.equal(auto.orderSource, "auto");
-    assert.equal(auto.automatic, true);
+    // Saving a selection makes the pool manual on the very next read: no sleep
+    // and no separate mode request.
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+    const manual = await preview();
+    assert.equal(manual.mode, "manual");
+    assert.equal(manual.orderSource, "manual");
+    assert.equal(manual.automatic, false);
+
+    // Clearing it hands the pool straight back to the automatic order.
+    assert.equal((await saveChain(router, "text", [])).status, 200);
+    const cleared = await preview();
+    assert.equal(cleared.mode, "auto");
+    assert.equal(cleared.orderSource, "auto");
   } finally {
     await router.close(); await groq.close(); await mistral.close();
   }
@@ -627,22 +625,21 @@ test("saving a chain re-plans immediately, with no health change and no new buck
   // case a cache keyed on health and time alone cannot notice.
   const { router, groq, mistral } = await startTwoProviderRouter();
   try {
-    await saveMode(router, "auto");
     // fallbackOrder is per TARGET (one row per key), so read the distinct models.
     const order = async () => [...new Set(
       (await router.request("/api/router/preview?pool=text&protocol=openai-chat").then(json))
         .fallbackOrder.map((item) => item.model)
     )];
 
-    assert.equal((await saveChain(router, "text", [{ provider: "groq", model: "m1" }])).status, 200);
-    assert.deepEqual(await order(), ["m1"], "only the configured model is planned");
+    assert.equal((await saveChain(router, "text", [{ provider: "mistral", model: "m2" }])).status, 200);
+    assert.equal((await order())[0], "m2", "the saved selection leads");
 
     assert.equal((await saveChain(router, "text", [
       { provider: "groq", model: "m1" },
       { provider: "mistral", model: "m2" }
     ])).status, 200);
-    assert.ok((await order()).includes("m2"),
-      "the model just added must be planned immediately, not after the next bucket");
+    assert.equal((await order())[0], "m1",
+      "the reordered selection must be planned immediately, not after the next bucket");
   } finally {
     await router.close(); await groq.close(); await mistral.close();
   }
@@ -718,7 +715,7 @@ test("a chain whose only provider is gone fails closed with a 503 and routes now
     assert.equal(response.status, 503);
     const body = await response.json();
     assert.equal(body.error.type, "fallback_chain_unusable", "the error says why, not a generic outage");
-    assert.match(body.error.message, /Fallback Chain/);
+    assert.match(body.error.message, /Manual Model Selection/);
     assert.deepEqual(posts(mistral), [], "a configured model outside the chain must not be substituted");
   } finally {
     await second.close(); await groq.close(); await mistral.close();
@@ -945,25 +942,24 @@ test("PUT /api/fallback rejects key restrictions the provider cannot honour", as
   }
 });
 
-test("a rejected save leaves the previous configuration untouched, mode included", async () => {
+test("a rejected save leaves the previous configuration untouched", async () => {
   const { router, groq, mistral } = await startTwoProviderRouter();
   try {
-    await saveMode(router, "last-success");
     await saveChain(router, "text", [{ provider: "mistral", model: "m2" }]);
     const before = await getFallback(router);
 
-    // One request carrying BOTH a valid mode and an invalid chain: the mode must
-    // not be written on the way to the error.
+    // A save naming a key the provider does not have is rejected outright; the
+    // previously saved selection must survive untouched.
     const response = await router.request("/api/fallback", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode: "fixed", pool: "text", entries: [{ provider: "groq", model: "m1", keys: [9] }] })
+      body: JSON.stringify({ pool: "text", entries: [{ provider: "groq", model: "m1", keys: [9] }] })
     });
     assert.equal(response.status, 400);
 
     const after = await getFallback(router);
-    assert.equal(after.mode, "last-success", "a rejected save must not persist the mode");
-    assert.deepEqual(after.chain, before.chain, "nor the chain");
+    assert.deepEqual(after.chain, before.chain, "the chain is untouched");
+    assert.equal(after.mode, before.mode, "and so is the mode it derives");
   } finally {
     await router.close(); await groq.close(); await mistral.close();
   }
@@ -1056,10 +1052,10 @@ test("a pin naming nothing configured is still a 404, whatever the chain says", 
 });
 
 // ---------------------------------------------------------------------------
-// Atomic combined saves
+// Atomic saves
 // ---------------------------------------------------------------------------
 
-test("a combined mode + pool save that cannot be persisted applies neither change", async () => {
+test("a save that cannot be persisted applies no change at all", async () => {
   const dir = tmpDir("persist-fail");
   const groq = await startMockUpstream(() => ok("m1"));
   const router = await startRouter({
@@ -1072,12 +1068,12 @@ test("a combined mode + pool save that cannot be persisted applies neither chang
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
     });
 
-    // A good combined save first, so there is real state to protect.
+    // A good save first, so there is real state to protect.
     assert.equal((await put({
-      mode: "last-success", pool: "text", entries: [{ provider: "groq", model: "m1" }]
+      pool: "text", entries: [{ provider: "groq", model: "m1" }]
     })).status, 200);
     const before = await getFallback(router);
-    assert.equal(before.mode, "last-success");
+    assert.equal(before.mode, "manual");
 
     // Now break persistence: the configuration directory is replaced by a
     // regular file, so no write to it can succeed.
@@ -1085,15 +1081,14 @@ test("a combined mode + pool save that cannot be persisted applies neither chang
     fs.writeFileSync(dir, "not a directory");
 
     const failed = await put({
-      mode: "auto", pool: "text", entries: [{ provider: "groq", model: "m1", keys: [0] }]
+      pool: "text", entries: [{ provider: "groq", model: "m1", keys: [0] }]
     });
     assert.equal(failed.status, 500, "a save that cannot be persisted must fail loudly");
 
-    // Both halves must be untouched: a request that changes two things changes
-    // both or neither.
+    // The in-memory configuration must be untouched by the failed write.
     const after = await getFallback(router);
-    assert.equal(after.mode, "last-success", "the mode must not be half-applied");
-    assert.deepEqual(after.chain, before.chain, "nor the chain");
+    assert.deepEqual(after.chain, before.chain, "the chain is unchanged");
+    assert.equal(after.mode, before.mode, "and so is the mode it derives");
     assert.equal(after.chain.text[0].keys, null, "the previously saved chain is still the one in force");
   } finally {
     await router.close(); await groq.close();
@@ -1355,9 +1350,16 @@ test("agentrouter: an account-level 402 is recorded per key + model, so every si
     const states = await modelStates(router);
     for (const model of AGENT_MODELS) assert.equal(states[model].status, "cooldown", `${model} failed itself`);
 
-    // The walk's own record shows every model as a real attempt, none skipped.
+    // The walk's own record shows every model as a real attempt. The retry
+    // round re-lists them, but a 402 is not retryable, so each is skipped.
     const walk = await requestWalk(router);
-    assert.deepEqual(walk.map((a) => [a.model, a.skipped === true, a.skipReason ?? null]), AGENT_MODELS.map((model) => [model, false, null]));
+    const attempted = walk.filter((a) => a.skipped !== true);
+    assert.deepEqual(attempted.map((a) => a.model), AGENT_MODELS, "each model is a real, distinct attempt");
+    assert.deepEqual(attempted.map((a) => a.skipReason ?? null), AGENT_MODELS.map(() => null), "no attempt was skipped");
+    assert.deepEqual(
+      [...new Set(walk.filter((a) => a.skipped === true).map((a) => a.skipReason))],
+      ["not_retryable"], "the retry round skips every model the 402 made unretryable"
+    );
   } finally {
     await router.close(); await agent.close();
   }
@@ -1389,7 +1391,6 @@ test("adding a model to the chain drops the old remembered target, and the next 
   const { router, groq, mistral } = await startRememberRouter();
   try {
     assert.equal((await putChain(router, "text", [MISTRAL_M2])).status, 200);
-    assert.equal((await saveMode(router, "last-success")).status, 200);
 
     // A successful model is remembered.
     assert.equal((await chat(router)).status, 200);
@@ -1425,7 +1426,6 @@ test("removing, reordering, disabling and re-restricting a model each invalidate
       ["key restriction", [MISTRAL_M2, { ...GROQ_M1, enabled: true, keys: [1] }]]
     ];
     await putChain(router, "text", [GROQ_M1, MISTRAL_M2]);
-    await saveMode(router, "last-success");
 
     for (const [label, entries] of edits) {
       assert.equal((await chat(router)).status, 200);
@@ -1438,21 +1438,17 @@ test("removing, reordering, disabling and re-restricting a model each invalidate
   }
 });
 
-test("saving an identical chain, or only the mode, keeps what is remembered", async () => {
+test("saving an identical chain keeps what is remembered", async () => {
   const { router, groq, mistral } = await startRememberRouter();
   try {
     const chain = [GROQ_M1, MISTRAL_M2];
     await putChain(router, "text", chain);
-    await saveMode(router, "last-success");
     assert.equal((await chat(router)).status, 200);
     const remembered = await rememberedIds(router);
     assert.equal(remembered.length, 1);
 
     assert.equal((await putChain(router, "text", chain)).status, 200);
     assert.deepEqual(await rememberedIds(router), remembered, "an identical chain changes nothing");
-
-    assert.equal((await saveMode(router, "last-success")).status, 200);
-    assert.deepEqual(await rememberedIds(router), remembered, "a mode-only save is not a chain edit");
   } finally {
     await closeAll(router, groq, mistral);
   }
@@ -1466,7 +1462,6 @@ test("a rejected or unpersisted chain update does not clear what is remembered",
   });
   try {
     await putChain(router, "text", [MISTRAL_M2]);
-    await saveMode(router, "last-success");
     assert.equal((await chat(router)).status, 200);
     const remembered = await rememberedIds(router);
     assert.deepEqual(remembered, ["mistral:m2:key-0"]);
@@ -1503,7 +1498,6 @@ test("a text chain edit clears only text, and a vision chain edit clears only vi
   try {
     await putChain(router, "text", [GROQ_M1]);
     await putChain(router, "vision", [{ provider: "groq", model: "vm1" }]);
-    await saveMode(router, "last-success");
     assert.equal((await chat(router)).status, 200);
     assert.equal((await chatImage(router)).status, 200);
     assert.equal((await rememberedIds(router, "text")).length, 1);
@@ -1534,7 +1528,6 @@ test("a chain edit leaves health and cooldowns exactly as they were", async () =
   });
   try {
     await putChain(router, "text", [GROQ_M1, MISTRAL_M2]);
-    await saveMode(router, "last-success");
     assert.equal((await chat(router)).status, 200, "groq fails, mistral answers");
 
     const cooling = async () => (await router.request("/api/health").then(json)).targets
@@ -1559,7 +1552,6 @@ test("Reset Fallback clears the remembered target, keeps the chain and cooldowns
   });
   try {
     await putChain(router, "text", [GROQ_M1, MISTRAL_M2]);
-    await saveMode(router, "last-success");
     assert.equal((await chat(router)).status, 200);
     assert.deepEqual(await rememberedIds(router), ["mistral:m2:key-0"]);
     const chainBefore = (await getFallback(router)).chain;
@@ -1582,7 +1574,7 @@ test("Reset Fallback clears the remembered target, keeps the chain and cooldowns
 });
 
 // ---------------------------------------------------------------------------
-// Fixed Order: several models per provider, several keys per model
+// Manual Model Selection: several models per provider, several keys per model
 // ---------------------------------------------------------------------------
 
 const modelKey = (record) => `${bodyModel(record)}:${bearer(record)}`;
@@ -1603,11 +1595,11 @@ async function startFixedRouter(groqScript, env = {}) {
   assert.equal((await saveChain(router, "text", [
     { provider: "groq", model: "m1" }, { provider: "groq", model: "m3" }, { provider: "mistral", model: "m2" }
   ])).status, 200);
-  assert.equal((await getFallback(router)).mode, "fixed");
+  assert.equal((await getFallback(router)).mode, "manual");
   return { router, groq, mistral };
 }
 
-test("Fixed Order exhausts a model's keys, then the provider's models, before the next provider", async () => {
+test("Manual Model Selection exhausts a model's keys, then the provider's models, before the next provider", async () => {
   const { router, groq, mistral } = await startFixedRouter(() => down);
   try {
     assert.equal((await chat(router)).status, 200, "mistral finally answers");
@@ -1625,7 +1617,7 @@ test("Fixed Order exhausts a model's keys, then the provider's models, before th
   }
 });
 
-test("Fixed Order records every success, keeps strict order, and a Reset clears only the memory", async () => {
+test("Manual Model Selection records every success, keeps strict order, and a Reset clears only the memory", async () => {
   // groq's first key fails once and is cooling; its second key answers.
   const { router, groq, mistral } = await startFixedRouter((record) => (bearer(record) === "g0" ? down : ok(bodyModel(record))));
   try {
@@ -1649,7 +1641,7 @@ test("Fixed Order records every success, keeps strict order, and a Reset clears 
     assert.deepEqual(await rememberedIds(router), [], "Reset clears the remembered key");
     const after = await getFallback(router);
     assert.deepEqual(after.chain, before.chain, "the configured chain is unchanged");
-    assert.equal(after.mode, "fixed");
+    assert.equal(after.mode, "manual");
     const healthAfter = await router.request("/api/health").then(json);
     assert.deepEqual(
       healthAfter.targets.filter((target) => target.cooldownUntil > Date.now()).map((target) => [target.id, target.cooldownUntil]),
@@ -1665,7 +1657,7 @@ test("Fixed Order records every success, keeps strict order, and a Reset clears 
   }
 });
 
-test("Fixed Order keeps sessions apart, and the text and vision pools apart", async () => {
+test("Manual Model Selection keeps sessions apart, and the text and vision pools apart", async () => {
   const groq = await startMockUpstream((record) => ok(bodyModel(record)));
   const router = await startRouter({
     GROQ_API_KEYS: "t0,t1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
@@ -1674,7 +1666,7 @@ test("Fixed Order keeps sessions apart, and the text and vision pools apart", as
   try {
     await putChain(router, "text", [{ provider: "groq", model: "m1" }]);
     await putChain(router, "vision", [{ provider: "groq", model: "vm1" }]);
-    assert.equal((await getFallback(router)).mode, "fixed");
+    assert.equal((await getFallback(router)).mode, "manual");
 
     assert.equal((await chatAs(router, "alice")).status, 200);
     let remembered = (await getFallback(router)).remembered.remembered;

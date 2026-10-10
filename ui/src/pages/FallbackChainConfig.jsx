@@ -9,7 +9,7 @@ import { OrderLatency } from "../components/domain/OrderLatency.jsx";
 import { Icon } from "../components/ui/Icon.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
-import { getFallback, saveChain, saveMode, resetFallback } from "../api/fallback.js";
+import { getFallback, saveChain, resetFallback } from "../api/fallback.js";
 import { getRoutingPreview } from "../api/router.js";
 import { providerLabel, formatRelativeTime } from "../lib/format.js";
 import {
@@ -20,11 +20,11 @@ import {
 /**
  * Fallback Chain configuration — the single place routing order is decided.
  *
- * One chain per pool, in the operator's exact order. Every eligible key of a
- * model is tried before the next model; a custom order always wins, and the
- * automatic health-based order only applies when the chain is empty or the
- * operator selects that mode. Nothing on this page invents a route: the order
- * shown is what the gateway will walk.
+ * One selection per pool, in the operator's exact order. Every eligible key of a
+ * model is tried before the next model; the last successful target leads the next
+ * request. A pool with nothing selected uses the automatic health-based order
+ * instead. Nothing on this page invents a route: the order shown is what the
+ * gateway will walk.
  */
 const POOLS = [{ id: "text", label: "Text", icon: "terminal" }, { id: "vision", label: "Vision", icon: "image" }];
 const PROTOCOLS = ["openai-chat", "anthropic", "openai-responses", "gemini"];
@@ -103,7 +103,7 @@ export default function FallbackChainConfig() {
 
   const preview = useApi((opts) => getRoutingPreview({ protocol, pool }, opts), { deps: [protocol, pool, data] });
   const order = preview.data?.fallbackOrder ?? [];
-  const summary = chainSummary(chain, catalogue, data?.mode);
+  const summary = chainSummary(chain, catalogue);
 
   useEffect(() => { setQuery(""); setDraft(null); }, [pool]);
 
@@ -121,7 +121,6 @@ export default function FallbackChainConfig() {
     }
   };
 
-  const modeOf = (id) => data?.modes?.find((mode) => mode.id === id);
   const remembered = data?.remembered?.remembered?.[pool] ?? [];
 
   return (
@@ -156,49 +155,32 @@ export default function FallbackChainConfig() {
 
       {data ? (
         <>
-          {/* Operating mode: the one switch that decides what leads a request. */}
-          <section className="panel" aria-label="Fallback operating mode">
+          {/* How the pool is routed: derived from the selection, so there is no switch. */}
+          <section className="panel" aria-label="How this pool is routed">
             <div className="panel__header">
-              <span className="panel__title">Fallback mode</span>
+              <span className="panel__title">Routing</span>
               <div className="panel__actions">
                 <span className="tiny dim">
-                  {data.mode === "fixed"
-                    ? "Every request starts at the first model of the chain."
-                    : data.mode === "manual"
-                      ? "Your selection first, then every other model by health, then the two alternate again for targets that failed transiently."
-                      : "A success is remembered and tried first on the next request."}
+                  {chain.length === 0
+                    ? "Nothing is selected, so every request is ordered by health and latency."
+                    : "Your selection is tried first, in this order, then every other model by health."}
                 </span>
               </div>
             </div>
             <div className="panel__body">
-              <div className="fc-modes" role="radiogroup" aria-label="Fallback mode">
-                {(data.modes ?? []).map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={data.mode === mode.id}
-                    className={`fc-mode ${data.mode === mode.id ? "fc-mode--on" : ""}`}
-                    disabled={busy}
-                    onClick={() => data.mode === mode.id
-                      ? undefined
-                      : run(() => saveMode(mode.id), `Mode set to ${mode.label}`)}
-                  >
-                    <span className="fc-mode__head">
-                      <Icon name={data.mode === mode.id ? "check" : "route"} size={13} />
-                      {mode.label}
-                    </span>
-                    <span className="fc-mode__detail">{mode.detail}</span>
-                  </button>
-                ))}
-              </div>
+              <p className="tiny dim fc-note">
+                There is no mode to choose. A pool with models selected below is walked in that saved order — the last
+                target that answered leads the next request, and every eligible key of a model is tried before the next
+                model. If every selected target fails, every other model is tried by health and latency. Clear the
+                selection to route this pool automatically instead.
+              </p>
 
               <div className="fc-remembered">
                 <div>
                   <span className="tiny dim">
                     Remembered right now for the {pool} pool:{" "}
                     {remembered.length === 0
-                      ? "nothing — the next request starts at the first target of the active chain."
+                      ? "nothing — the next request starts at the first target of the active order."
                       : `${remembered.length} session(s).`}
                   </span>
                   {remembered.length > 0 ? (
@@ -222,7 +204,7 @@ export default function FallbackChainConfig() {
                 </button>
               </div>
               <p className="tiny dim fc-note">
-                Reset Fallback clears remembered model/key preferences only. It never deletes the chain, the mode,
+                Reset Fallback clears remembered model/key preferences only. It never deletes the selection,
                 the providers, the API keys, the configured models, valid health measurements or a genuine cooldown.
               </p>
             </div>
@@ -234,10 +216,10 @@ export default function FallbackChainConfig() {
             </span>
             <span className="tiny dim">
               {summary.failClosed
-                ? `Every entry in this chain is disabled or names a model the ${pool} pool no longer has. Clear the chain to hand routing back to the automatic order.`
+                ? `Every entry in this selection is disabled or names a model the ${pool} pool no longer has. Clear the selection to hand routing back to the automatic order.`
                 : chain.length === 0
-                  ? "No chain is configured, so the automatic health-based order is used."
-                  : "A configured chain is followed exactly; health only skips models that are cooling down."}
+                  ? "Nothing is selected, so the automatic health-based order is used."
+                  : "Your saved order is followed exactly; health only skips models that are cooling down."}
             </span>
           </div>
 
@@ -312,8 +294,8 @@ export default function FallbackChainConfig() {
               </div>
               <div className="panel__body">
                 {chain.length === 0 ? (
-                  <EmptyState title="Empty chain" icon="list">
-                    Add models from the left. While this chain is empty the router uses the
+                  <EmptyState title="Nothing selected" icon="list">
+                    Add models from the left. While nothing is selected the router uses the
                     automatic health-based order over every configured {pool} model.
                   </EmptyState>
                 ) : (

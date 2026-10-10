@@ -500,15 +500,15 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "chat"
       ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true }
       : null;
-  // The Fallback Chain, built from this request's own pool only: the remembered
-  // target first (in the modes that remember one), then the operator's
-  // configured order — or the automatic health-based order when the chain is
-  // empty or the mode asks for it. A pinned request is strict and walks its
-  // targets in key order with no chain, no automatic order and no memory.
+  // The saved Manual Model Selection for this request's own pool: those models
+  // in their saved order (the remembered target leading when it is one of them),
+  // then every model not selected, by health — or the automatic health-based
+  // order when nothing is selected. Either way the remembered target
+  // target is tried first. A pinned request is strict and walks its targets in
+  // key order with no selection, no automatic order and no memory.
   const routePlan = buildRoutePlan({
     targets: selection.selected,
     chain: fallbackChain.get(pool),
-    mode: fallbackChain.mode,
     pinned: pinned.pinned,
     health: pinned.pinned ? null : healthRegistry,
     cacheKey: `pool:${pool}`,
@@ -535,14 +535,15 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 503, { error: { message: noRouteMessage, type: "no_route" } });
   }
 
-  // A chain is saved for this pool but nothing in it can serve this request.
-  // The plan is deliberately empty: reaching for a model the chain does not
-  // name, or a key an entry excludes, would be the silent fallback the chain
-  // exists to prevent. Say so plainly instead of reporting a generic outage.
+  // A Manual Model Selection is saved for this pool but nothing in it can serve
+  // this request. The plan is deliberately empty: reaching for a model the
+  // selection does not name, or a key an entry excludes, would be the silent
+  // fallback the selection exists to prevent. Say so plainly instead of
+  // reporting a generic outage.
   if (routePlan.failClosed) {
-    const chainMessage = `The configured ${pool} Fallback Chain has no usable target for this request `
+    const chainMessage = `The saved ${pool} Manual Model Selection has no usable target for this request `
       + `(${routePlan.entries} entr${routePlan.entries === 1 ? "y" : "ies"} saved, none reachable for this protocol). `
-      + "Clear the chain to use the automatic order instead.";
+      + "Clear the selection to use the automatic order instead.";
     recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id,
@@ -718,12 +719,9 @@ async function proxy(req, res, protocol, pathname) {
       pinned.pinned ? pinnedHealth : healthRegistry,
       {
         plan: routePlan.steps,
-        // Fixed Order never remembers a success: every request starts at the
-        // chain's first target, which is what makes the mode (and its Reset)
-        // mean what it says. A pin is equally stateless.
-        // Every mode records its success. Remember Last Successful and Automatic
-        // let it lead the next request; Fixed Order only uses it to pick which
-        // key of that model goes first, never to move the model.
+        // Every walk records its success: the remembered target leads the next
+        // request, whether the pool has a saved selection or is automatic. A pin
+        // is a one-off override and stays stateless.
         remember: !pinned.pinned,
         // A skipped target never reaches the network, but it is still shown
         // in the timeline so the walk is explained, not guessed at.
@@ -1038,7 +1036,6 @@ async function handleRequest(req, res) {
     // cooling targets are excluded exactly as routing skips them.
     const ranked = routeOrderByPool(targets, {
       chains: fallbackChain.snapshot(),
-      mode: fallbackChain.mode,
       health: healthRegistry,
       isEligible: (target) => healthRegistry.isAvailable(target)
     }).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
@@ -1074,7 +1071,6 @@ async function handleRequest(req, res) {
         // for that pool will fail until the chain is fixed or cleared.
         pools: chainStatusByPool(targets, {
           chains: fallbackChain.snapshot(),
-          mode: fallbackChain.mode,
           health: healthRegistry
         })
       },

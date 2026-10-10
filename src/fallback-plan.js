@@ -6,13 +6,17 @@ import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId }
  * in the target list and the chain they are given, both of which are already
  * scoped to one pool by the caller.
  *
- *   STICKY  the remembered last-success target (only in the modes that remember)
- *   CHAIN   the operator's configured order, entry by entry, every eligible key
- *   AUTO    the same entries (or every configured target when the chain is
- *           empty) ordered by measured health and latency
+ * There is no mode switch any more; the plan follows from whether a Manual Model
+ * Selection is saved for the pool, and the mode it reports is derived from that:
  *
- * Manual Model Selection (mode `manual`) is the one mode whose plan alternates
- * between two batches inside a single request:
+ *   AUTO    no selection saved: every reachable model, ordered by measured
+ *           health and latency, led by the remembered target
+ *   MANUAL  a selection is saved: the selected models in their saved order (with
+ *           the remembered target first when it is one of them), then every model
+ *           NOT selected, by health — and both remember the last success
+ *
+ * Manual Model Selection is the one shape whose plan alternates between two
+ * batches inside a single request:
  *
  *   MANUAL        the operator's selected entries, in exactly the saved order
  *   HEALTH        every reachable model that is NOT one of those entries, by health
@@ -23,11 +27,6 @@ import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId }
  * counter: every round after the first holds only `retry` steps, and the walker
  * (`withFallback`) authorises a retry per TARGET, never per round. A round that
  * has nothing a retry is permitted for simply walks nothing.
- *
- * There is no priority phase and no separate normal-fallback phase any more:
- * the configured chain IS the order, and the automatic order is what takes over
- * when the operator has configured nothing. Nothing here re-ranks a configured
- * order — automatic sorting applies only when it was asked for.
  *
  * A step is `{ target, phase, group }`. `group` is the `provider/model` entry a
  * step belongs to, so the walker can tell "still exhausting this model's keys"
@@ -59,9 +58,6 @@ export const PLAN_SOURCE = Object.freeze({
   AUTO: "auto",
   MANUAL: "manual"
 });
-
-/** Modes in which a success is remembered and leads the next request. */
-const rememberedModes = new Set([FALLBACK_MODES.LAST_SUCCESS, FALLBACK_MODES.AUTO]);
 
 /** The model a target belongs to, as the chain names it. */
 const groupKey = (target) => `${target.provider}/${target.model}`;
@@ -326,10 +322,14 @@ function toSteps(groups, phase, extra = {}) {
 /**
  * Manual Model Selection: Manual and Health alternate within one plan.
  *
- *   MANUAL        the saved entries, in the exact order saved. Interleaved
- *                 providers stay interleaved (gemini A, groq B, gemini C ...):
- *                 nothing here groups or sorts by provider, because groups
- *                 are keyed by provider/model and walked in `configured` order.
+ *   MANUAL        the saved entries, in the exact order saved — EXCEPT that the
+ *                 remembered target leads when it is one of them.
+ *                 Interleaved providers stay interleaved (gemini A, groq B,
+ *                 gemini C ...): nothing here groups or sorts by provider,
+ *                 because groups are keyed by provider/model and walked in
+ *                 `configured` order. The remembered model's key that last
+ *                 answered goes first WITHIN it, and its other keys follow in
+ *                 key order, before the next selected model.
  *   HEALTH        every reachable target whose provider/model is not one of
  *                 the saved entries, ordered by the existing health + latency
  *                 ordering. "Saved" includes parked (disabled) entries — an
@@ -346,42 +346,72 @@ function toSteps(groups, phase, extra = {}) {
  * Both batches are computed ONCE, here, so the health order is stable for the
  * whole request; a later health refresh can only change the next request's plan.
  *
+ * The remembered target promotes only when it is one of the SELECTED models: the
+ * operator's saved order is what decides between models, and an unselected model
+ * that happened to answer last must not jump ahead of the selection. It is still
+ * remembered (the session keeps it), it simply does not lead.
+ *
  * Fail closed: when the selection itself has nothing walkable for this request,
  * the plan is empty. The health batch exists to catch FAILURES of the operator's
  * order, not to substitute for an order that cannot be honoured at all.
  */
-function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now }) {
+function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now, stickyTargetId }) {
   const selected = new Set(savedEntries.map((entry) => entryId(entry)));
   const manualFirst = toSteps(configured, PHASES.MANUAL);
   const meta = {
     source: PLAN_SOURCE.MANUAL,
     mode: FALLBACK_MODES.MANUAL,
     configured: configured.length,
-    entries: savedEntries.length,
-    sticky: null,
-    rememberedKey: null
+    entries: savedEntries.length
   };
 
   if (manualFirst.length === 0) {
-    return { steps: [], groups: configured, failClosed: true, ...meta };
+    return { steps: [], groups: configured, failClosed: true, sticky: null, ...meta };
   }
+
+  // The remembered target, but only if it is part of the selection the operator
+  // saved. `configured` is that selection as the configuration narrowed it, so a
+  // key the entry excludes — or a model since disabled — is simply not found.
+  const sticky = resolveSticky({ stickyTargetId, ordered: configured, pinned: false });
+  let selectedGroups = configured;
+  let head = [];
+  let stickyTarget = null;
+  if (sticky) {
+    stickyTarget = sticky.target;
+    // The remembered model leads, with the key that answered first.
+    const siblings = sticky.group.targets
+      .filter((target) => targetId(target) !== targetId(sticky.target));
+    head = [
+      { target: sticky.target, phase: PHASES.STICKY, group: sticky.group.id },
+      ...siblings.map((target) => ({ target, phase: PHASES.STICKY, group: sticky.group.id }))
+    ];
+    selectedGroups = [sticky.group, ...configured.filter((group) => group.id !== sticky.group.id)];
+  }
+
+  // `head` already holds every target of the remembered group (the remembered
+  // key and its siblings), so that group must not be listed again under MANUAL.
+  const manualSteps = toSteps(
+    sticky ? selectedGroups.filter((group) => group.id !== sticky.group.id) : selectedGroups,
+    PHASES.MANUAL
+  );
 
   const others = [...grouped.values()].filter((group) => !selected.has(group.id));
   const fallbackGroups = automaticGroupsOrder(others, { cacheKey: `${cacheKey}|manual-fallback`, health, now });
   const healthFirst = toSteps(fallbackGroups, PHASES.HEALTH);
 
-  const steps = [...manualFirst, ...healthFirst];
+  const steps = [...head, ...manualSteps, ...healthFirst];
   for (let round = 1; round <= TARGET_RETRY_ALLOWANCE; round += 1) {
     steps.push(
-      ...toSteps(configured, PHASES.MANUAL_RETRY, { retry: true, round }),
+      ...toSteps(selectedGroups, PHASES.MANUAL_RETRY, { retry: true, round }),
       ...toSteps(fallbackGroups, PHASES.HEALTH_RETRY, { retry: true, round })
     );
   }
 
   return {
     steps,
-    groups: [...configured, ...fallbackGroups],
+    groups: [...selectedGroups, ...fallbackGroups],
     failClosed: false,
+    sticky: stickyTarget,
     ...meta
   };
 }
@@ -389,16 +419,21 @@ function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, 
 /**
  * Builds the order a request will walk.
  *
+ * There is no mode argument: the shape of the plan follows from whether the pool
+ * has a saved Manual Model Selection. A non-empty selection is walked as the
+ * alternating Manual/Health plan above; an empty one (or a pinned request) falls
+ * through to the ordered path below. The `mode` reported on the plan is derived
+ * from the same fact, so a caller can never be told a mode the walk disagrees
+ * with.
+ *
  * @param targets         protocol-reachable targets of the request's own pool
- * @param chain           this pool's configured entries
- * @param mode            fixed | last-success | auto
+ * @param chain           this pool's saved Manual Model Selection
  * @param stickyTargetId  remembered target id, already TTL-checked by the caller
- * @param pinned          a pinned request bypasses the chain entirely
+ * @param pinned          a pinned request bypasses the selection entirely
  */
 export function buildRoutePlan({
   targets = [],
   chain = [],
-  mode = FALLBACK_MODES.FIXED,
   stickyTargetId = null,
   health = null,
   now = Date.now(),
@@ -409,125 +444,83 @@ export function buildRoutePlan({
   const grouped = groupTargets(all);
   const { groups: configured } = chainGroups(chain, all);
   /**
-   * "A chain is configured" and "a chain is usable" are different questions,
+   * "A selection is saved" and "a selection is usable" are different questions,
    * and the difference is the whole of fail-closed routing.
    *
-   * No saved entries at all means the operator has not configured this pool, so
-   * the automatic order applies — that is the documented behaviour of an
-   * unconfigured router. Entries that ARE saved but yield nothing walkable mean
-   * the operator has stated an order the router cannot honour; widening to
-   * other models, or to keys an entry excludes, would be a silent fallback to
-   * exactly what the chain exists to rule out. That case walks nothing.
+   * No saved entries at all means the operator has selected nothing, so the
+   * automatic order applies — that is the documented behaviour of an unconfigured
+   * router. Entries that ARE saved but yield nothing walkable mean the operator
+   * has stated an order the router cannot honour; widening to other models, or to
+   * keys an entry excludes, would be a silent fallback to exactly what the
+   * selection exists to rule out. That case walks nothing.
    */
   const savedEntries = allEntries(chain);
   const useChain = !pinned && savedEntries.length > 0;
+  const mode = savedEntries.length > 0 ? FALLBACK_MODES.MANUAL : FALLBACK_MODES.AUTO;
 
-  // Manual Model Selection has its own alternating plan; every other mode, and
-  // every pinned request, takes the paths below untouched.
-  if (useChain && mode === FALLBACK_MODES.MANUAL) {
-    return buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now });
+  // A saved Manual Model Selection has its own alternating plan; every pinned
+  // request and every empty selection takes the ordered path below.
+  if (useChain) {
+    return buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, now, stickyTargetId });
   }
 
   let ordered;
   let source;
   if (pinned) {
-    // A pin means "this exact target": no chain, no automatic order, no sticky.
+    // A pin means "this exact target": no automatic order, no sticky.
     ordered = [...grouped.values()];
     source = PLAN_SOURCE.CHAIN;
-  } else if (!useChain) {
+  } else {
     ordered = automaticGroupsOrder([...grouped.values()], { cacheKey, health, now });
     source = PLAN_SOURCE.AUTO;
-  } else if (mode === FALLBACK_MODES.AUTO) {
-    ordered = automaticGroupsOrder(configured, { cacheKey, health, now });
-    source = PLAN_SOURCE.AUTO;
-  } else {
-    ordered = configured;
-    source = PLAN_SOURCE.CHAIN;
-  }
-
-  // Fixed Order remembers a success too, but only to choose WHICH KEY of that
-  // model is tried first. The model keeps the position the operator gave it, so
-  // the remembered target can never move ahead of an earlier configured model.
-  let rememberedKey = null;
-  if (!pinned && useChain && source === PLAN_SOURCE.CHAIN && mode === FALLBACK_MODES.FIXED) {
-    const placed = placeRememberedKey(ordered, stickyTargetId);
-    if (placed) {
-      ordered = placed.groups;
-      rememberedKey = placed.target;
-    }
   }
 
   const phase = source === PLAN_SOURCE.AUTO ? PHASES.AUTO : PHASES.CHAIN;
   const base = toSteps(ordered, phase);
 
   /**
-   * A chain is saved for this pool but there is nothing walkable in it. The plan
-   * is deliberately empty: the caller must report "your chain cannot serve this
-   * request", never quietly reach for a target the chain does not cover.
+   * No selection is saved for this pool, so there is nothing that can fail
+   * closed: the automatic order covers every reachable target.
    */
-  const failClosed = useChain && base.length === 0;
   const meta = {
     source,
     mode,
     groups: ordered,
     configured: configured.length,
     entries: savedEntries.length,
-    failClosed
+    failClosed: false
   };
 
-  const sticky = resolveSticky({ stickyTargetId, ordered, mode, pinned });
-  if (!sticky) {
-    return { steps: base, sticky: null, rememberedKey, ...meta };
-  }
+  if (pinned) return { steps: base, sticky: null, ...meta };
+
+  const sticky = resolveSticky({ stickyTargetId, ordered, pinned });
+  if (!sticky) return { steps: base, sticky: null, ...meta };
 
   // The remembered target leads, and the rest of its own model is exhausted
-  // before the configured order resumes — otherwise a working second key of the
+  // before the automatic order resumes — otherwise a working second key of the
   // remembered model would be passed over in favour of another model entirely.
   //
   // Both halves come from the REMEMBERED GROUP AS THE ORDER HOLDS IT, never from
   // the raw target list: `ordered` is what the configuration narrowed each entry
-  // to, so a key the operator has excluded is not in it to be remembered or to
-  // be tried as a sibling. Reading the unrestricted group here would let an old
+  // to, so a key an entry excludes is not in it to be remembered or to be tried
+  // as a sibling. Reading the unrestricted group here would let an old
   // remembered target — and every key beside it — silently bypass a key
-  // restriction the operator has since applied.
+  // restriction since applied.
   const siblings = sticky.group.targets
     .filter((target) => targetId(target) !== targetId(sticky.target));
+  // The remembered group is already fully listed above, so drop it from the base
+  // rather than listing its targets a second time.
+  const rest = base.filter((step) => step.group !== sticky.group.id);
 
   return {
     steps: [
       { target: sticky.target, phase: PHASES.STICKY, group: sticky.group.id },
       ...siblings.map((target) => ({ target, phase: PHASES.STICKY, group: sticky.group.id })),
-      ...base
+      ...rest
     ],
     sticky: sticky.target,
-    rememberedKey: null,
     ...meta
   };
-}
-
-/**
- * Fixed Order's use of a remembered success: the remembered key is tried first
- * WITHIN its own model, and the model's other keys follow in key order.
- *
- * Groups are never reordered — this returns the same groups in the same
- * positions, with only the remembered group's key order changed. The search runs
- * over the groups as the configuration narrowed them, so a key the operator has
- * since excluded (or a model they have since disabled) is simply not found and
- * the plan is the plain configured order.
- */
-function placeRememberedKey(groups, stickyTargetId) {
-  if (!stickyTargetId) return null;
-  for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index];
-    const target = group.targets.find((item) => targetId(item) === stickyTargetId);
-    if (!target) continue;
-    if (group.targets[0] === target) return { groups, target };
-    const rest = group.targets.filter((item) => item !== target);
-    const next = groups.slice();
-    next[index] = { ...group, targets: [target, ...rest] };
-    return { groups: next, target };
-  }
-  return null;
 }
 
 function automaticGroupsOrder(groups, { cacheKey, health, now }) {
@@ -537,8 +530,7 @@ function automaticGroupsOrder(groups, { cacheKey, health, now }) {
 }
 
 /**
- * The remembered target, when the selected mode remembers one and the ORDER
- * still contains it.
+ * The remembered target, when the ORDER still contains it.
  *
  * The search runs over `ordered` — the groups as the configuration narrowed
  * them, entry by entry — and not over the raw target list. That is the whole
@@ -546,13 +538,11 @@ function automaticGroupsOrder(groups, { cacheKey, health, now }) {
  * simply not found, so it cannot lead the walk, and the group it is returned
  * with is already narrowed to the keys that are still permitted.
  *
- * `fixed` never resolves one: that is the whole point of the mode, and it is
- * also what makes "Reset Fallback" trivially correct there. A pinned request is
- * strict — it uses neither the chain nor the remembered target.
+ * A pinned request is strict — it uses neither the selection nor the remembered
+ * target.
  */
-function resolveSticky({ stickyTargetId, ordered, mode, pinned }) {
+function resolveSticky({ stickyTargetId, ordered, pinned }) {
   if (pinned || !stickyTargetId) return null;
-  if (!rememberedModes.has(mode)) return null;
 
   for (const group of ordered) {
     const target = group.targets.find((item) => targetId(item) === stickyTargetId);
@@ -584,7 +574,6 @@ export function effectiveOrder(steps, isEligible = () => true) {
  */
 export function routeOrderByPool(targets, {
   chains = {},
-  mode = FALLBACK_MODES.FIXED,
   health = null,
   isEligible = () => true,
   now = Date.now()
@@ -596,7 +585,6 @@ export function routeOrderByPool(targets, {
     const { steps } = buildRoutePlan({
       targets: inPool,
       chain: chains?.[pool] ?? [],
-      mode,
       health,
       now,
       cacheKey: `pool:${pool}`
@@ -619,7 +607,6 @@ export function routeOrderByPool(targets, {
  */
 export function chainStatusByPool(targets, {
   chains = {},
-  mode = FALLBACK_MODES.FIXED,
   health = null,
   now = Date.now()
 } = {}) {
@@ -630,18 +617,17 @@ export function chainStatusByPool(targets, {
     const plan = buildRoutePlan({
       targets: inPool,
       chain: chains?.[pool] ?? [],
-      mode,
       health,
       now,
       cacheKey: `status:${pool}`
     });
     out[pool] = {
       // Saved entries that permit nothing: requests for this pool fail rather
-      // than route to a model outside the chain. This is the signal that
+      // than route to a model outside the selection. This is the signal that
       // separates a configuration fault from a provider being down.
       failClosed: plan.failClosed,
       // Saved entries, and how many of them name a target this pool can reach.
-      // Both are about the CHAIN, not about the pool: an unconfigured pool
+      // Both are about the SELECTION, not about the pool: an empty selection
       // reports 0/0 while still routing every target automatically.
       entries: plan.entries,
       resolved: plan.configured,

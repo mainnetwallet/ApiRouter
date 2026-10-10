@@ -179,7 +179,7 @@ test("BUG 2: an unrestricted entry, a disabled entry and a model outside the cha
   const chain = [entry("a", "free"), entry("a", "off", { keys: [1], enabled: false })];
   const handler = createApi({
     config: { retryableStatus: [500] }, targets, health, requestLog: { entries: new Map() },
-    fallbackChain: { mode: FALLBACK_MODES.FIXED, get: (name) => (name === "text" ? chain : []) }
+    fallbackChain: { mode: FALLBACK_MODES.MANUAL, get: (name) => (name === "text" ? chain : []) }
   });
   const { body } = await callApi(handler, "/api/fallback");
   const latency = (model) => body.catalogue.text.find((item) => item.model === model).latencyMs;
@@ -212,10 +212,10 @@ test("BUG 2: a restricted entry whose eligible keys were never measured is unmea
 // BUG 3 — an excluded key must not inherit another key's ordering latency
 // ---------------------------------------------------------------------------
 
-function previewOf({ chain, mode = FALLBACK_MODES.AUTO, targets, health, stickyTargetId = null }) {
+function previewOf({ chain, targets, health, stickyTargetId = null }) {
   resetAutomaticOrderCache();
   return describeRouting({
-    targets, health, protocol: PROTOCOL, chain, mode, stickyTargetId, now: BASE + 5_000
+    targets, health, protocol: PROTOCOL, chain, stickyTargetId, now: BASE + 5_000
   });
 }
 
@@ -226,22 +226,21 @@ test("BUG 3: a key excluded by the chain entry has rank null AND no ordering lat
   health.markSuccess(k0, { latencyMs: 50 }, tick());
   health.markSuccess(k1, { latencyMs: 900 }, tick());
 
-  for (const mode of [FALLBACK_MODES.FIXED, FALLBACK_MODES.AUTO, FALLBACK_MODES.MANUAL]) {
-    const preview = previewOf({ chain: [entry("a", "A", { keys: [1] })], mode, targets: [k0, k1], health });
-    const excluded = preview.candidates.find((item) => item.keyIndex === 0);
-    const eligible = preview.candidates.find((item) => item.keyIndex === 1);
+  // Whether the pool has a saved selection or not, the same rule must hold.
+  const preview = previewOf({ chain: [entry("a", "A", { keys: [1] })], targets: [k0, k1], health });
+  const excluded = preview.candidates.find((item) => item.keyIndex === 0);
+  const eligible = preview.candidates.find((item) => item.keyIndex === 1);
 
-    assert.equal(excluded.rank, null, `${mode}: key 0 is not in the plan`);
-    assert.equal(excluded.orderLatencyMs, null, `${mode}: it must not inherit key 1's 900 ms`);
-    assert.equal(excluded.orderLatencySource, null, `${mode}: nor its source`);
+  assert.equal(excluded.rank, null, "key 0 is not in the plan");
+  assert.equal(excluded.orderLatencyMs, null, "it must not inherit key 1's 900 ms");
+  assert.equal(excluded.orderLatencySource, null, "nor its source");
 
-    // Valid preview information for the eligible target is preserved.
-    assert.equal(eligible.rank, 1);
-    assert.equal(eligible.orderLatencyMs, 900);
-    assert.equal(eligible.orderLatencySource, "request");
-    assert.equal(preview.selected.orderLatencyMs, 900);
-    assert.deepEqual(preview.fallbackOrder.map((item) => item.keyIndex), [1]);
-  }
+  // Valid preview information for the eligible target is preserved.
+  assert.equal(eligible.rank, 1);
+  assert.equal(eligible.orderLatencyMs, 900);
+  assert.equal(eligible.orderLatencySource, "request");
+  assert.equal(preview.selected.orderLatencyMs, 900);
+  assert.deepEqual(preview.fallbackOrder.map((item) => item.keyIndex), [1]);
 });
 
 test("BUG 3: unrestricted keys of one model still all report the model's single figure, cooling keys included", () => {
@@ -269,7 +268,7 @@ test("BUG 3: in Manual Model Selection a selected model's excluded key gets noth
   health.markSuccess(u, { latencyMs: 120 }, tick());
 
   const preview = previewOf({
-    chain: [entry("a", "S", { keys: [1] })], mode: FALLBACK_MODES.MANUAL, targets: [s0, s1, u], health
+    chain: [entry("a", "S", { keys: [1] })], targets: [s0, s1, u], health
   });
   const find = (model, key) => preview.candidates.find((item) => item.model === model && item.keyIndex === key);
   assert.equal(find("S", 0).orderLatencyMs, null);
@@ -497,7 +496,7 @@ test("BUG 6: a probe that reports an unusable latency is timed by the refresh it
 // BUG 4 (UI) — the backend half of the contract its wording relies on
 // ---------------------------------------------------------------------------
 
-test("BUG 4 contract: the preview's phases say exactly where latency decided a position, per mode", () => {
+test("BUG 4 contract: the preview's phases say exactly where latency decided a position", () => {
   // The UI says "ordered by latency" only for phases auto / health-fallback / health-retry
   // (ui/src/lib/fallbackChain.js LATENCY_ORDERED_PHASES). That is only honest if the
   // planner really sorts by latency in those phases and in no others, so pin it here.
@@ -512,25 +511,28 @@ test("BUG 4 contract: the preview's phases say exactly where latency decided a p
   const chain = [entry("a", "Slow"), entry("b", "Mid"), entry("c", "Fast")];
   const phases = (preview) => preview.fallbackOrder.map((item) => `${item.model}:${item.phase}`);
 
-  // Fixed Order: saved order wins whatever the latency, and every step is `chain`.
+  // A saved selection: the saved order wins whatever the latency, so every step is
+  // `manual-selection` — latency decided none of these positions.
   assert.deepEqual(
-    phases(previewOf({ chain, mode: FALLBACK_MODES.FIXED, targets, health })),
-    ["Slow:chain", "Mid:chain", "Fast:chain"]
+    phases(previewOf({ chain, targets, health })),
+    ["Slow:manual-selection", "Mid:manual-selection", "Fast:manual-selection"]
   );
 
-  // Automatic: sorted by latency (`auto`); a remembered target leads as `sticky`, not as a latency win.
+  // No selection: sorted by latency (`auto`); a remembered target leads as `sticky`,
+  // not as a latency win.
   assert.deepEqual(
-    phases(previewOf({ chain, mode: FALLBACK_MODES.AUTO, targets, health })),
+    phases(previewOf({ chain: [], targets, health })),
     ["Fast:auto", "Mid:auto", "Slow:auto"]
   );
   assert.deepEqual(
-    phases(previewOf({ chain, mode: FALLBACK_MODES.AUTO, targets, health, stickyTargetId: "a:Slow:key-0" })),
+    phases(previewOf({ chain: [], targets, health, stickyTargetId: "a:Slow:key-0" })),
     ["Slow:sticky", "Fast:auto", "Mid:auto"]
   );
 
-  // Manual Model Selection: the selected model keeps its saved place; only the unselected batch is latency-ordered.
+  // A partly-selected pool: the selected model keeps its saved place; only the
+  // unselected batch is latency-ordered (`health-fallback`).
   assert.deepEqual(
-    phases(previewOf({ chain: [entry("a", "Slow")], mode: FALLBACK_MODES.MANUAL, targets, health })),
+    phases(previewOf({ chain: [entry("a", "Slow")], targets, health })),
     ["Slow:manual-selection", "Fast:health-fallback", "Mid:health-fallback"]
   );
 });

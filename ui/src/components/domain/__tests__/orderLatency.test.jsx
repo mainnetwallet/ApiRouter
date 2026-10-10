@@ -24,8 +24,8 @@ const text = (markup) => markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 const count = (haystack, needle) => haystack.split(needle).length - 1;
 
 describe("FallbackChain wording by mode", () => {
-  it("Fixed Order shows the latency as information and never says 'ordered by'", () => {
-    const markup = html([target("m1", "chain"), target("m2", "chain", { orderLatencyMs: 40 })]);
+  it("a saved selection shows the latency as information and never says 'ordered by'", () => {
+    const markup = html([target("m1", "manual-selection"), target("m2", "manual-selection", { orderLatencyMs: 40 })]);
     expect(count(text(markup), "latency")).toBeGreaterThanOrEqual(2);
     expect(markup.toLowerCase()).not.toContain("ordered by");
     expect(markup).toContain('data-latency-decides-order="false"');
@@ -80,7 +80,7 @@ describe("OrderLatency", () => {
     expect(text(decided).trim()).toBe("ordered by latency 900 ms");
     expect(decided).toContain("Ordered by latency");
 
-    const info = renderToStaticMarkup(<OrderLatency item={target("m", "chain")} />);
+    const info = renderToStaticMarkup(<OrderLatency item={target("m", "manual-selection")} />);
     expect(text(info).trim()).toBe("latency 900 ms");
     expect(info).toContain("not from latency");
   });
