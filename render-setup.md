@@ -106,6 +106,54 @@ GROQ_MODELS=openai/gpt-oss-120b,qwen/qwen3.8-27b
 
 Cloudflare use korle `CLOUDFLARE_API_KEYS` er sathe `CLOUDFLARE_ACCOUNT_IDS` o lagbe.
 
+### Baki shob env (models, base URL, vision) - `.env.example` er shob
+
+Shudhu key dile hobe na. Repo te `.env` file thake na (`.gitignore` e), tai Render e
+`.env.example` er baki variable gulo-o **env variable hishebe** dite hobe.
+Nahole model/base URL code e paoa jabe na.
+
+**Sobcheye shohoj upay: bulk paste**
+
+1. Local e `.env.example` copy kore `.env` banao, shob key bhore nao.
+2. Render → service → **Environment** → **Add from .env** (ba **Edit as .env**).
+3. `.env` er content paste koro → **Save**.
+4. Faka value (`KEY=`) gulo ba `PORT` paste korar age muche dao.
+
+Ei group gulo thakte hobe:
+
+| Group | Variable | Kaj |
+|---|---|---|
+| Timeout / retry | `REQUEST_TIMEOUT_MS`, `STREAM_CONNECT_TIMEOUT_MS`, `RETRY_STATUS_CODES` | Request timeout ar kon status e retry hobe |
+| Text key | `*_API_KEYS` (+ `CLOUDFLARE_ACCOUNT_IDS`) | Provider key |
+| Text model | `*_MODELS` | Prottek provider er model list |
+| Base URL | `*_BASE_URL` | Provider er API root |
+| Vision key | `*_VISION_API_KEYS` (+ `CLOUDFLARE_VISION_ACCOUNT_IDS`) | Image request er jonno key |
+| Vision model | `*_VISION_MODELS` | Image request er model list |
+| Vision base URL | `*_VISION_BASE_URL` | Vision provider er API root |
+| AgentRouter | `AGENTROUTER_ORIGINATOR` (`AGENTROUTER_VERSION`, `AGENTROUTER_USER_AGENT` optional) | AgentRouter client identity |
+
+Vision key sadharonoto text key er same hoy, tai text key paste korar somoy
+`*_VISION_API_KEYS` e-o same value dao.
+
+Model bodlate chaile shudhu oi provider er `*_MODELS` edit koro, jemon:
+
+```
+GROQ_MODELS=openai/gpt-oss-120b,qwen/qwen3.8-27b
+```
+
+**Je gulo Render e dite hobe na (bad dao)**
+
+| Variable | Keno |
+|---|---|
+| `PORT` | Render nijei set kore (`10000`) |
+| `FALLBACK_CHAIN_FILE`, `MANUAL_SELECTION_FILE` | Code er default-i `data/*.json`, same |
+| `KEEPALIVE_URL` | Render e `RENDER_EXTERNAL_URL` theke auto |
+| `KEEPALIVE_INTERVAL_MS` | Default 10 min thik ache |
+
+Faka value (jemon `SAMBANOVA_MODELS=`) faka-i thak, set korar dorkar nei.
+
+Optional (code e default ache, `.env.example` e nei): `MAX_REQUEST_BODY_BYTES`.
+
 ### Dio na
 
 - `PORT`: Render nijei set kore dey (code ta `PORT` pore).
@@ -221,7 +269,8 @@ public monitor er jonno safe.
 | UI khule na, `Not found` | `npm run ui:build` hoy ni. Build command thik kore redeploy koro |
 | Repo list e nai | GitHub → Settings → Applications → Render → repo access dao |
 | `401 Unauthorized` | `Authorization: Bearer <token>` thik ache kina, `APIROUTER_API_KEYS` match kore kina |
-| Kono model chole na | Provider key `*_API_KEYS` e boshano hoy ni, ba key thik na. Control Panel er Health page dekho |
+| Kono model chole na | Provider key `*_API_KEYS` ba `*_MODELS` / `*_BASE_URL` boshano hoy ni, ba key thik na. Control Panel er Health page dekho |
+| Vision (image) request fail | `*_VISION_API_KEYS`, `*_VISION_MODELS`, `*_VISION_BASE_URL` boshano ache kina dekho |
 | Service sleep kore | UptimeRobot add koro (step 7) |
 | Deploy fail kintu ager kaj korto | Logs e error dekho: Dashboard → service → **Logs** |
 | `Port scan timeout` | `PORT` env nijer hate dio na, Render er-ta e chalte dao |
@@ -233,7 +282,7 @@ Logs dekhte: Dashboard → tomar service → **Logs** tab.
 ## 10. Security checklist
 
 - [ ] `APIROUTER_API_KEYS` set kora ache (public URL e khola gateway rakho na)
-- [ ] Kono API key / GitHub token repo te commit hoy ni
+- [ ] Kono API key / GitHub token repo te commit hoy ni (`.env.example` e shudhu faka value)
 - [ ] `.env` `.gitignore` e ache
 - [ ] Kono token chat/screenshot e share hole **sathe sathe revoke** kore notun banao
   (GitHub → Settings → Developer settings → Personal access tokens)
