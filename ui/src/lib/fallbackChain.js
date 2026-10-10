@@ -59,7 +59,7 @@ export function latencyDecidesOrder(item) {
  * explanation, and always agrees with `label`.
  */
 export function orderLatencyInfo(item) {
-  const ms = Number.isFinite(item?.orderLatencyMs) ? item.orderLatencyMs : null;
+  const ms = validLatencyMs(item?.orderLatencyMs);
   const source = item?.orderLatencySource === "request" || item?.orderLatencySource === "probe"
     ? item.orderLatencySource
     : null;
@@ -214,6 +214,15 @@ export function keysLabel(entry, group) {
 }
 
 /**
+ * A latency is a measurement only if it is a finite number above zero — the same
+ * rule the gateway applies (`validLatencyMs` in src/health.js). 0, negatives,
+ * NaN, Infinity, null and non-numbers are "not measured".
+ */
+export function validLatencyMs(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
  * The measured latency to display, with its source. `null` means the router has
  * never measured this model — the panel must say so rather than show a number
  * the router does not have.
@@ -223,7 +232,7 @@ export function latencyOf(group) {
   // The gateway reports the figure it ORDERS this model by, with its source.
   // That is the one number to show; the two component figures below are only
   // the fallback for a payload that predates it.
-  if (Number.isFinite(group.latencyMs) && (group.latencySource === "request" || group.latencySource === "probe")) {
+  if (validLatencyMs(group.latencyMs) !== null && (group.latencySource === "request" || group.latencySource === "probe")) {
     return group.latencySource === "request"
       ? { ms: group.latencyMs, source: "request", label: "measured from requests" }
       : { ms: group.latencyMs, source: "probe", label: "from the health probe" };
@@ -233,10 +242,10 @@ export function latencyOf(group) {
   // The provider-wide component figures below cover EVERY key of the model,
   // including keys a chain entry excludes, so they must not stand in for it.
   if ("latencySource" in group) return { ms: null, source: null, label: "not measured" };
-  if (Number.isFinite(group.measuredLatencyMs)) {
+  if (validLatencyMs(group.measuredLatencyMs) !== null) {
     return { ms: group.measuredLatencyMs, source: "request", label: "measured from requests" };
   }
-  if (Number.isFinite(group.probeLatencyMs)) {
+  if (validLatencyMs(group.probeLatencyMs) !== null) {
     return { ms: group.probeLatencyMs, source: "probe", label: "from the health probe" };
   }
   return { ms: null, source: null, label: "not measured" };
