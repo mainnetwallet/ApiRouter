@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { startKeepAlive } from "./keepalive.js";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
@@ -1126,15 +1127,18 @@ const server = http.createServer((req, res) => {
 });
 
 const stopHealthMonitor = startHealthMonitor(targets, trackedCheckTargetHealth, HEALTH_CHECK_INTERVAL_MS);
+const stopKeepAlive = startKeepAlive();
 process.once("SIGINT", () => {
   monitor.stop();
   stopHealthMonitor();
+  stopKeepAlive();
   handleApi.closeStreams();
   server.close(() => process.exit(0));
 });
 process.once("SIGTERM", () => {
   monitor.stop();
   stopHealthMonitor();
+  stopKeepAlive();
   handleApi.closeStreams();
   server.close(() => process.exit(0));
 });
