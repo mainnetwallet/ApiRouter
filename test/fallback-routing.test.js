@@ -4,6 +4,7 @@ import { HealthRegistry, targetId } from "../src/health.js";
 import { FALLBACK_MODES } from "../src/fallback-chain.js";
 import { buildRoutePlan, resetAutomaticOrderCache } from "../src/fallback-plan.js";
 import {
+  CLIENT_ERROR_COOLDOWN_MS,
   FAILURE_SCOPE,
   RouteSession,
   SessionStore,
@@ -379,20 +380,56 @@ test("a provider-scoped failure never crosses a pool boundary", async () => {
   assert.ok(health.isAvailable(vision[0]), "the vision pool's target is a separate target and stays up");
 });
 
-test("a non-retryable failure ends the walk instead of continuing it", async () => {
+test("a status outside the retry list no longer ends the walk: the next key and model are still tried", async () => {
   resetAutomaticOrderCache();
   const calls = [];
   await assert.rejects(
     walk(async (target) => {
-      calls.push(target.model);
+      calls.push(`${target.model}#${target.keyIndex}`);
       throw fail(418);
     }, { retryable: new Set([500]) }),
     (error) => {
-      assert.equal(error.status, 418);
+      assert.equal(error.status, 418, "every target refused the same way, so the client sees that status");
+      assert.equal(error.failures.length, 5);
       return true;
     }
   );
-  assert.deepEqual(calls, ["A"], "a non-retryable error must not be retried on the next target");
+  assert.deepEqual(calls, ["A#0", "A#1", "B#0", "B#1", "C#0"], "each key of each model is attempted once");
+});
+
+test("a failure on one key with a status outside the retry list is served by the model's next key", async () => {
+  resetAutomaticOrderCache();
+  const health = new HealthRegistry();
+  const calls = [];
+  const result = await walk(async (target) => {
+    calls.push(`${target.model}#${target.keyIndex}`);
+    if (target.model === "A" && target.keyIndex === 0) throw fail(422);
+    return `${target.model}#${target.keyIndex}`;
+  }, { health, retryable: new Set([500]) });
+
+  assert.equal(result, "A#1");
+  assert.deepEqual(calls, ["A#0", "A#1"]);
+  assert.ok(!health.isAvailable(t("a", "A", 0)), "only the key that failed is cooling");
+  assert.ok(health.isAvailable(t("a", "A", 1)));
+  assert.ok(health.isAvailable(t("b", "B", 0)));
+  const left = Number(health.get(targetId(t("a", "A", 0))).cooldownUntil) - Date.now();
+  assert.ok(left > 0 && left <= CLIENT_ERROR_COOLDOWN_MS, `a request-level 4xx cools briefly, not 12 minutes (${left}ms)`);
+});
+
+test("a client disconnect (retryable: false) still ends the walk at once", async () => {
+  resetAutomaticOrderCache();
+  const calls = [];
+  await assert.rejects(
+    walk(async (target) => {
+      calls.push(`${target.model}#${target.keyIndex}`);
+      throw fail(499, { retryable: false });
+    }),
+    (error) => {
+      assert.equal(error.status, 499);
+      return true;
+    }
+  );
+  assert.deepEqual(calls, ["A#0"], "nobody is waiting for an answer, so no further key is tried");
 });
 
 test("an error that opts out of health tracking does not cool anything down", async () => {

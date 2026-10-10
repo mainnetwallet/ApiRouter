@@ -123,7 +123,7 @@ Ei group gulo thakte hobe:
 
 | Group | Variable | Kaj |
 |---|---|---|
-| Timeout / retry | `REQUEST_TIMEOUT_MS`, `STREAM_CONNECT_TIMEOUT_MS`, `RETRY_STATUS_CODES` | Request timeout ar kon status e retry hobe |
+| Timeout / retry | `REQUEST_TIMEOUT_MS`, `STREAM_CONNECT_TIMEOUT_MS`, `RETRY_STATUS_CODES` | Request timeout. `RETRY_STATUS_CODES` ekhon shudhu compatibility-r jonno: shob error-e porer key/model try hoy |
 | Text key | `*_API_KEYS` (+ `CLOUDFLARE_ACCOUNT_IDS`) | Provider key |
 | Text model | `*_MODELS` | Prottek provider er model list |
 | Base URL | `*_BASE_URL` | Provider er API root |

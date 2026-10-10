@@ -229,6 +229,7 @@ A failure cools down what it actually describes:
 | Key/account rejection (`401`, `402`, `403`) | Only that key + model — the key's other models are still tried, each on its own |
 | Request or model problem (`400`, `404`, `413`, `422`) | Only that target — never a sibling that shares the key |
 | Rate limit (`429`) | Only that key + model, for the upstream `Retry-After` (5s–12min), or 60s without one |
+| Other client errors (`405`, `410`, `415`, `451` ...) | Only that key + model, for 1 minute |
 | Anything else (`5xx`, timeouts) | Only that target |
 
 A target is one provider + model + key. When one key of a model fails, the model's

@@ -169,7 +169,28 @@ function cooldownOptions(status, error = null) {
   if (status === 413) return { cooldownMs: SIZE_LIMIT_COOLDOWN_MS };
   if (status === 408) return { cooldownMs: TIMEOUT_COOLDOWN_MS };
   if (status === 429) return { cooldownMs: rateLimitCooldownMs(error) };
+  // Any other client error (405, 410, 415, 422, 451 ...) most likely belongs to
+  // this one request, so it must not park the key for the full 12 minutes. 401,
+  // 402, 403 and 404 describe the key or the model and keep the default.
+  if (status >= 400 && status < 500 && !KEY_LEVEL_STATUS_CODES.has(status) && status !== 404) {
+    return { cooldownMs: CLIENT_ERROR_COOLDOWN_MS };
+  }
   return {};
+}
+
+// Client errors with no dedicated rule: a short per key + model cooldown.
+export const CLIENT_ERROR_COOLDOWN_MS = 60 * 1000;
+
+// Statuses that say something about the key, the model or the moment rather than
+// about the request. When every target fails with the same OTHER 4xx, that is
+// the request's own fault and the client is told so, not given a 502.
+const NOT_A_REQUEST_FAULT = new Set([401, 402, 403, 404, 408, 409, 425, 429]);
+
+function sharedClientErrorStatus(failures) {
+  if (failures.length === 0) return null;
+  const status = failures[0].status;
+  if (!(status >= 400 && status < 500) || NOT_A_REQUEST_FAULT.has(status)) return null;
+  return failures.every((failure) => failure.status === status) ? status : null;
 }
 
 export function isRetryableStatus(status, retryableStatus = DEFAULT_RETRY_STATUS_CODES) {
@@ -386,7 +407,12 @@ export async function withFallback(
       const status = Number(error?.status || 0);
       failures.push({ target, status, message: error?.message || String(error) });
 
-      if (!isRetryableStatus(status, retryableStatus) && !error?.retryable) throw error;
+      // No upstream failure ends the request on its own: another key (or another
+      // model) of the chain may well succeed where this one failed, whatever the
+      // status. Only an error that says the request itself is over — the client
+      // disconnected (`retryable === false`) — stops the walk. `retryableStatus`
+      // is accepted for compatibility but no longer decides this.
+      if (error?.retryable === false) throw error;
 
       // An error can opt out of health tracking entirely (skipCooldown). A
       // target that refused the request for its own reasons — an image it
@@ -435,11 +461,12 @@ export async function withFallback(
     throw err;
   }
 
-  // Every target answered 400: the request itself is almost certainly invalid,
-  // so report that to the client instead of masking it as a 502 gateway error.
-  const allBadRequest = failures.length > 0 && failures.every((failure) => failure.status === 400);
-  const err = new Error(allBadRequest ? failures[failures.length - 1].message : "All routing targets failed");
-  err.status = allBadRequest ? 400 : 502;
+  // Every target answered with the same client error (400, 422 ...): the request
+  // itself is almost certainly invalid, so report that to the client instead of
+  // masking it as a 502 gateway error.
+  const clientStatus = sharedClientErrorStatus(failures);
+  const err = new Error(clientStatus ? failures[failures.length - 1].message : "All routing targets failed");
+  err.status = clientStatus ?? 502;
   err.failures = failures;
   throw err;
 }

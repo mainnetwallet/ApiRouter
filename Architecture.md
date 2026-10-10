@@ -37,7 +37,7 @@ AI Provider
 7. A route plan is built (see "The Fallback Chain"): the remembered target when the mode keeps one, then the operator's configured chain for that pool, or the automatic health-and-latency order when no chain is configured.
 8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. A failure cools down only the key + model that was tried: 401/402/403 and 400/404/413/422 never cool the key's sibling models (each is attempted on its own), and a 429 cools that key + model for the upstream `Retry-After` (60s when absent), not the 12 minute default.
 9. The router calls targets sequentially.
-10. Retryable failures put the exact target into cooldown and move routing forward.
+10. Every failure puts the exact target (key + model) into cooldown and moves routing forward to the next key or model — whatever the status. Only a client disconnect ends the request early.
 11. A successful target becomes the session's remembered target — in the modes that remember one.
 12. The upstream response is streamed back to the client.
 
@@ -321,15 +321,18 @@ The two are independent. The cooldown is how long a *failed* target is skipped b
 
 The server starts the health monitor at startup and stops it cleanly on SIGINT/SIGTERM. Refresh cycles never overlap, run with bounded concurrency (4 probes at a time) so one slow provider cannot stall the cycle, and a failing provider never prevents the others from being checked.
 
-Retryable status codes:
+Default `RETRY_STATUS_CODES` (kept for compatibility; it no longer limits fallback):
 
 ```text
 401, 402, 403, 404, 408, 409, 425, 429, 500, 501, 502, 503, 504, 520, 521, 522, 523, 524, 529
 ```
 
-HTTP 400 from a provider also falls back to the next target. A generic 400
-(unsupported parameter, schema quirk) does not cool the target down, and if
-every target answers 400 the client receives the 400 instead of a 502.
+Any status — listed or not — falls back to the next key or model, because a
+different key can succeed where this one failed. A client error with no rule of
+its own (405, 410, 415, 422, 451 ...) cools only that key + model for one minute.
+A generic 400 (unsupported parameter, schema quirk) does not cool the target
+down, and if every target answers with the same client error (400, 422 ...) the
+client receives that status instead of a 502.
 
 ## Pinned Requests
 
