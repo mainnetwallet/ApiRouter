@@ -7,6 +7,9 @@ import { API_VERSION_SUFFIX } from "./url-utils.js";
 export const PROBE_TIMEOUT_MS = 10000;
 const GEMINI_API_VERSION = "v1beta";
 const OPENAI_API_VERSION = "v1";
+// `https://api.cohere.com/compatibility/v1` and the same path on a Model Vault or
+// `api.cohere.ai` host: the OpenAI-compatible base, whose parent is the native API.
+const COHERE_COMPATIBILITY_SUFFIX = /\/compatibility(?:\/v\d+)?$/i;
 const trimBase = (baseUrl) => String(baseUrl || "").replace(/\/+$/, "");
 
 function versionedBase(baseUrl, version) {
@@ -48,26 +51,29 @@ export function healthProbePlan(target) {
     };
   }
 
-  // Cohere's OpenAI Compatibility API is chat-first: the compatibility base
-  // is guaranteed for chat completions, while a generic GET /models probe is
-  // not a reliable health signal. Probe the exact route used by Playground,
-  // with the smallest useful generation request.
-  if (target.provider === "cohere" && protocols.includes("openai-chat")) {
+  // Cohere. Its OpenAI Compatibility API has no model listing, so the generic
+  // `GET {base}/models` below answers 404 there and the target never leaves
+  // "unknown". Probing with a 1-token chat completion instead works, but it is a
+  // generation request: it spends the key's chat quota (20 requests a minute and
+  // 1,000 calls a month on a trial key) for every model and key, every cycle,
+  // and answers 429 as soon as that budget is gone.
+  //
+  // Cohere's own API has the right call: "Get a Model",
+  // `GET https://api.cohere.com/v1/models/{model}` (docs.cohere.com/reference/get-model).
+  // It needs only the API key, generates nothing, answers 200 with the model's
+  // details when the key is accepted and the model exists, and sits outside the
+  // chat rate limit. The compatibility base (`.../compatibility/v1`) is a path
+  // under the same host, so the native root is that base without it. A base that
+  // is not a compatibility base (a custom gateway) is left to the generic probe.
+  if (target.provider === "cohere" && COHERE_COMPATIBILITY_SUFFIX.test(base)) {
     return {
-      provider: "cohere-chat",
-      method: "POST",
-      url: base + "/chat/completions",
-      headers: {
-        accept: "application/json",
-        authorization: "Bearer " + target.apiKey,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        model: target.model,
-        messages: [{ role: "user", content: "health" }],
-        max_tokens: 1,
-        stream: false
-      })
+      provider: "cohere-model",
+      method: "GET",
+      url: base.replace(COHERE_COMPATIBILITY_SUFFIX, "") + "/v1/models/" + encodeURIComponent(target.model),
+      // One model is asked about, so a 200 answers the model question itself
+      // (see probeTargetHealth) instead of a catalogue being searched.
+      modelLookup: true,
+      headers: { accept: "application/json", authorization: "Bearer " + target.apiKey }
     };
   }
 
@@ -326,6 +332,26 @@ async function readModelListing(response, model, { url, headers, fetchImpl, sign
   return null;
 }
 
+/**
+ * What a single-model lookup (Cohere's "Get a Model") says about the model.
+ *
+ * `true` only when the provider answered 200 with that very model's record. Any
+ * other answer is `null`, "cannot tell": a 404 from a lookup could as well be a
+ * wrong base URL as a missing model, and `false` is reserved for a complete
+ * catalogue that was read and did not name the model.
+ */
+async function readModelLookup(response, model) {
+  if (Number(response?.status) !== 200) return null;
+  const read = await readBoundedBody(response, 64 * 1024);
+  if (!read.text) return null;
+  try {
+    const body = JSON.parse(read.text);
+    return typeof body?.name === "string" && body.name === String(model ?? "").trim() ? true : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function probeTargetHealth(target, options = {}) {
   const { timeoutMs = PROBE_TIMEOUT_MS, fetchImpl = fetch } = options;
   const plan = healthProbePlan(target);
@@ -350,12 +376,14 @@ export async function probeTargetHealth(target, options = {}) {
     // same fetch and signal, so the probe timeout bounds it too.
     let modelListed = null;
     try {
-      modelListed = await readModelListing(upstream, target.model, {
-        url: plan.url,
-        headers: plan.headers,
-        fetchImpl,
-        signal: controller.signal
-      });
+      modelListed = plan.modelLookup
+        ? await readModelLookup(upstream, target.model)
+        : await readModelListing(upstream, target.model, {
+          url: plan.url,
+          headers: plan.headers,
+          fetchImpl,
+          signal: controller.signal
+        });
     } catch {
       // Unreadable is "cannot tell", never a health failure: the endpoint
       // answered, which is all the health verdict is about.

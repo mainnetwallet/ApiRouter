@@ -5,12 +5,14 @@ import { healthProbePlan, probeTargetHealth, listedModelIds, modelInCatalogue } 
 import { HealthRegistry, HEALTH_STATES } from "../src/health.js";
 import { PROVIDER_IDS } from "../src/config.js";
 import { providerProtocols } from "../src/adapters.js";
+import { startMockUpstream } from "../test-helpers/mock-upstream.js";
+import { startRouter } from "../test-helpers/router-harness.js";
 
 /**
- * Issue E — the docs claimed every probe is quota-free, but Cohere's probe is a
- * generation request. The deviation is deliberate (Cohere's compatibility
- * surface has no dependable model-list probe); these tests pin it so it cannot
- * change silently, and so the documented cost stays true.
+ * Issue E — the docs claimed every probe is quota-free, but Cohere's probe was a
+ * generation request, which spent the key's chat quota every cycle and answered
+ * 429 once it was gone. Cohere is now probed with its own "Get a Model" call
+ * (GET /v1/models/{model}); these tests pin that no probe generates anything.
  *
  * Issue F — health described the KEY and the endpoint, never the model. A valid
  * key against a reachable /models endpoint reported `healthy` even when the
@@ -33,27 +35,81 @@ const targetFor = (id) => ({
   keyIndex: 0
 });
 
-test("no provider's probe sends a generation request, except the documented Cohere exception", () => {
+test("no provider's probe sends a generation request", () => {
   const generating = [];
   for (const id of PROVIDER_IDS) {
-    const plan = healthProbePlan(targetFor(id));
-    if (!plan) continue;
-    if (plan.method === "POST" || plan.body) generating.push(id);
+    for (const baseUrl of [baseFor(id), "https://api.cohere.com/compatibility/v1"]) {
+      const plan = healthProbePlan({ ...targetFor(id), baseUrl });
+      if (!plan) continue;
+      if ((plan.method && plan.method !== "GET") || plan.body) generating.push(`${id} ${baseUrl}`);
+    }
   }
-  // Exactly one, and it is the one the README and Architecture.md call out.
-  assert.deepEqual(generating, ["cohere"]);
+  assert.deepEqual(generating, []);
 });
 
-test("the Cohere probe is pinned as a generation request, and says so in its name", () => {
-  const plan = healthProbePlan(targetFor("cohere"));
-  assert.equal(plan.method, "POST");
-  assert.ok(plan.url.endsWith("/chat/completions"), plan.url);
-  const body = JSON.parse(plan.body);
-  assert.equal(body.model, "m");
-  assert.equal(body.stream, false);
-  assert.equal(body.max_tokens, 1, "the probe must stay the smallest useful generation request");
-  assert.ok(Array.isArray(body.messages) && body.messages.length > 0, "the probe sends a prompt");
-  assert.equal(plan.provider, "cohere-chat");
+const COHERE = { provider: "cohere", model: "command-a-plus-05-2026", apiKey: "k", protocols: ["openai-chat"], keyIndex: 0 };
+
+test("Cohere is probed with its own Get-a-Model call, on the native root of the compatibility base", () => {
+  const cases = [
+    ["https://api.cohere.com/compatibility/v1", "https://api.cohere.com/v1/models/command-a-plus-05-2026"],
+    ["https://api.cohere.ai/compatibility/v1/", "https://api.cohere.ai/v1/models/command-a-plus-05-2026"],
+    ["https://api.cohere.com/compatibility", "https://api.cohere.com/v1/models/command-a-plus-05-2026"],
+    ["https://vault.example.com/compatibility/v1", "https://vault.example.com/v1/models/command-a-plus-05-2026"]
+  ];
+  for (const [baseUrl, expected] of cases) {
+    const plan = healthProbePlan({ ...COHERE, baseUrl });
+    assert.equal(plan.provider, "cohere-model", baseUrl);
+    assert.equal(plan.method, "GET");
+    assert.equal(plan.url, expected, baseUrl);
+    assert.equal(plan.body, undefined, "nothing is generated");
+    assert.equal(plan.headers.authorization, "Bearer k");
+  }
+});
+
+test("the Cohere model id is path-encoded, so it can never alter the probed route", () => {
+  const plan = healthProbePlan({ ...COHERE, model: "a/b?c#d", baseUrl: "https://api.cohere.com/compatibility/v1" });
+  assert.equal(plan.url, "https://api.cohere.com/v1/models/a%2Fb%3Fc%23d");
+});
+
+test("a Cohere base that is not a compatibility base falls back to the generic models probe", () => {
+  const plan = healthProbePlan({ ...COHERE, baseUrl: "https://gw.example.com/v1" });
+  assert.equal(plan.provider, "openai-compatible");
+  assert.equal(plan.url, "https://gw.example.com/v1/models");
+});
+
+const answer = (status, body) => async () => new Response(JSON.stringify(body ?? {}), { status, headers: { "content-type": "application/json" } });
+const cohereProbe = (fetchImpl) => probeTargetHealth({ ...COHERE, baseUrl: "https://api.cohere.com/compatibility/v1" }, { fetchImpl });
+
+test("a Cohere 200 for the model is healthy and confirms the model; it never touches the chat endpoint", async () => {
+  const seen = [];
+  const result = await cohereProbe(async (url, init) => {
+    seen.push([init.method, url]);
+    return new Response(JSON.stringify({ name: "command-a-plus-05-2026", endpoints: ["chat"], is_deprecated: false }), { status: 200 });
+  });
+  assert.deepEqual(seen, [["GET", "https://api.cohere.com/v1/models/command-a-plus-05-2026"]]);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 200);
+  assert.equal(result.modelListed, true);
+
+  const registry = new HealthRegistry();
+  registry.recordHealthCheck({ ...COHERE }, result);
+  assert.equal(registry.get(registry.key(COHERE)).status, HEALTH_STATES.HEALTHY, "the target leaves unknown");
+});
+
+test("a Cohere 200 for a different model name is healthy but does not confirm this model", async () => {
+  const result = await cohereProbe(answer(200, { name: "something-else" }));
+  assert.equal(result.ok, true);
+  assert.equal(result.modelListed, null);
+});
+
+test("Cohere answers are classified as every other provider's are", async () => {
+  assert.equal((await cohereProbe(answer(401))).ok, false, "a rejected key is never healthy");
+  assert.equal((await cohereProbe(answer(403))).ok, false);
+  assert.equal((await cohereProbe(answer(429))).ok, false, "a genuine rate limit still counts");
+  assert.equal((await cohereProbe(answer(503))).ok, false);
+  const missing = await cohereProbe(answer(404));
+  assert.equal(missing.ok, null, "a 404 may be a wrong route as well as a missing model: unknown, not failed");
+  assert.equal(missing.modelListed, null, "and never claims the model is absent");
 });
 
 test("no probe URL carries a credential in the query string", () => {
@@ -205,4 +261,39 @@ test("a target that was never probed reports modelListed as null, not false", ()
   const registry = new HealthRegistry();
   const [row] = registry.describe([groqTarget()], 1000);
   assert.equal(row.modelListed, null);
+});
+
+test("a started server marks Cohere targets healthy from Get-a-Model alone, and sends no chat request", async () => {
+  const seen = [];
+  const cohere = await startMockUpstream(() => ({ status: 500, body: {} }), {
+    health: (record) => {
+      seen.push(`${record.method} ${record.url}`);
+      const match = /^\/v1\/models\/([^/?]+)$/.exec(record.url);
+      if (!match || record.headers.authorization !== "Bearer COHERE-SECRET") return { status: 404, body: {} };
+      return { status: 200, body: { name: decodeURIComponent(match[1]), endpoints: ["chat"] } };
+    }
+  });
+  const router = await startRouter({
+    COHERE_API_KEYS: "COHERE-SECRET",
+    COHERE_MODELS: "command-a-plus-05-2026,north-mini-code-1-0",
+    COHERE_BASE_URL: `${cohere.baseUrl}/compatibility/v1`
+  });
+  try {
+    const health = await router.request("/api/health").then((response) => response.json());
+    const targets = health.targets.filter((target) => target.provider === "cohere");
+    assert.equal(targets.length, 2);
+    for (const target of targets) {
+      assert.equal(target.status, "healthy", `${target.model}: ${target.lastReason}`);
+      assert.equal(target.modelListed, true, `${target.model} is confirmed by the lookup`);
+      assert.equal(target.cooldownUntil, 0);
+    }
+    assert.deepEqual(new Set(seen), new Set([
+      "GET /v1/models/command-a-plus-05-2026",
+      "GET /v1/models/north-mini-code-1-0"
+    ]), "one lookup per model, nothing else");
+    assert.equal(cohere.requests.some((record) => record.method === "POST"), false, "no generation request was sent");
+  } finally {
+    await router.close();
+    await cohere.close();
+  }
 });

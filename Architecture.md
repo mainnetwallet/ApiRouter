@@ -247,12 +247,12 @@ A generic `GET <baseUrl>` cannot establish that a provider is healthy, and it ne
 | Gemini | `GET {base}/v1beta/models` | `x-goog-api-key` | not consumed |
 | OpenAI Chat / Responses | `GET {base}/v1/models` | `Authorization: Bearer` | not consumed |
 | Cloudflare Workers AI | `GET {base}/models/search?per_page=1` | `Authorization: Bearer` | not consumed |
-| Cohere | `POST {base}/chat/completions` (1 token) | `Authorization: Bearer` | **consumed** |
+| Cohere | `GET {native root}/v1/models/{model}` ("Get a Model") | `Authorization: Bearer` | not consumed |
 | Anthropic only | none | passive | not consumed |
 
 Probes never send a credential in the query string.
 
-Cohere is the one exception. Its OpenAI Compatibility surface is chat-first: the base is guaranteed for chat completions, while `GET /models` there is not a reliable health signal, so the probe is the exact route the Playground uses with the smallest useful generation request (`max_tokens: 1`). **That probe consumes generation quota**, unlike every other provider's. It is the only probe in the system that does, so the README's "avoids consuming generation quota" applies to every provider except Cohere. Reducing it further would mean dropping to a model-list probe that does not dependably answer.
+Cohere needs its own probe. Its OpenAI Compatibility surface (`.../compatibility/v1`) has no model listing, so the generic `GET {base}/models` answers 404 there and a target would stay `unknown` for ever. It used to be probed with a 1-token chat completion instead, but that is a generation request: per model and key, every cycle, it spent the key's chat quota (a trial key allows 20 requests a minute and 1,000 calls a month) and answered `429` once that was gone. The probe is now Cohere's own "Get a Model" call, `GET https://api.cohere.com/v1/models/{model}` (docs.cohere.com/reference/get-model): the native root is the configured compatibility base without its `/compatibility[/v1]` suffix, the model id is path-encoded, and only the API key is needed. A `200` naming that model is `healthy` and confirms the model (`modelListed: true`); `401/402/403/429/5xx` and timeouts are failures as for every other provider; a `404` is `unknown` and never claims the model is missing, because it could as well be a wrong route. A Cohere base that is not a compatibility base (a custom gateway) uses the generic probe. Nothing in the system generates text to check health any more.
 
 The models endpoint is also read, not just called: the probe looks for the target's configured model id in the listing to report `modelListed` (see below). A single-page catalogue therefore costs no extra request; a paginated one is walked within a strict budget, using the probe's own timeout.
 

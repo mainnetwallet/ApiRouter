@@ -319,7 +319,7 @@ cooldown
 
 Failed targets enter cooldown without disabling their sibling keys or models.
 
-Health probes are provider-aware and designed to avoid consuming generation quota, by probing a model-list endpoint rather than generating. Cohere is the one exception: its compatibility surface has no dependable model-list probe, so it is probed with the smallest possible chat completion (`max_tokens: 1`), which **does consume generation quota** — once per Cohere target per refresh cycle.
+Health probes are provider-aware and never generate text, so they do not consume generation quota: they probe a model-list endpoint, or for Cohere (whose compatibility surface has no model list) its native "Get a Model" call, `GET /v1/models/{model}`.
 
 Health reports the key and the endpoint. Whether the configured model is actually offered is reported separately, as `modelListed`, because a valid key and a reachable provider do not prove the model is usable. That signal is tri-state — `true` listed, `false` absent from a catalogue read to the end, `null` could not be verified — and it is reported alongside the last confirmed value and its timestamp, so an unreadable catalogue is never shown as a fresh result. A paginated catalogue is walked before absence is claimed; if it cannot be read to the end, the answer is "not verified" rather than "missing".
 
