@@ -246,6 +246,14 @@ Service down hole email alert-o pabe.
 `/health` open endpoint, eta API key ba upstream response expose kore na, tai
 public monitor er jonno safe.
 
+UptimeRobot pray **HEAD** request pathay. Server ekhon `HEAD /health` e `200`
+dey. Ar halka (choto response) check chaile `https://<tomar-service>.onrender.com/healthz`
+use korte paro, eta-o `200` dey kintu poora target report pathay na.
+
+Monitor "Down" dekhale: prothome browser e `/health` khule dekho `ok: true` ashe
+kina, tarpor Render **Logs** e error dekho. Redeploy cholar somoy (~1 min) o
+ekbar Down dekhate pare, deploy shesh hole nijei Up hoye jay.
+
 ---
 
 ## 8. Free plan er limit gulo (jana dorkar)

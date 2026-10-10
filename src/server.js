@@ -968,7 +968,7 @@ const handleApi = createApi({
 });
 
 /** Paths the SPA must never shadow; they belong to the gateway itself. */
-const RESERVED_PREFIXES = ["/api", "/v1", "/v1beta", "/health"];
+const RESERVED_PREFIXES = ["/api", "/v1", "/v1beta", "/health", "/healthz"];
 
 function isReserved(pathname) {
   return RESERVED_PREFIXES.some(
@@ -1011,6 +1011,15 @@ async function handleRequest(req, res) {
     pathname = url.pathname.replace(/\/{2,}/g, "/");
   } catch {
     return json(res, 400, { error: { message: "Invalid request target", type: "invalid_request_error" } });
+  }
+
+  // Uptime monitors (UptimeRobot, load balancers) often probe with HEAD, and a
+  // tiny GET is cheaper than the full /health report. Both answer 200 with no
+  // credentials and no target detail.
+  if ((req.method === "HEAD" && (pathname === "/health" || pathname === "/healthz")) ||
+      (req.method === "GET" && pathname === "/healthz")) {
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    return res.end(req.method === "HEAD" ? undefined : JSON.stringify({ ok: true, service: "apirouter" }));
   }
 
   if (req.method === "GET" && pathname === "/health") {
