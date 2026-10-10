@@ -1344,24 +1344,20 @@ test("agentrouter: when every model's budget pool is exhausted all are tried in 
   }
 });
 
-test("agentrouter: a genuinely shared account failure is not retried on the sibling models", async () => {
+test("agentrouter: an account-level 402 is recorded per key + model, so every sibling model is still tried", async () => {
   const { router, agent } = await startAgentRouter(() => ({ status: 402, body: { error: { message: "Insufficient balance. Please top up your account." } } }));
   try {
     const response = await chat(router);
     assert.equal(response.status, 502);
-    assert.deepEqual(postModels(agent), ["gpt-6-astra"], "the siblings share the dead account and are not called");
+    assert.deepEqual(postModels(agent), AGENT_MODELS, "each model on the key is attempted once, on its own");
 
+    // Each model cooled because it failed itself, not because of a sibling.
     const states = await modelStates(router);
-    for (const model of AGENT_MODELS) assert.equal(states[model].status, "cooldown", `${model} shares the key`);
+    for (const model of AGENT_MODELS) assert.equal(states[model].status, "cooldown", `${model} failed itself`);
 
-    // The walk's own record shows the siblings as skipped, never as attempted.
+    // The walk's own record shows every model as a real attempt, none skipped.
     const walk = await requestWalk(router);
-    assert.deepEqual(walk.map((a) => [a.model, a.skipped === true, a.skipReason ?? null]), [
-      ["gpt-6-astra", false, null],
-      ["claude-opus-5", true, "cooldown"],
-      ["claude-opus-4-8", true, "cooldown"],
-      ["deepseek-v4-flash", true, "cooldown"]
-    ]);
+    assert.deepEqual(walk.map((a) => [a.model, a.skipped === true, a.skipReason ?? null]), AGENT_MODELS.map((model) => [model, false, null]));
   } finally {
     await router.close(); await agent.close();
   }

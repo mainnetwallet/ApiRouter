@@ -23,8 +23,10 @@ export const FAILURE_SCOPE = Object.freeze({
   PROVIDER: "provider"
 });
 
-// These statuses describe the API key / account, not the model: once one model
-// rejects a key, every other model on that provider + key will too.
+// These statuses describe the API key / account rather than the request. They
+// are still cooled down per key + model (see `describeFailure`), so each model on
+// the key gets its own attempt. A provider adapter can still widen one to the
+// whole key or provider by setting `error.scope`.
 const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 
 // These describe the request or the model rather than the credential or the
@@ -66,6 +68,12 @@ export function describeFailure(status, error = null) {
   }
   const code = Number(status);
   if (KEY_LEVEL_STATUS_CODES.has(code)) {
+    // 401/402/403 are about the credential, but they are still recorded against
+    // the key + model that was just tried. Every other model on the same key is
+    // then attempted on its own, so one model's refusal (no access, no budget
+    // pool, not enabled for this key) never disables the key's other models.
+    // A message that positively names the model or pool only adds a label for
+    // the Models page.
     if (MESSAGE_NARROWABLE_STATUS_CODES.has(code) && typeof error?.message === "string") {
       const text = error.message;
       if (!SHARED_CREDENTIAL_MESSAGE.test(text)) {
@@ -74,7 +82,7 @@ export function describeFailure(status, error = null) {
         }
       }
     }
-    return { scope: FAILURE_SCOPE.KEY, kind: null };
+    return { scope: FAILURE_SCOPE.TARGET, kind: null };
   }
   return { scope: FAILURE_SCOPE.TARGET, kind: null };
 }

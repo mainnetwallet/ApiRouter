@@ -131,7 +131,9 @@ test("a target skipped as cooling does not count as an upstream attempt", async 
 // ---------------------------------------------------------------------------
 
 test("classifyFailure reads the status, and an explicit scope wins", () => {
-  for (const status of [401, 402, 403]) assert.equal(classifyFailure(status), FAILURE_SCOPE.KEY, `${status} is key-level`);
+  // 401/402/403 are about the credential, but they are recorded against the
+  // key + model that was tried: the key's other models are attempted on their own.
+  for (const status of [401, 402, 403]) assert.equal(classifyFailure(status), FAILURE_SCOPE.TARGET, `${status} is recorded per key + model`);
   for (const status of [400, 404, 413, 422]) assert.equal(classifyFailure(status), FAILURE_SCOPE.TARGET, `${status} is model-level`);
   for (const status of [408, 429, 500, 503, 529, 0]) assert.equal(classifyFailure(status), FAILURE_SCOPE.TARGET, `${status} is target-level by default`);
   // A provider that can read its own error body may state the scope outright.
@@ -143,35 +145,41 @@ test("classifyFailure reads the status, and an explicit scope wins", () => {
 // The exact upstream text Agentrouter returned in production.
 const BUDGET_POOL_402 = "Budget pool quota has been exhausted. Please ask an administrator to increase the limit or select another budget pool.";
 
-test("an Agentrouter budget-pool 402 is target-scoped, while a bare or account-level 402 stays key-level", () => {
+test("an Agentrouter budget-pool 402 is labelled, while a bare or account-level 402 is still recorded per key + model", () => {
   const pool = fail(402, { message: BUDGET_POOL_402 });
   assert.equal(classifyFailure(402, pool), FAILURE_SCOPE.TARGET);
   assert.equal(describeFailure(402, pool).kind, "budget pool exhausted");
 
-  // Genuinely shared account / credential failures keep their key scope.
+  // Account / credential failures are recorded against the key + model tried,
+  // with no label: the key's other models are attempted separately.
   for (const message of [
     "Insufficient balance. Please top up your account.",
     "Your account balance is too low",
     "Billing issue: payment required",
     "Account suspended"
   ]) {
-    assert.equal(classifyFailure(402, fail(402, { message })), FAILURE_SCOPE.KEY, message);
+    assert.equal(classifyFailure(402, fail(402, { message })), FAILURE_SCOPE.TARGET, message);
+    assert.equal(describeFailure(402, fail(402, { message })).kind, null, message);
   }
-  assert.equal(classifyFailure(402), FAILURE_SCOPE.KEY, "no message: existing behaviour is kept");
-  assert.equal(classifyFailure(402, fail(402, { message: "" })), FAILURE_SCOPE.KEY);
+  assert.equal(classifyFailure(402), FAILURE_SCOPE.TARGET, "no message: recorded per key + model");
+  assert.equal(classifyFailure(402, fail(402, { message: "" })), FAILURE_SCOPE.TARGET);
   assert.equal(describeFailure(402, fail(402, { message: "Insufficient balance" })).kind, null);
 
-  // A message that mentions both an account problem and a pool is not narrowed.
-  assert.equal(classifyFailure(402, fail(402, { message: `Account suspended. ${BUDGET_POOL_402}` })), FAILURE_SCOPE.KEY);
+  // A message that mentions both an account problem and a pool is not labelled.
+  assert.equal(describeFailure(402, fail(402, { message: `Account suspended. ${BUDGET_POOL_402}` })).kind, null);
 });
 
-test("401 is always the credential, and a 403 is narrowed only by an explicit model message", () => {
-  // Even text that names a budget pool or a model cannot narrow a 401.
-  assert.equal(classifyFailure(401, fail(401, { message: BUDGET_POOL_402 })), FAILURE_SCOPE.KEY);
-  assert.equal(classifyFailure(401, fail(401, { message: "model not allowed" })), FAILURE_SCOPE.KEY);
-  assert.equal(classifyFailure(403, fail(403, { message: "Forbidden" })), FAILURE_SCOPE.KEY);
-  assert.equal(classifyFailure(403, fail(403, { message: "Invalid API key" })), FAILURE_SCOPE.KEY);
+test("401 is never labelled, and a 403 is labelled only by an explicit model message", () => {
+  // Even text that names a budget pool or a model cannot label a 401.
+  assert.equal(describeFailure(401, fail(401, { message: BUDGET_POOL_402 })).kind, null);
+  assert.equal(describeFailure(401, fail(401, { message: "model not allowed" })).kind, null);
+  assert.equal(describeFailure(403, fail(403, { message: "Forbidden" })).kind, null);
+  assert.equal(describeFailure(403, fail(403, { message: "Invalid API key" })).kind, null);
+  for (const [status, message] of [[401, BUDGET_POOL_402], [401, "model not allowed"], [403, "Forbidden"], [403, "Invalid API key"]]) {
+    assert.equal(classifyFailure(status, fail(status, { message })), FAILURE_SCOPE.TARGET, `${status} ${message}`);
+  }
   assert.equal(classifyFailure(403, fail(403, { message: "Your account does not have access to model gpt-6-astra" })), FAILURE_SCOPE.TARGET);
+  assert.equal(describeFailure(403, fail(403, { message: "Your account does not have access to model gpt-6-astra" })).kind, "no access to this model");
   // An explicit scope from the provider adapter still wins over the message.
   assert.equal(classifyFailure(402, fail(402, { message: BUDGET_POOL_402, scope: FAILURE_SCOPE.KEY })), FAILURE_SCOPE.KEY);
   assert.equal(classifyFailure(402, fail(402, { message: BUDGET_POOL_402, scope: FAILURE_SCOPE.PROVIDER })), FAILURE_SCOPE.PROVIDER);
@@ -241,7 +249,7 @@ test("the request after a lone budget-pool failure is served, not answered with 
   assert.equal(health.rank(agentTargets).length, 3, "three of four models remain routable");
 });
 
-test("a genuinely shared credential failure still cools every model on the key and stops the walk", async () => {
+test("a 401/402/403 is recorded per key + model, so every model on the key is still tried", async () => {
   for (const [status, message] of [[401, "Invalid API key"], [402, "Insufficient balance. Please top up your account."], [403, "Forbidden"]]) {
     resetAutomaticOrderCache();
     const health = new HealthRegistry();
@@ -253,15 +261,37 @@ test("a genuinely shared credential failure still cools every model on the key a
       assert.equal(error.status, 502);
       return true;
     });
-    assert.deepEqual(calls, ["gpt-6-astra"], `${status}: siblings are known-unusable and must not be retried`);
-    for (const model of agentModels) assert.ok(!health.isAvailable(agent(model)), `${status}: ${model} is cooling`);
-    assert.match(health.get(targetId(agent("claude-opus-5"))).lastReason, /applies to the whole key/);
+    assert.deepEqual(calls, agentModels, `${status}: each model on the key is attempted once, on its own`);
+    for (const model of agentModels) {
+      assert.ok(!health.isAvailable(agent(model)), `${status}: ${model} is cooling after its own failure`);
+      assert.equal(health.get(targetId(agent(model))).lastStatus, status);
+    }
 
-    // With every sibling correctly cooled, the next request fails closed.
+    // Every target failed for itself, so the next request fails closed.
     await assert.rejects(agentWalk(async () => "never", health, `agent-shared-next-${status}`), (error) => {
       assert.equal(error.status, 503);
       return true;
     });
+  }
+});
+
+test("a 401/402/403 on one model does not stop the key's other models from serving", async () => {
+  for (const status of [401, 402, 403]) {
+    resetAutomaticOrderCache();
+    const health = new HealthRegistry();
+    const calls = [];
+    const result = await agentWalk(async (target) => {
+      calls.push(target.model);
+      if (target.model === "gpt-6-astra") throw fail(status, { message: "Forbidden" });
+      return target.model;
+    }, health, `agent-sibling-${status}`);
+
+    assert.equal(result, "claude-opus-5", `${status}`);
+    assert.deepEqual(calls, ["gpt-6-astra", "claude-opus-5"]);
+    assert.ok(!health.isAvailable(agent("gpt-6-astra")));
+    for (const model of ["claude-opus-5", "claude-opus-4-8", "deepseek-v4-flash"]) {
+      assert.ok(health.isAvailable(agent(model)), `${status}: ${model} was not cooled by its sibling's failure`);
+    }
   }
 });
 
@@ -285,7 +315,7 @@ test("a model-specific failure never cools down the model's siblings on the same
   assert.equal(health.get(targetId(t("b", "B", 1))).status, "unknown", "an unrelated key was never touched");
 });
 
-test("a genuine key-level failure cools the sibling models that share the key", async () => {
+test("a 401 cools only the key + model tried; the sibling models on that key are attempted separately", async () => {
   resetAutomaticOrderCache();
   const health = new HealthRegistry();
   // Siblings = the OTHER MODELS of the same provider using the same key index.
@@ -304,12 +334,13 @@ test("a genuine key-level failure cools the sibling models that share the key", 
   }, new Set([401]), new RouteSession(), health, { plan: plan.steps });
 
   assert.equal(result, "ok");
-  // A2 is a second model of provider a on the SAME key: it must never be
-  // reached, because key 0 was already proven bad by A.
-  assert.deepEqual(calls, ["a/A#0", "a/A#1", "b/B#0"]);
-  assert.ok(!health.isAvailable(t("a", "A2", 0)), "the sibling model on the same key is cooled down too");
-  assert.match(health.get(targetId(t("a", "A2", 0))).lastReason, /applies to the whole key/);
+  // A2 is a second model of provider a on the SAME key. It is reached and tried
+  // on its own: one model's 401 does not disable the key's other models.
+  assert.deepEqual(calls, ["a/A#0", "a/A#1", "a/A2#0", "b/B#0"]);
+  assert.ok(!health.isAvailable(t("a", "A", 0)), "the target that failed is cooling");
+  assert.ok(!health.isAvailable(t("a", "A2", 0)), "the sibling is cooling because it failed itself");
   assert.equal(health.get(targetId(t("a", "A2", 0))).lastStatus, 401);
+  assert.doesNotMatch(String(health.get(targetId(t("a", "A2", 0))).lastReason), /applies to the whole key/);
   // The same key INDEX at a different provider is a different credential.
   assert.equal(health.get(targetId(t("b", "B", 0))).status, "healthy");
 });

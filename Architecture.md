@@ -35,7 +35,7 @@ AI Provider
 5. Targets incompatible with the client protocol are excluded.
 6. The request's pool (TEXT or VISION) is decided; only that pool's targets are used, never the other.
 7. A route plan is built (see "The Fallback Chain"): the remembered target when the mode keeps one, then the operator's configured chain for that pool, or the automatic health-and-latency order when no chain is configured.
-8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. A failure cools down what it describes: 401/402/403 also cool the same key's sibling models, while a model-specific error (400/404/413/422) never does.
+8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. A failure cools down only the key + model that was tried: 401/402/403 and 400/404/413/422 never cool the key's sibling models (each is attempted on its own), and a 429 cools that key + model for the upstream `Retry-After` (60s when absent), not the 12 minute default.
 9. The router calls targets sequentially.
 10. Retryable failures put the exact target into cooldown and move routing forward.
 11. A successful target becomes the session's remembered target — in the modes that remember one.

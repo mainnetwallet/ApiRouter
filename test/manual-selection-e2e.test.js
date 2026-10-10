@@ -198,7 +198,7 @@ test("transient failures are retried in a later batch; request/credential failur
 
 test("credential failures are never retried indefinitely, in either batch, and a transient Health failure gets exactly one retry", async () => {
   const fleet = await startFleet(({ id }) => {
-    if (id === "groq/A#0") return { status: 401, body: { error: "bad key" } }; // cools key 0 of groq for every groq model
+    if (id === "groq/A#0") return { status: 401, body: { error: "bad key" } }; // cools only groq/A on key 0
     if (id === "mistral/Y#0") return { status: 403, body: { error: "forbidden" } };
     return down;
   });
@@ -208,7 +208,7 @@ test("credential failures are never retried indefinitely, in either batch, and a
     assert.equal(fleet.counts.get("groq/A#0"), 1, "a rejected credential is called once per request");
     assert.equal(fleet.counts.get("mistral/Y#0"), 1, "same in the Health batch");
     for (const id of ["groq/C#0", "groq/E#0", "groq/X#0"]) {
-      assert.equal(fleet.counts.get(id) ?? 0, 0, `${id} shares the rejected key and is skipped, not retried`);
+      assert.ok((fleet.counts.get(id) ?? 0) >= 1, `${id} shares key 0 but is a separate target and is still tried`);
     }
     assert.equal(fleet.counts.get("cerebras/Z#0"), 2, "a transient Health failure is retried once, in the second Health batch");
     for (const [id, n] of fleet.counts) assert.ok(n <= 2, `${id} was called ${n} times`);

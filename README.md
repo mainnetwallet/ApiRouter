@@ -226,9 +226,14 @@ A failure cools down what it actually describes:
 
 | Failure | Cools down |
 |---|---|
-| Key/account rejection (`401`, `402`, `403`) | Every model of that provider using that key |
+| Key/account rejection (`401`, `402`, `403`) | Only that key + model — the key's other models are still tried, each on its own |
 | Request or model problem (`400`, `404`, `413`, `422`) | Only that target — never a sibling that shares the key |
-| Anything else (`429`, `5xx`, timeouts) | Only that target |
+| Rate limit (`429`) | Only that key + model, for the upstream `Retry-After` (5s–12min), or 60s without one |
+| Anything else (`5xx`, timeouts) | Only that target |
+
+A target is one provider + model + key. When one key of a model fails, the model's
+other keys are tried next; the model only cools down as a whole once every one of
+its keys has failed.
 
 A provider adapter that can read the upstream error body may state the scope
 outright, and that wins over the status code.
