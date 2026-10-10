@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { healthProbePlan, probeTargetHealth, classifyProbeStatus, listedModelIds, modelInCatalogue } from "../src/health-checks.js";
+import { healthProbePlan, probeTargetHealth, listedModelIds, modelInCatalogue } from "../src/health-checks.js";
 import { HealthRegistry, HEALTH_STATES } from "../src/health.js";
 import { PROVIDER_IDS } from "../src/config.js";
-import { providerProtocols, buildUpstreamRequest } from "../src/adapters.js";
+import { providerProtocols } from "../src/adapters.js";
 
 /**
  * Issue E — the docs claimed every probe is quota-free, but Cohere's probe is a
@@ -54,38 +54,6 @@ test("the Cohere probe is pinned as a generation request, and says so in its nam
   assert.equal(body.max_tokens, 1, "the probe must stay the smallest useful generation request");
   assert.ok(Array.isArray(body.messages) && body.messages.length > 0, "the probe sends a prompt");
   assert.equal(plan.provider, "cohere-chat");
-});
-
-test("the Cohere probe calls the same endpoint real requests do, whatever form the base URL takes", () => {
-  const cases = [
-    ["https://api.cohere.com/compatibility/v1", "https://api.cohere.com/compatibility/v1/chat/completions"],
-    ["https://api.cohere.com/compatibility/v1/", "https://api.cohere.com/compatibility/v1/chat/completions"],
-    // No version segment: a real request adds /v1, so the probe must too.
-    ["https://api.cohere.com/compatibility", "https://api.cohere.com/compatibility/v1/chat/completions"],
-    ["https://api.cohere.com/compatibility/", "https://api.cohere.com/compatibility/v1/chat/completions"],
-    ["https://gw.example.com/v2", "https://gw.example.com/v2/chat/completions"]
-  ];
-  for (const [baseUrl, expected] of cases) {
-    const plan = healthProbePlan({ ...targetFor("cohere"), baseUrl });
-    assert.equal(plan.url, expected, baseUrl);
-    assert.equal(plan.url, buildUpstreamRequest({ ...targetFor("cohere"), baseUrl }, "openai-chat", { model: "m", messages: [] }, {}).url, `${baseUrl}: probe and request agree`);
-  }
-});
-
-test("a rate-limited Cohere probe is inconclusive and never starts a cooldown; every other 429 still does", async () => {
-  assert.equal(classifyProbeStatus(429, "cohere-chat").ok, null);
-  assert.equal(classifyProbeStatus(429).ok, false, "other providers' probes are unchanged");
-  assert.equal(classifyProbeStatus(429, "openai-compatible").ok, false);
-  // Genuine failures of the Cohere probe still count.
-  for (const status of [401, 402, 403, 500, 503]) assert.equal(classifyProbeStatus(status, "cohere-chat").ok, false, String(status));
-
-  const registry = new HealthRegistry();
-  const target = targetFor("cohere");
-  const result = await probeTargetHealth(target, { fetchImpl: async () => new Response("{}", { status: 429 }) });
-  assert.equal(result.ok, null);
-  registry.recordHealthCheck(target, result);
-  assert.equal(registry.isAvailable(target), true, "a probe-induced 429 must not put the model into cooldown");
-  assert.equal(registry.get(registry.key(target)).cooldownUntil, 0);
 });
 
 test("no probe URL carries a credential in the query string", () => {

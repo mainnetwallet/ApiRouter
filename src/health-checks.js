@@ -2,7 +2,7 @@
  * Provider-aware health probing.
  */
 
-import { API_VERSION_SUFFIX, openAiSuffixPath } from "./url-utils.js";
+import { API_VERSION_SUFFIX } from "./url-utils.js";
 
 export const PROBE_TIMEOUT_MS = 10000;
 const GEMINI_API_VERSION = "v1beta";
@@ -52,17 +52,11 @@ export function healthProbePlan(target) {
   // is guaranteed for chat completions, while a generic GET /models probe is
   // not a reliable health signal. Probe the exact route used by Playground,
   // with the smallest useful generation request.
-  //
-  // The URL is built by the same rule real requests use (`openAiSuffixPath`):
-  // a configured base that does not end in a version segment gets `/v1` added.
-  // Appending `/chat/completions` to the raw base instead probed a different
-  // endpoint than the one routing calls, so a base URL that works for requests
-  // could still fail its health check.
   if (target.provider === "cohere" && protocols.includes("openai-chat")) {
     return {
       provider: "cohere-chat",
       method: "POST",
-      url: base + "/" + openAiSuffixPath(base, "chat/completions"),
+      url: base + "/chat/completions",
       headers: {
         accept: "application/json",
         authorization: "Bearer " + target.apiKey,
@@ -90,19 +84,13 @@ export function healthProbePlan(target) {
   return null;
 }
 
-export function classifyProbeStatus(status, probeKind = null) {
+export function classifyProbeStatus(status) {
   const code = Number(status);
   if (!Number.isInteger(code)) return { ok: null, reason: "probe returned no usable status" };
   if (code >= 200 && code < 300) return { ok: true, reason: "models endpoint reachable" };
   if (code === 401 || code === 403) return { ok: false, reason: "authentication rejected (HTTP " + code + ")" };
   if (code === 402) return { ok: false, reason: "payment required (HTTP 402)" };
   if (code === 408) return { ok: false, reason: "provider timed out (HTTP 408)" };
-  // The Cohere probe is itself a generation request, fired once per model and key
-  // when the server starts. A 429 there is mostly the probes exhausting Cohere's
-  // own rate limit, not evidence the model is down, and treating it as a failure
-  // put every Cohere model into a 12 minute cooldown at boot. Real requests still
-  // cool a target down on a genuine 429.
-  if (code === 429 && probeKind === "cohere-chat") return { ok: null, reason: "probe rate limited (HTTP 429); health unknown" };
   if (code === 429) return { ok: false, reason: "rate limited (HTTP 429)" };
   if (code === 501) return { ok: null, reason: "probe endpoint not implemented (HTTP 501)" };
   if (code === 404 || code === 405) return { ok: null, reason: "probe endpoint not supported (HTTP " + code + ")" };
@@ -376,7 +364,7 @@ export async function probeTargetHealth(target, options = {}) {
       // Nothing else consumes this body; release the socket either way.
       try { await upstream.body?.cancel(); } catch {}
     }
-    return { ...classifyProbeStatus(upstream.status, plan.provider), status: upstream.status, latencyMs, modelListed };
+    return { ...classifyProbeStatus(upstream.status), status: upstream.status, latencyMs, modelListed };
   } catch (error) {
     return { ok: false, status: 408, latencyMs: Date.now() - startedAt, reason: isAbortError(error) ? "probe timed out" : "probe unreachable" };
   } finally {
