@@ -10,8 +10,8 @@ ApiRouter gives OpenAI-compatible and native AI clients one local endpoint while
 - **UI-controlled fallback chain** — one ordered list per pool, edited in the control panel, followed exactly.
 - **Multi-key fallback** — every eligible API key of a model is tried before the next model.
 - **Health-aware fallback** — cooling targets are skipped and reported, never hidden.
-- **Automatic ordering** — with no chain configured, models are ordered by measured health and latency.
-- **Remember Last Successful** — optionally start from the model and key that last answered (20-minute TTL).
+- **Automatic ordering** — with nothing selected, models are ordered by measured health and latency.
+- **Remembered successes** — the provider, model and exact key that last answered are tried first on the next request (20-minute TTL), with no mode to set.
 - **Key-aware routing** — keys are handled independently within each provider/model target.
 - **Text + vision separation** — vision requests stay in the vision pool; they do not silently fall back to text-only targets.
 - **Multiple client protocols** — Claude Messages, OpenAI Responses, OpenAI Chat Completions, Gemini, and generic OpenAI-compatible clients.
@@ -178,14 +178,16 @@ real request timings first and health-probe timings second — never from a valu
 the router does not have. The panel shows this as **Automatic Health-Based
 Fallback**. Text and Vision are ordered separately, from their own measurements.
 
-### Fallback modes
+### How a pool is routed
 
-| Mode | Behaviour |
+There is no mode switch. The routing mode is derived from the pool's saved
+**Manual Model Selection**, and a successful provider, model and key is always
+remembered either way:
+
+| Selection | Behaviour |
 |---|---|
-| **Fixed Order** (default) | The chain is always walked in its saved order, and every eligible key of a model is tried before the next model. The key that last answered is tried first within its own model, but a success never moves a model ahead of an earlier one. |
-| **Remember Last Successful** | The model and key that last answered are tried first. If they fail or are cooling down, the chain continues in its saved order. The saved order is never modified. |
-| **Automatic Health-Based Fallback** | The chain is re-ordered from measured health and latency on each cycle. Selecting this mode is what allows re-sorting. |
-| **Manual Model Selection** | Two batches that alternate in one request. **Manual:** your selected models, in exactly the saved order (interleaved providers stay interleaved), every eligible key of a model before the next. **Health:** if all of them fail, every model you did *not* select, ordered by measured health and latency. Then Manual → Health again, for as long as a target is permitted another attempt. See below. |
+| **Nothing selected** | Automatic health-based routing: healthy models with lower measured latency first, unmeasured models after them in a stable configured order. The provider, model and key that last answered are remembered and tried first on the next request. |
+| **Models selected** | Two batches that alternate in one request. **Manual:** your selected models, in exactly the saved order (interleaved providers stay interleaved), every eligible key of a model before the next — led by the remembered target when it is one of the selected models. **Health:** if all of them fail, every model you did *not* select, ordered by measured health and latency. Then Manual → Health again, for as long as a target is permitted another attempt. See below. |
 
 #### Manual Model Selection in detail
 
@@ -197,7 +199,7 @@ Fallback**. Text and Vision are ordered separately, from their own measurements.
 - Live Logs / request timelines label each attempt `manual-selection`, `health-fallback`, `manual-retry` or `health-retry`.
 
 **Reset Fallback** clears the remembered model/key preferences immediately, with
-no restart. It never deletes the saved chain, the selected mode, the providers,
+no restart. It never deletes the saved selection, the providers,
 the API keys, the configured models, valid health measurements or a genuine
 cooldown.
 
@@ -263,8 +265,8 @@ outright, and that wins over the status code.
 | GET | `/api/requests` | Request history |
 | GET | `/api/requests/stream` | Live request events |
 | GET | `/api/requests/:id` | Request lifecycle |
-| GET | `/api/fallback` | The Fallback Chain, the mode and the model catalogue with health and latency |
-| PUT | `/api/fallback` | Save one pool's chain, or select the operating mode |
+| GET | `/api/fallback` | The saved selection per pool, the derived mode and the model catalogue with health and latency |
+| PUT | `/api/fallback` | Save one pool's Manual Model Selection |
 | POST | `/api/fallback/reset` | Clear remembered model/key preferences (Reset Fallback) |
 | GET | `/api/router/preview` | Preview routing decisions |
 | GET | `/api/analytics` | Usage and performance analytics |

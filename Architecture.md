@@ -34,11 +34,11 @@ AI Provider
 4. Configured provider/model/key combinations are expanded into independent targets.
 5. Targets incompatible with the client protocol are excluded.
 6. The request's pool (TEXT or VISION) is decided; only that pool's targets are used, never the other.
-7. A route plan is built (see "The Fallback Chain"): the remembered target when the mode keeps one, then the operator's configured chain for that pool, or the automatic health-and-latency order when no chain is configured.
+7. A route plan is built (see "The Fallback Chain"): the remembered target, then the operator's Manual Model Selection for that pool when there is one, or the automatic health-and-latency order when nothing is selected.
 8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. A failure cools down only the key + model that was tried: 401/402/403 and 400/404/413/422 never cool the key's sibling models (each is attempted on its own), and a 429 cools that key + model for the upstream `Retry-After` (60s when absent), not the 12 minute default.
 9. The router calls targets sequentially.
 10. Every failure puts the exact target (key + model) into cooldown and moves routing forward to the next key or model — whatever the status. Only a client disconnect ends the request early.
-11. A successful target becomes the session's remembered target — in the modes that remember one.
+11. A successful target becomes the session's remembered target.
 12. The upstream response is streamed back to the client.
 
 ## The Fallback Chain
@@ -50,19 +50,24 @@ differ.
 
 ```text
 REQUEST -> TEXT pool | VISION pool (never mixed)
-  REMEMBERED  the session's last successful target, only in the modes that
-              remember one, and only while its 20-minute TTL is valid
-  CHAIN       the operator's saved order, entry by entry
-  AUTO        the same entries (or every configured target, when the chain is
-              empty) ordered by measured health and latency
+  REMEMBERED  the session's last successful target, while its 20-minute TTL is
+              valid; it leads the selection only when it is one of the selected
+              models
+  MANUAL      the operator's saved Manual Model Selection, entry by entry, when
+              the selection is not empty
+  HEALTH      every model the selection does not name, ordered by measured
+              health and latency — reached only after the selection is walked
+  AUTO        every configured target ordered by measured health and latency,
+              when nothing is selected
 ```
 
-A configured chain is the order, and it is the whole order: a model the operator
-left out of the chain is not routed to, because routing to it would be a routing
-path overriding the configured order. Health never re-sorts a chain; it only
-decides eligibility while the plan is walked. The automatic order is used when
-the chain is empty, or when the operator has explicitly selected the automatic
-mode.
+A saved selection is the order between the models it names, and health never
+re-sorts it; health only decides eligibility while the plan is walked. It is not
+the whole order: a model the operator left out is reached by the `health`
+batch once every eligible selected target has failed, so a failure of the
+selection degrades to the automatic order rather than to an outage. Disabled
+entries and entries narrowed to no usable key are never routed to, in either
+batch. The automatic order alone is used when nothing is selected.
 
 ### Entries
 
@@ -85,27 +90,32 @@ flag:
   asked for. A partly readable list keeps exactly the indexes it could read.
 - Every eligible key of an entry is attempted, in key order, before the walk
   advances to the next entry.
-- A disabled entry keeps its position and is simply not routed to. Disabling
-  every entry is the same position as having no chain at all, so the automatic
-  order takes over rather than the router having nothing to do.
+- A disabled entry keeps its position and is simply not routed to, and it is
+  never used as a fallback either. Disabling every entry leaves the selection
+  with nothing walkable, so the pool fails closed rather than substituting
+  models the operator parked.
 
 The file holds ids, key indexes and flags — never credentials.
 
-### Operating modes
+### Derived modes
 
-| Mode | Remembered target | Order |
+There is no mode switch to set. The mode is derived from the pool's saved
+Manual Model Selection:
+
+| Selection | Mode | Order |
 |---|---|---|
-| `fixed` | none | the saved chain |
-| `last-success` | leads the next request | the saved chain |
-| `auto` | leads the next request | health and latency |
+| empty | `auto` | health and latency |
+| non-empty | `manual` | the saved selection, then health and latency |
 
-In `fixed`, the walker does not record a success at all, which is what makes the
-mode — and Reset — mean what they say. In the other modes the success is stored
-on the session (`RouteSession`), keyed by protocol + pool + session id, so a
-text success can never become a vision preference.
+A successful target is always remembered: it is stored on the session
+(`RouteSession`), keyed by protocol + pool + session id, so a text success can
+never become a vision preference. In `manual` it leads the next request only
+when it is one of the selected models; in `auto` it leads outright. An older
+client or persisted file that still says `fixed` or `last-success` is accepted
+and read as the derived mode, so no configuration is broken by the removal.
 
 Reset Fallback clears those session records and the automatic-order cache. It
-touches nothing else: not the chain, the mode, the providers, the keys, the
+touches nothing else: not the selection, the providers, the keys, the
 configured models, valid health measurements or any cooldown.
 
 ### Automatic ordering
@@ -367,14 +377,15 @@ The record is scoped by protocol, pool and session id: text and vision keep
 separate remembered targets, and so does each client protocol. Requests without
 the header share one default session per protocol and pool.
 
-In the `fixed` mode nothing is remembered at all: every request starts at the
-first model of the chain and its first eligible key.
+When nothing is selected the plan is built purely from health and latency, and
+the remembered target leads the walk outright.
 
 
 ### Manual Model Selection (alternating batches)
 
-`manual` is a fourth fallback mode. It is the only mode whose plan has more than
-one source, and it is built by `buildManualPlan` in `fallback-plan.js`:
+`manual` is the mode a pool with a saved selection uses. It is the only mode
+whose plan has more than one source, and it is built by `buildManualPlan` in
+`fallback-plan.js`:
 
 1. **`manual-selection`** — the saved entries in exactly the saved order. Groups
    are keyed by provider/model, so an interleaved selection (provider P model A,
@@ -398,7 +409,7 @@ walker (`withFallback` in `router.js`) decides, target by target and from
 per-request state, whether a listed retry is permitted:
 
 - the per-request "a target is invoked at most once" rule is unchanged for every
-  other step and every other mode;
+  other step and the automatic order;
 - a target is retried at most `TARGET_RETRY_ALLOWANCE` (1) times per request, and
   the planner emits exactly that many retry rounds;
 - a cooldown that existed when the request reached the target is never

@@ -276,24 +276,27 @@ export function entryState(entry, group) {
 /**
  * Which order is in force for a pool, mirroring the planner exactly.
  *
- * Three states, and they are not interchangeable:
+ * The mode is derived, never chosen: a pool with a saved selection is walked in
+ * that saved order, and a pool with none uses the automatic order. Three states,
+ * and they are not interchangeable:
  *
- *   no entries at all        the pool is unconfigured -> automatic order
- *   entries that resolve     -> their own order (or automatic, in auto mode)
+ *   no entries at all        -> automatic order
+ *   entries that resolve     -> their own order, then the health order for the
+ *                               models the selection does not name
  *   entries that resolve to
- *   nothing usable           -> nothing is walked. The chain is the operator's
- *                               configuration and it permits no target, so the
- *                               request fails rather than being routed to a
- *                               model or key the chain does not cover.
+ *   nothing usable           -> nothing is walked. The selection is the
+ *                               operator's configuration and it permits no
+ *                               target, so the request fails rather than being
+ *                               routed to a model or key it does not cover.
  */
-export function chainSummary(entries, catalogue = [], mode) {
+export function chainSummary(entries, catalogue = []) {
   const index = indexCatalogue(catalogue);
   const saved = Array.isArray(entries) ? entries : [];
 
   if (saved.length === 0) {
     return {
       source: "auto",
-      label: "Automatic Health-Based Fallback (no chain configured)",
+      label: "Automatic Health-Based Fallback (nothing selected)",
       count: 0,
       failClosed: false
     };
@@ -313,17 +316,15 @@ export function chainSummary(entries, catalogue = [], mode) {
   if (usable.length === 0) {
     return {
       source: "fail-closed",
-      label: "Chain configured, but no entry is usable — requests will fail rather than route elsewhere",
+      label: "Selection saved, but no entry is usable — requests will fail rather than route elsewhere",
       count: 0,
       failClosed: true
     };
   }
 
   return {
-    source: mode === "auto" ? "auto" : "chain",
-    label: mode === "auto"
-      ? "Automatic Health-Based Fallback over the configured models"
-      : "Configured order",
+    source: "chain",
+    label: "Configured order, then health-based fallback for the models it does not name",
     count: usable.length,
     failClosed: false
   };

@@ -58,7 +58,6 @@ let cacheId = 0;
 function plan(overrides = {}) {
   resetAutomaticOrderCache();
   return buildRoutePlan({
-    mode: FALLBACK_MODES.MANUAL,
     now: BASE + 5_000,
     cacheKey: `ordering-${(cacheId += 1)}`,
     ...overrides
@@ -194,9 +193,9 @@ test("a cooldown that lapses mid-bucket is reflected at once, identically for ev
   assert.notEqual(labels(phase(during, PHASES.HEALTH))[0], "gemini/U-fast#0");
 
   // Same cache namespace, same health version, same 30 s bucket — later moment.
-  const after = buildRoutePlan({ targets, chain, health, mode: FALLBACK_MODES.MANUAL, now: BASE + 10_000, cacheKey: "shared" });
+  const after = buildRoutePlan({ targets, chain, health, now: BASE + 10_000, cacheKey: "shared" });
   resetAutomaticOrderCache();
-  const fresh = buildRoutePlan({ targets, chain, health, mode: FALLBACK_MODES.MANUAL, now: BASE + 10_000, cacheKey: "fresh" });
+  const fresh = buildRoutePlan({ targets, chain, health, now: BASE + 10_000, cacheKey: "fresh" });
   assert.deepEqual(labels(phase(after, PHASES.HEALTH)), HEALTH_ORDER);
   assert.deepEqual(labels(phase(after, PHASES.HEALTH)), labels(phase(fresh, PHASES.HEALTH)));
 });
@@ -233,13 +232,13 @@ test("Text and Vision keep their own chains, targets and health, even for the sa
   assert.deepEqual(labels(textPlan.steps.filter((s) => !s.retry)), ["a/M1#0", "a/M2#0", "a/M3#0"]);
 
   // Vision has no chain, so it is ordered purely automatically — by ITS OWN latencies.
-  const visionPlan = plan({ targets: vision, chain: chains.vision, health, mode: FALLBACK_MODES.MANUAL });
+  const visionPlan = plan({ targets: vision, chain: chains.vision, health });
   assert.deepEqual(labels(visionPlan.steps), ["a/M3#0", "a/M1#0", "a/M2#0"]);
 
   // A failure in Vision never cools Text, and vice versa.
   health.markFailure(vision[2], 500, { cooldownMs: MIN }, BASE + 4_000);
   assert.ok(health.isAvailable(text[2], BASE + 4_500));
-  const mixed = routeOrderByPool(targets, { chains, mode: FALLBACK_MODES.MANUAL, health, now: BASE + 4_500, isEligible: (x) => health.isAvailable(x, BASE + 4_500) });
+  const mixed = routeOrderByPool(targets, { chains, health, now: BASE + 4_500, isEligible: (x) => health.isAvailable(x, BASE + 4_500) });
   assert.deepEqual(mixed.filter((x) => x.pool === "text").map(label), ["a/M1#0", "a/M2#0", "a/M3#0"]);
   assert.deepEqual(mixed.filter((x) => x.pool === "vision").map(label), ["a/M1#0", "a/M2#0"]);
 });
@@ -252,14 +251,14 @@ for (const pool of ["text", "vision"]) {
   test(`${pool}: the preview lists the order the plan, and the walker, actually use`, async () => {
     const { targets, chain, health } = scenario(pool);
     const now = BASE + 5_000;
-    const common = { targets, chain, mode: FALLBACK_MODES.MANUAL, health, now };
+    const common = { targets, chain, health, now };
 
     resetAutomaticOrderCache();
     const p = buildRoutePlan({ ...common, cacheKey: `pool:${pool}` });
     const planned = effectiveOrder(p.steps, (target) => health.isAvailable(target, now)).map((step) => label(step.target));
 
     resetAutomaticOrderCache();
-    const preview = describeRouting({ targets, health, protocol: PROTOCOL, pool, chain, mode: FALLBACK_MODES.MANUAL, now });
+    const preview = describeRouting({ targets, health, protocol: PROTOCOL, pool, chain, now });
     assert.deepEqual(preview.fallbackOrder.map(label), planned, "preview == plan");
     assert.deepEqual(planned, [...SELECTED_ORDER, ...HEALTH_ORDER]);
 
@@ -294,11 +293,11 @@ for (const pool of ["text", "vision"]) {
     health.markFailure(cooling, 500, { cooldownMs: 10 * MIN }, BASE + 4_000);
 
     resetAutomaticOrderCache();
-    const preview = describeRouting({ targets, health, protocol: PROTOCOL, pool, chain, mode: FALLBACK_MODES.MANUAL, now });
+    const preview = describeRouting({ targets, health, protocol: PROTOCOL, pool, chain, now });
     assert.ok(!preview.fallbackOrder.map(label).includes(label(cooling)));
 
     resetAutomaticOrderCache();
-    const p = buildRoutePlan({ targets, chain, mode: FALLBACK_MODES.MANUAL, health, now, cacheKey: `pool:${pool}` });
+    const p = buildRoutePlan({ targets, chain, health, now, cacheKey: `pool:${pool}` });
     const calls = [];
     await assert.rejects(withFallback(targets, async (target) => {
       calls.push(label(target));
@@ -371,30 +370,32 @@ for (const pool of ["text", "vision"]) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. The other modes are unchanged
+// 6. The derived modes: a saved selection is manual, an empty one is automatic
 // ---------------------------------------------------------------------------
 
-test("Fixed Order is the saved order whatever the latency, and remembers nothing across models", () => {
+test("a saved selection is walked whatever the latency, and a remembered target leads", () => {
   const { targets, chain, health } = scenario("text");
-  const p = plan({ targets, chain, health, mode: FALLBACK_MODES.FIXED });
-  assert.deepEqual(labels(p.steps), SELECTED_ORDER);
-  const remembered = plan({ targets, chain, health, mode: FALLBACK_MODES.FIXED, stickyTargetId: "gemini:S-3:key-1" });
-  assert.deepEqual(labels(remembered.steps), ["groq/S-1#0", "gemini/S-2#0", "gemini/S-3#1", "gemini/S-3#0"]);
+  const p = plan({ targets, chain, health });
+  assert.deepEqual(labels(phase(p, PHASES.MANUAL)), SELECTED_ORDER);
+
+  // A remembered SELECTED target leads with its own key, then its own remaining
+  // keys, then the rest of the selection in its saved order.
+  const remembered = plan({ targets, chain, health, stickyTargetId: "gemini:S-3:key-1" });
+  assert.deepEqual(labels(remembered.steps.slice(0, 4)),
+    ["gemini/S-3#1", "gemini/S-3#0", "groq/S-1#0", "gemini/S-2#0"]);
+  assert.equal(remembered.steps[0].phase, PHASES.STICKY);
 });
 
-test("Remember Last Successful leads with the remembered target, then the saved order", () => {
-  const { targets, chain, health } = scenario("text");
-  const p = plan({ targets, chain, health, mode: FALLBACK_MODES.LAST_SUCCESS, stickyTargetId: "gemini:S-3:key-0" });
-  // The walker attempts each target once, so the order it follows is the first appearance of each.
-  assert.deepEqual(labels(effectiveOrder(p.steps)), ["gemini/S-3#0", "gemini/S-3#1", "groq/S-1#0", "gemini/S-2#0"]);
-  assert.equal(p.steps[0].phase, PHASES.STICKY);
-});
-
-test("Automatic Health-Based Fallback orders the chain by latency, unmeasured last", () => {
-  const { targets, chain, health } = scenario("text");
-  const extra = [...chain, entry("mistral", "U-never-1"), entry("gemini", "U-fast")];
-  const p = plan({ targets, chain: extra, health, mode: FALLBACK_MODES.AUTO });
-  assert.deepEqual(modelsOf(p.steps), ["gemini/S-2", "gemini/U-fast", "gemini/S-3", "groq/S-1", "mistral/U-never-1"]);
+test("an empty selection is the automatic order, unmeasured last", () => {
+  const { targets, health } = scenario("text");
+  const p = plan({ targets, chain: [], health });
+  // With nothing selected, EVERY model is ordered by its measured latency, and
+  // the never-measured ones come last in configuration order.
+  assert.deepEqual(modelsOf(p.steps), [
+    "gemini/S-2", "gemini/U-fast", "cerebras/U-probe", "openrouter/U-mid",
+    "gemini/U-slow", "gemini/S-3", "groq/S-1", "mistral/U-never-1", "sambanova/U-never-2"
+  ]);
+  assert.ok(p.steps.every((step) => step.phase === PHASES.AUTO), "an empty selection has only the automatic phase");
 });
 
 test("API-key restrictions and order hold in the selected and the unselected batch", () => {

@@ -18,11 +18,9 @@ const group = (model) => ({
 });
 
 /** The page calls useApi twice per render: the saved configuration, then the route preview. */
-function render({ mode, fallbackOrder, chain = [] }) {
+function render({ fallbackOrder, chain = [] }) {
   const configuration = {
     data: {
-      mode,
-      modes: [{ id: mode, label: mode, summary: "" }],
       chain: { text: chain, vision: [] },
       catalogue: { text: [...new Set(fallbackOrder.map((item) => item.model))].map(group), vision: [] },
       remembered: null
@@ -46,11 +44,10 @@ const text = (markup) => markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 describe("Fallback Chain page: Route order wording", () => {
   beforeEach(() => useApi.mockReset());
 
-  it("Fixed Order never says the order came from latency", () => {
+  it("a saved selection never says the order came from latency", () => {
     const panel = routeOrder(render({
-      mode: "fixed",
       chain: [{ provider: "a", model: "m1", keys: null, enabled: true }, { provider: "a", model: "m2", keys: null, enabled: true }],
-      fallbackOrder: [step("m1", "chain"), step("m2", "chain", { orderLatencyMs: 40, rank: 2 })]
+      fallbackOrder: [step("m1", "manual-selection"), step("m2", "manual-selection", { orderLatencyMs: 40, rank: 2 })]
     }));
     expect(panel.toLowerCase()).not.toContain("ordered by");
     expect(text(panel)).toContain("latency 900 ms");
@@ -59,7 +56,6 @@ describe("Fallback Chain page: Route order wording", () => {
 
   it("Manual Model Selection: saved steps are information, the health batch is ordered by latency", () => {
     const panel = routeOrder(render({
-      mode: "manual",
       chain: [{ provider: "a", model: "sel", keys: null, enabled: true }],
       fallbackOrder: [
         step("sel", "manual-selection"),
@@ -73,7 +69,6 @@ describe("Fallback Chain page: Route order wording", () => {
 
   it("Automatic claims it for every sorted step", () => {
     const panel = routeOrder(render({
-      mode: "auto",
       fallbackOrder: [step("fast", "auto", { orderLatencyMs: 40 }), step("slow", "auto", { orderLatencyMs: 700, rank: 2 })]
     }));
     expect(text(panel).match(/ordered by latency/g)).toHaveLength(2);
@@ -82,12 +77,12 @@ describe("Fallback Chain page: Route order wording", () => {
 
   it("an unmeasured model keeps a truthful tooltip in each mode", () => {
     const none = { orderLatencyMs: null, orderLatencySource: null };
-    const auto = routeOrder(render({ mode: "auto", fallbackOrder: [step("m", "auto", none)] }));
+    const auto = routeOrder(render({ fallbackOrder: [step("m", "auto", none)] }));
     expect(auto).toContain("placed after measured models");
-    const fixed = routeOrder(render({
-      mode: "fixed", chain: [{ provider: "a", model: "m", keys: null, enabled: true }], fallbackOrder: [step("m", "chain", none)]
+    const saved = routeOrder(render({
+      chain: [{ provider: "a", model: "m", keys: null, enabled: true }], fallbackOrder: [step("m", "manual-selection", none)]
     }));
-    expect(fixed).not.toContain("placed after");
-    expect(fixed).toContain("Latency does not decide this position");
+    expect(saved).not.toContain("placed after");
+    expect(saved).toContain("Latency does not decide this position");
   });
 });

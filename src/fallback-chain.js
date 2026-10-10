@@ -23,60 +23,65 @@ import path from "node:path";
 export const FALLBACK_POOLS = Object.freeze(["text", "vision"]);
 
 /**
- * The two ways a chain is walked. A custom order always wins; the automatic
- * order is only ever built when the operator has configured no entries at all.
+ * There is no mode switch any more: the Manual Model Selection list IS the
+ * configuration, and the mode is derived from it.
  *
- *   fixed         every request starts at the first entry and its first key
- *   last-success  the last successful target leads, then the chain continues
- *   auto          the chain is ordered by measured health and latency each cycle
- *   manual        Manual Model Selection: the chain is the operator's explicit
- *                 pick. It is walked in its saved order, then every model NOT in
- *                 it is tried by health, and the two batches then alternate
- *                 (selected, health, selected, health ...) for as long as a
- *                 target is permitted another attempt
+ *   manual  a Manual Model Selection is saved for the pool: those models are
+ *           tried in their saved order, then every model NOT selected, by health
+ *   auto    the selection is empty: the automatic health/latency order applies
+ *
+ * Both remember the last successful provider + model + key so the next request
+ * prefers it, so neither is a separate switch the operator has to choose.
  */
 export const FALLBACK_MODES = Object.freeze({
-  FIXED: "fixed",
-  LAST_SUCCESS: "last-success",
   AUTO: "auto",
   MANUAL: "manual"
 });
 
-export const DEFAULT_MODE = FALLBACK_MODES.FIXED;
+export const DEFAULT_MODE = FALLBACK_MODES.AUTO;
+
+/**
+ * Mode ids that predate this design. They are still ACCEPTED at the API
+ * boundary — an older UI posting "fixed" or "last-success" must not be handed a
+ * validation error — but they all mean the derived mode now: Fixed Order and
+ * Remember Last Successful were removed in favour of the selection list, and an
+ * empty list is exactly the automatic health-based routing those modes shared.
+ */
+const LEGACY_MODE_ALIASES = Object.freeze({
+  fixed: FALLBACK_MODES.AUTO,
+  "last-success": FALLBACK_MODES.AUTO
+});
 
 /** Operator-facing description of each mode, shared by the API and the panel. */
 export const FALLBACK_MODE_INFO = Object.freeze([
   {
-    id: FALLBACK_MODES.FIXED,
-    label: "Fixed Order",
-    detail: "The chain is always walked in its saved order, and every eligible key of a model is tried before the next model. The key that last answered is tried first within its own model, but a success never moves a model ahead of an earlier one."
-  },
-  {
-    id: FALLBACK_MODES.LAST_SUCCESS,
-    label: "Remember Last Successful",
-    detail: "The model and key that last answered are tried first. If they fail or are cooling down, the chain continues in its saved order. The saved order itself is never modified."
-  },
-  {
     id: FALLBACK_MODES.AUTO,
     label: "Automatic Health-Based Fallback",
-    detail: "The chain is re-ordered from measured health and latency on each cycle: healthy models with lower measured latency first, unmeasured models in a stable configured order. A configured order is still what decides which models are in the chain."
+    detail: "No models are selected, so the router orders every configured model by measured health and latency: healthy models with lower measured latency first, unmeasured models in a stable configured order. Every eligible key of a model is tried before the next model. The last successful provider, model and key is remembered and tried first on the next request."
   },
   {
     id: FALLBACK_MODES.MANUAL,
     label: "Manual Model Selection",
-    detail: "Two batches that alternate within one request. 1) Your selected models, in exactly the order you saved them, every eligible key of a model before the next. 2) If all of those fail, every model you did NOT select, ordered by measured health and latency. Then selected, health, selected, health again — but only for targets that failed transiently in this request, each at most once more. Cooldowns and key restrictions apply throughout; a credential failure or a cooling key is never retried."
+    detail: "Two batches that alternate within one request. 1) Your selected models, in exactly the order you saved them — except that the model that last answered leads when it is one of them — every eligible key of a model before the next. 2) If all of those fail, every model you did NOT select, ordered by measured health and latency. Then selected, health, selected, health again — but only for targets that failed transiently in this request, each at most once more. Cooldowns and key restrictions apply throughout; a credential failure or a cooling key is never retried."
   }
 ]);
 
 export function fallbackModeLabel(mode) {
-  return FALLBACK_MODE_INFO.find((entry) => entry.id === normalizeMode(mode))?.label ?? DEFAULT_MODE;
+  const normalized = normalizeMode(mode);
+  return FALLBACK_MODE_INFO.find((entry) => entry.id === normalized)?.label
+    ?? FALLBACK_MODE_INFO.find((entry) => entry.id === DEFAULT_MODE)?.label
+    ?? DEFAULT_MODE;
 }
 
-/** Modes in which a successful target is remembered and leads the next request. */
-export const REMEMBERING_MODES = Object.freeze([FALLBACK_MODES.LAST_SUCCESS, FALLBACK_MODES.AUTO]);
+/**
+ * Whether a successful target is remembered and preferred on the next request.
+ * Every mode remembers now, so this is always true; it is kept as a named
+ * predicate because the API and the panel report it as a distinct fact.
+ */
+export const REMEMBERING_MODES = Object.freeze([FALLBACK_MODES.AUTO, FALLBACK_MODES.MANUAL]);
 
-export function remembersSuccess(mode) {
-  return REMEMBERING_MODES.includes(normalizeMode(mode));
+export function remembersSuccess() {
+  return true;
 }
 
 const MAX_ENTRIES = 200;
@@ -87,9 +92,25 @@ const MAX_ENTRIES = 200;
  */
 export const MAX_KEYS = 64;
 
+/**
+ * Whether a value names a mode the API will accept: a current mode, or one of
+ * the retired ids above. This is what the PUT boundary checks, so an old client
+ * can still post the mode it knows while a typo is still rejected.
+ */
+export function isKnownMode(value) {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return Object.values(FALLBACK_MODES).includes(text) || text in LEGACY_MODE_ALIASES;
+}
+
+/**
+ * The mode a value means now. Retired ids resolve to the mode that replaced
+ * them; anything unrecognized falls back to `DEFAULT_MODE`. Callers that must
+ * tell "unrecognized" from "recognized" use `isKnownMode` first.
+ */
 export function normalizeMode(value) {
   const text = typeof value === "string" ? value.trim().toLowerCase() : "";
-  return Object.values(FALLBACK_MODES).includes(text) ? text : DEFAULT_MODE;
+  if (Object.values(FALLBACK_MODES).includes(text)) return text;
+  return LEGACY_MODE_ALIASES[text] ?? DEFAULT_MODE;
 }
 
 /**
@@ -203,10 +224,24 @@ export class FallbackChainStore {
    */
   constructor({ file = null, migrate = null } = {}) {
     this.file = file ? path.resolve(file) : null;
-    this.mode = DEFAULT_MODE;
     this.byPool = { text: [], vision: [] };
     this.migrated = false;
     this.load(migrate);
+  }
+
+  /**
+   * The mode in force, DERIVED from the saved selection rather than stored.
+   *
+   * A pool with a saved Manual Model Selection is walked in `manual` mode; a
+   * pool with none is walked by the automatic health/latency order. Because the
+   * mode is a property of the configuration, an edit to the list takes effect
+   * immediately and cannot drift from what is actually walked, and there is no
+   * separate switch left to fall out of sync with it.
+   */
+  get mode() {
+    return FALLBACK_POOLS.some((pool) => (this.byPool[pool] ?? []).length > 0)
+      ? FALLBACK_MODES.MANUAL
+      : FALLBACK_MODES.AUTO;
   }
 
   load(migrate = null) {
@@ -245,7 +280,6 @@ export class FallbackChainStore {
     }
     if (!legacy) return false;
     const next = {
-      mode: normalizeMode(legacy.mode),
       text: normalizeEntries(legacy.text),
       vision: normalizeEntries(legacy.vision)
     };
@@ -257,7 +291,9 @@ export class FallbackChainStore {
 
   apply(parsed) {
     const data = parsed && typeof parsed === "object" ? parsed : {};
-    this.mode = normalizeMode(data.mode);
+    // A stored `mode` from an older file is read but not adopted: the mode is
+    // derived from the entries below, so the file cannot force a mode the
+    // selection does not support.
     for (const pool of FALLBACK_POOLS) this.byPool[pool] = normalizeEntries(data?.[pool]);
   }
 
@@ -277,27 +313,28 @@ export class FallbackChainStore {
   }
 
   /**
-   * Applies a mode change and/or one pool's chain as ONE persisted update.
+   * Applies one pool's chain as ONE persisted update.
    *
-   * The two used to be written separately, so a request carrying both could
-   * persist the mode and then fail on the chain — a half-applied configuration
-   * that the next start would load, and that the running process would disagree
-   * with. Here the next state is computed first, persisted exactly once, and
-   * only adopted in memory once the write has landed. A failure at any point
-   * leaves both the file and the running configuration as they were.
+   * The mode used to be written alongside the chain, so a request carrying both
+   * could persist the mode and then fail on the chain — a half-applied
+   * configuration the next start would load, and that the running process would
+   * disagree with. The mode is now derived from the entries, so only the entries
+   * are written: they are computed first, persisted exactly once, and adopted in
+   * memory only once the write has landed. A failure at any point leaves both
+   * the file and the running configuration as they were.
    *
-   * `mode: undefined` leaves the mode alone; `pool: null` leaves both chains
-   * alone, so either can be updated without touching the other.
+   * `mode` is accepted and IGNORED so a client that still posts a mode (or a
+   * retired one) keeps working; the mode follows from whether the pool has any
+   * saved entries. `pool: null` leaves both chains alone.
    */
   update({ mode, pool = null, entries = null } = {}) {
+    void mode;
     if (pool !== null && !FALLBACK_POOLS.includes(pool)) throw new Error(`unknown pool "${pool}"`);
-    const nextMode = mode === undefined ? this.mode : normalizeMode(mode);
     const nextByPool = pool === null ? this.byPool : { ...this.byPool, [pool]: normalizeEntries(entries) };
 
     // Durable state first: nothing in memory moves unless the write succeeds.
-    this.persist({ ...nextByPool, mode: nextMode });
+    this.persist(nextByPool);
 
-    this.mode = nextMode;
     this.byPool = nextByPool;
     return this.snapshot();
   }
@@ -312,20 +349,23 @@ export class FallbackChainStore {
     return this.set(pool, []);
   }
 
-  setMode(mode) {
-    this.update({ mode });
+  /** Retained for callers written against the old switch; the mode is derived. */
+  setMode() {
     return this.mode;
   }
 
   /**
    * Written to a temporary file and renamed, so a crash mid-write cannot leave a
    * half-written chain that the next start would refuse to read.
+   *
+   * The derived mode is still written, so a file produced here is readable by an
+   * older build without it having to infer the mode from the entries.
    */
   persist(data = this.byPool) {
     if (!this.file) return;
     const payload = {
       version: FILE_VERSION,
-      mode: normalizeMode(data.mode ?? this.mode),
+      mode: this.mode,
       text: normalizeEntries(data.text),
       vision: normalizeEntries(data.vision)
     };
@@ -343,9 +383,11 @@ export class FallbackChainStore {
  *   TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS       priority entries
  *
  * Manual entries lead, then any priority entry not already present, per pool.
- * The seeded mode is `last-success`: that is what the legacy manual-selection
- * behaviour actually did (the last good target of the selection led the next
- * request), so an upgrade preserves routing rather than changing it.
+ * The seeded mode is `manual`, which is what the legacy manual-selection
+ * behaviour actually was (the last good target of the selection led the next
+ * request, then the rest of the selection) — and it is also what the seed's
+ * non-empty entries derive to, so an upgrade preserves routing rather than
+ * changing it.
  *
  * Neither the old file nor the env vars are read again once a chain is saved.
  */
@@ -370,7 +412,7 @@ export function readLegacyConfig({ manualFile = null, env = {} } = {}) {
 
   const dedupe = (entries) => normalizeEntries(entries);
   return {
-    mode: FALLBACK_MODES.LAST_SUCCESS,
+    mode: FALLBACK_MODES.MANUAL,
     text: dedupe(byPool.text),
     vision: dedupe(byPool.vision)
   };

@@ -60,7 +60,6 @@ export function describeRouting({
   now = Date.now(),
   pool = "text",
   chain = [],
-  mode = FALLBACK_MODES.FIXED,
   retryableStatus = []
 } = {}) {
   const selection = selectTargetsForProtocol(targets, protocol, model);
@@ -68,20 +67,21 @@ export function describeRouting({
   const bridged = BRIDGED_PROTOCOLS.has(protocol);
   const poolLabel = pool === "vision" ? "VISION" : "TEXT";
 
-  // The same plan the proxy walks: the operator's Fallback Chain, or the
-  // automatic health-based order when the chain is empty or the mode asks for
-  // it, preceded by the remembered target in the modes that remember one.
-  // Health decides eligibility here exactly as it does on the live path; it
-  // never reorders a configured chain.
+  // The same plan the proxy walks: a saved Manual Model Selection when there is
+  // one, otherwise the automatic health-based order — either way led by the
+  // remembered target when this request has one. Health decides eligibility here
+  // exactly as it does on the live path; it never reorders a saved selection.
   const plan = buildRoutePlan({
     targets: selected,
     chain,
-    mode,
     stickyTargetId,
     health,
     now,
     cacheKey: `preview:${pool}`
   });
+  // The mode is the plan's, not a caller's: there is no switch left to disagree
+  // with what would actually be walked.
+  const mode = plan.mode;
   const automatic = plan.source === "auto";
   const eligible = selected.filter((target) => health.isAvailable(target, now));
   const rankedIds = new Set(eligible.map((target) => health.key(target)));
@@ -203,32 +203,30 @@ export function describeRouting({
       key: "ranking",
       label: "Route order",
       detail: plan.failClosed
-        // The chain exists and permits nothing. Say that, rather than describing
-        // an automatic order the router will not actually use.
-        ? `The saved Fallback Chain holds ${plan.entries} entr${plan.entries === 1 ? "y" : "ies"} but no target it names can serve this request, so nothing is walked. `
-          + "The router will not substitute a model outside the chain — clear the chain to hand routing back to the automatic order"
+        // The selection exists and permits nothing. Say that, rather than
+        // describing an order the router will not actually use.
+        ? `The saved Manual Model Selection holds ${plan.entries} entr${plan.entries === 1 ? "y" : "ies"} but no target it names can serve this request, so nothing is walked. `
+          + "The router will not substitute a model outside the selection — clear it to hand routing back to the automatic order"
         : plan.source === "manual"
-        ? `Manual Model Selection: your ${plan.configured} selected model(s) in the saved order, then every model you did not select ordered by measured health and latency, then the two batches alternate again for targets that failed transiently in this request (each at most once more). Every eligible key of a model is tried before the next model`
-        : automatic
-        ? plan.configured > 0
-          ? `Automatic Health-Based Fallback: the ${plan.configured} configured model(s) are ordered by measured health and latency (lower measured latency first; unmeasured models keep a stable configured order). Every eligible key of a model is tried before the next model`
-          : "no fallback chain is configured, so the automatic health-based order applies: healthy models with lower measured latency first, unmeasured models in a stable configured order. Every eligible key of a model is tried before the next model"
-        : `${plan.configured} configured model(s), in the saved Fallback Chain order; every eligible key of a model is tried before the next model. Health only skips cooling targets`,
+        ? `Manual Model Selection: your ${plan.configured} selected model(s) in the saved order (the model that last answered leads when it is one of them), then every model you did not select ordered by measured health and latency, then the two batches alternate again for targets that failed transiently in this request (each at most once more). Every eligible key of a model is tried before the next model`
+        : plan.configured > 0
+          ? `Automatic Health-Based Fallback: the ${plan.configured} model(s) of the saved selection are ordered by measured health and latency (lower measured latency first; unmeasured models keep a stable configured order). Every eligible key of a model is tried before the next model`
+          : "no models are selected, so the automatic health-based order applies: healthy models with lower measured latency first, unmeasured models in a stable configured order. Every eligible key of a model is tried before the next model",
       count: ranked.length,
       state: plan.failClosed ? "error" : "info"
     },
     {
       key: "remembered",
       label: "Remembered target",
-      detail: mode === FALLBACK_MODES.MANUAL
-        ? `Manual Model Selection: nothing is remembered; every request starts at the first selected model and its first eligible key (mode: ${fallbackModeLabel(mode)})`
-        : mode === FALLBACK_MODES.FIXED
-        ? `Fixed Order: every request starts at the first model of the chain and its first eligible key. Nothing is remembered (mode: ${fallbackModeLabel(mode)})`
+      detail: plan.failClosed
+        ? `nothing is walked, so there is no remembered target (mode: ${fallbackModeLabel(mode)})`
         : plan.sticky
-          ? `the target that last answered (20-minute TTL) is tried first, then the chain resumes in its saved order (mode: ${fallbackModeLabel(mode)})`
+          ? `the target that last answered (20-minute TTL) is tried first, then the rest of the plan resumes (mode: ${fallbackModeLabel(mode)})`
           : stickyTargetId
-            ? "the given target is not part of this request's chain, pool or protocol, so it is ignored"
-            : `nothing remembered for this session yet, so the chain starts at its first model (mode: ${fallbackModeLabel(mode)})`,
+            ? "the given target is not part of this request's plan, pool or protocol, so it is ignored"
+            : mode === FALLBACK_MODES.MANUAL
+              ? `nothing remembered for this session yet, so the saved selection order is used (mode: ${fallbackModeLabel(mode)})`
+              : `nothing remembered for this session yet, so the automatic order is used (mode: ${fallbackModeLabel(mode)})`,
       state: "info"
     },
     {

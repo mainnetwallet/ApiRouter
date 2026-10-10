@@ -177,20 +177,21 @@ describe("fallback chain presentation", () => {
   });
 
   it("reports the ordering in force without inventing one", () => {
-    expect(chainSummary([toEntry(a)], [a], "fixed").source).toBe("chain");
-    expect(chainSummary([toEntry(a)], [a], "fixed").label).toBe("Configured order");
-    expect(chainSummary([toEntry(a)], [a], "auto").source).toBe("auto");
-    expect(chainSummary([], [a], "fixed").source).toBe("auto");
-    expect(chainSummary([], [a], "fixed").failClosed).toBe(false);
+    // A saved selection is always walked in its saved order...
+    expect(chainSummary([toEntry(a)], [a]).source).toBe("chain");
+    expect(chainSummary([toEntry(a)], [a]).label).toMatch(/Configured order/);
+    // ...and a pool with no selection always uses the automatic order.
+    expect(chainSummary([], [a]).source).toBe("auto");
+    expect(chainSummary([], [a]).failClosed).toBe(false);
   });
 
-  it("distinguishes an unconfigured pool from a chain that cannot serve it", () => {
-    // Entries that resolve to nothing usable are NOT the same as no chain:
+  it("distinguishes an unconfigured pool from a selection that cannot serve it", () => {
+    // Entries that resolve to nothing usable are NOT the same as no selection:
     // the planner fails closed, and the panel must not claim automatic routing.
     const unusable = [
-      chainSummary([toEntry(a)], [], "fixed"),
-      chainSummary([{ ...toEntry(a), enabled: false }], [a], "fixed"),
-      chainSummary([toEntry({ provider: "gone", model: "x" })], [a], "auto")
+      chainSummary([toEntry(a)], []),
+      chainSummary([{ ...toEntry(a), enabled: false }], [a]),
+      chainSummary([toEntry({ provider: "gone", model: "x" })], [a])
     ];
     for (const summary of unusable) {
       expect(summary.source).toBe("fail-closed");
@@ -199,37 +200,37 @@ describe("fallback chain presentation", () => {
       expect(summary.label).toMatch(/no entry is usable/);
     }
 
-    // A chain with at least one usable entry routes normally.
-    const partly = chainSummary([toEntry(a), { ...toEntry(b), enabled: false }], [a, b], "fixed");
+    // A selection with at least one usable entry routes normally.
+    const partly = chainSummary([toEntry(a), { ...toEntry(b), enabled: false }], [a, b]);
     expect(partly.failClosed).toBe(false);
     expect(partly.count).toBe(1);
 
     // An entry whose key restriction permits no key is unusable whatever the
-    // catalogue says, so a chain made only of those is fail-closed too.
-    const noKeys = chainSummary([{ ...toEntry(a), keys: [] }], [a], "fixed");
+    // catalogue says, so a selection made only of those is fail-closed too.
+    const noKeys = chainSummary([{ ...toEntry(a), keys: [] }], [a]);
     expect(noKeys.failClosed).toBe(true);
     expect(noKeys.count).toBe(0);
     // ...but it counts as usable again as soon as one entry permits a key.
-    const recovered = chainSummary([{ ...toEntry(a), keys: [] }, toEntry(a)], [a], "fixed");
+    const recovered = chainSummary([{ ...toEntry(a), keys: [] }, toEntry(a)], [a]);
     expect(recovered.failClosed).toBe(false);
     expect(recovered.count).toBe(1);
 
     // A non-empty selection naming only keys the provider no longer has is the
-    // same situation: zero eligible keys, so the chain cannot serve.
-    const stale = chainSummary([{ ...toEntry(a), keys: [5] }], [a], "fixed");
+    // same situation: zero eligible keys, so it cannot serve.
+    const stale = chainSummary([{ ...toEntry(a), keys: [5] }], [a]);
     expect(stale.failClosed).toBe(true);
     expect(stale.resolved ?? stale.count).toBe(0);
     expect(stale.source).toBe("fail-closed");
 
-    // A mixed chain stays usable while ANY enabled entry has an eligible key.
-    const mixed = chainSummary([{ ...toEntry(a), keys: [5] }, toEntry(b)], [a, b], "fixed");
+    // A mixed selection stays usable while ANY enabled entry has an eligible key.
+    const mixed = chainSummary([{ ...toEntry(a), keys: [5] }, toEntry(b)], [a, b]);
     expect(mixed.failClosed).toBe(false);
     expect(mixed.count).toBe(1);
     expect(mixed.source).toBe("chain");
 
     // A valid restriction is eligible, and a disabled entry never counts.
-    expect(chainSummary([{ ...toEntry(a), keys: [1] }], [a], "fixed").failClosed).toBe(false);
-    expect(chainSummary([{ ...toEntry(a), keys: [1], enabled: false }], [a], "fixed").failClosed).toBe(true);
+    expect(chainSummary([{ ...toEntry(a), keys: [1] }], [a]).failClosed).toBe(false);
+    expect(chainSummary([{ ...toEntry(a), keys: [1], enabled: false }], [a]).failClosed).toBe(true);
   });
 
   it("uses one vocabulary for the routing phases", () => {

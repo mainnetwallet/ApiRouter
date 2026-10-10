@@ -9,6 +9,7 @@ import {
   allowedKeyIndexes,
   entryId,
   hasLegacyConfig,
+  isKnownMode,
   normalizeEntries,
   normalizeEntry,
   normalizeMode,
@@ -92,23 +93,39 @@ test("allowedKeyIndexes narrows to the entry's keys, always in key order", () =>
 
 test("an unknown mode falls back to the default rather than inventing one", () => {
   assert.equal(normalizeMode("AUTO"), FALLBACK_MODES.AUTO);
-  assert.equal(normalizeMode(" last-success "), FALLBACK_MODES.LAST_SUCCESS);
+  assert.equal(normalizeMode("MANUAL"), FALLBACK_MODES.MANUAL);
+  // The retired ids still resolve, to the mode that replaced them.
+  assert.equal(normalizeMode(" last-success "), FALLBACK_MODES.AUTO);
+  assert.equal(normalizeMode("fixed"), FALLBACK_MODES.AUTO);
   for (const raw of ["nonsense", "", null, undefined, 7, {}]) {
-    assert.equal(normalizeMode(raw), FALLBACK_MODES.FIXED);
+    assert.equal(normalizeMode(raw), FALLBACK_MODES.AUTO);
   }
 });
 
-test("only the remembering modes remember a success", () => {
-  assert.equal(remembersSuccess(FALLBACK_MODES.FIXED), false);
-  assert.equal(remembersSuccess(FALLBACK_MODES.LAST_SUCCESS), true);
+test("only modes the API knows are accepted, retired ids included", () => {
+  for (const raw of ["auto", "AUTO", " manual ", "fixed", "last-success"]) {
+    assert.equal(isKnownMode(raw), true, `${JSON.stringify(raw)} must be accepted`);
+  }
+  for (const raw of ["nonsense", "", null, undefined, 7, {}]) {
+    assert.equal(isKnownMode(raw), false, `${JSON.stringify(raw)} must be refused`);
+  }
+});
+
+test("every mode remembers a success now", () => {
+  // Fixed Order and Remember Last Successful were removed as separate modes:
+  // whether a selection is saved or not, the last success leads the next request.
   assert.equal(remembersSuccess(FALLBACK_MODES.AUTO), true);
+  assert.equal(remembersSuccess(FALLBACK_MODES.MANUAL), true);
+  assert.equal(remembersSuccess("fixed"), true);
+  assert.equal(remembersSuccess("last-success"), true);
+  assert.equal(remembersSuccess(undefined), true);
 });
 
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
 
-test("a saved chain and mode survive a restart, and no credential is written", () => {
+test("a saved selection survives a restart, and no credential is written", () => {
   const file = tmp("chain-");
   const store = new FallbackChainStore({ file });
   store.set("text", [
@@ -116,10 +133,11 @@ test("a saved chain and mode survive a restart, and no credential is written", (
     { provider: "groq", model: "m3", keys: [1, 0], enabled: false }
   ]);
   store.set("vision", [{ provider: "gemini", model: "v2" }]);
-  store.setMode(FALLBACK_MODES.LAST_SUCCESS);
 
   const reloaded = new FallbackChainStore({ file });
-  assert.equal(reloaded.mode, FALLBACK_MODES.LAST_SUCCESS);
+  // A saved selection means the pool is walked manually; the mode is derived
+  // from the entries, never stored separately.
+  assert.equal(reloaded.mode, FALLBACK_MODES.MANUAL);
   assert.deepEqual(reloaded.get("text"), [
     { provider: "gemini", model: "m2", keys: null, enabled: true },
     { provider: "groq", model: "m3", keys: [0, 1], enabled: false }
@@ -128,18 +146,24 @@ test("a saved chain and mode survive a restart, and no credential is written", (
   assert.ok(!fs.readFileSync(file, "utf8").includes("SECRET-KEY"));
 });
 
-test("clearing one pool leaves the other pool and the mode alone", () => {
+test("clearing the last pool returns the router to the automatic order", () => {
   const file = tmp("chain-clear-");
   const store = new FallbackChainStore({ file });
   store.set("text", [{ provider: "a", model: "A" }]);
   store.set("vision", [{ provider: "b", model: "B" }]);
-  store.setMode(FALLBACK_MODES.AUTO);
+  assert.equal(store.mode, FALLBACK_MODES.MANUAL);
 
   store.clear("text");
+  // One pool still has a selection, so the router is not fully automatic...
+  assert.equal(store.mode, FALLBACK_MODES.MANUAL);
+
+  // ...until the last one is cleared, which is what "Automatic" means now.
+  store.clear("vision");
+  assert.equal(store.mode, FALLBACK_MODES.AUTO);
 
   const reloaded = new FallbackChainStore({ file });
   assert.deepEqual(reloaded.get("text"), []);
-  assert.deepEqual(reloaded.get("vision"), [{ provider: "b", model: "B", keys: null, enabled: true }]);
+  assert.deepEqual(reloaded.get("vision"), []);
   assert.equal(reloaded.mode, FALLBACK_MODES.AUTO);
 });
 
@@ -152,7 +176,7 @@ test("a corrupt file is ignored, not fatal, and is left on disk for the operator
   const file = tmp("chain-corrupt-");
   fs.writeFileSync(file, "{not json");
   const store = new FallbackChainStore({ file });
-  assert.deepEqual(store.snapshot(), { mode: FALLBACK_MODES.FIXED, text: [], vision: [] });
+  assert.deepEqual(store.snapshot(), { mode: FALLBACK_MODES.AUTO, text: [], vision: [] });
   assert.equal(fs.readFileSync(file, "utf8"), "{not json");
 });
 
@@ -196,7 +220,7 @@ test("the legacy configuration seeds a chain exactly once, never over a saved on
   // Manual entries lead, priority entries not already present follow.
   assert.deepEqual(first.get("text").map(entryId), ["gemini/m2", "groq/m9"]);
   // The seeded mode is what the legacy manual selection actually did.
-  assert.equal(first.mode, FALLBACK_MODES.LAST_SUCCESS);
+  assert.equal(first.mode, FALLBACK_MODES.MANUAL);
 
   // The operator then edits the chain. A later start must NOT re-import.
   first.set("text", [{ provider: "groq", model: "only" }]);
@@ -209,7 +233,7 @@ test("nothing is seeded when there is no legacy configuration to read", () => {
   const file = tmp("chain-nomigrate-");
   const store = new FallbackChainStore({ file, migrate: () => readLegacyConfig({ manualFile: null, env: {} }) });
   assert.equal(store.migrated, false);
-  assert.deepEqual(store.snapshot(), { mode: FALLBACK_MODES.FIXED, text: [], vision: [] });
+  assert.deepEqual(store.snapshot(), { mode: FALLBACK_MODES.AUTO, text: [], vision: [] });
   assert.equal(fs.existsSync(file), false, "an empty migration must not write a file");
 });
 
@@ -246,82 +270,90 @@ function unwritableStore() {
   return new FallbackChainStore({ file: path.join(blocker, "chain.json") });
 }
 
-test("a combined mode + pool update is persisted in a single write", () => {
+test("a pool update is persisted in a single write, and the mode follows it", () => {
   const file = tmp("chain-atomic-");
   const store = new FallbackChainStore({ file });
   const writes = [];
   const persist = store.persist.bind(store);
   store.persist = (data) => { writes.push(data); return persist(data); };
 
-  store.update({ mode: FALLBACK_MODES.AUTO, pool: "text", entries: [{ provider: "a", model: "A" }] });
+  store.update({ pool: "text", entries: [{ provider: "a", model: "A" }] });
 
-  // One write, carrying BOTH changes. Writing them separately is what could
-  // leave the mode on disk and the chain missing.
-  assert.equal(writes.length, 1, "a combined update must persist exactly once");
-  assert.equal(writes[0].mode, FALLBACK_MODES.AUTO);
+  // One write. The mode is derived from the entries, so it cannot land on disk
+  // separately from the selection it describes.
+  assert.equal(writes.length, 1, "an update must persist exactly once");
   assert.deepEqual(writes[0].text.map(entryId), ["a/A"]);
 
-  // And the file agrees with memory.
+  // And the file agrees with memory: a saved selection reads back as manual.
   const reloaded = new FallbackChainStore({ file });
-  assert.equal(reloaded.mode, FALLBACK_MODES.AUTO);
+  assert.equal(reloaded.mode, FALLBACK_MODES.MANUAL);
   assert.deepEqual(reloaded.get("text").map(entryId), ["a/A"]);
+
+  // Clearing the pool writes once more and derives the automatic mode.
+  store.update({ pool: "text", entries: [] });
+  assert.equal(store.mode, FALLBACK_MODES.AUTO);
+  assert.equal(new FallbackChainStore({ file }).mode, FALLBACK_MODES.AUTO);
 });
 
-test("either half of a combined update can be left alone", () => {
+test("a posted mode is accepted and ignored, so either pool can be left alone", () => {
   const store = new FallbackChainStore({ file: tmp("chain-halves-") });
-  store.update({ mode: FALLBACK_MODES.LAST_SUCCESS, pool: "text", entries: [{ provider: "a", model: "A" }] });
+  store.update({ pool: "text", entries: [{ provider: "a", model: "A" }] });
 
-  // mode only: the chain is untouched.
+  // A mode-only update changes nothing: an empty selection is already automatic.
   store.update({ mode: FALLBACK_MODES.AUTO });
-  assert.equal(store.mode, FALLBACK_MODES.AUTO);
+  assert.equal(store.mode, FALLBACK_MODES.MANUAL, "the saved pool keeps the router manual");
   assert.deepEqual(store.get("text").map(entryId), ["a/A"]);
 
-  // pool only: the mode is untouched.
+  // A pool-only update leaves the other pool's selection untouched.
   store.update({ pool: "vision", entries: [{ provider: "b", model: "B" }] });
-  assert.equal(store.mode, FALLBACK_MODES.AUTO);
+  assert.equal(store.mode, FALLBACK_MODES.MANUAL);
   assert.deepEqual(store.get("vision").map(entryId), ["b/B"]);
+  assert.deepEqual(store.get("text").map(entryId), ["a/A"]);
+
+  // A retired mode id is accepted too, and equally ignored.
+  store.update({ mode: "last-success" });
   assert.deepEqual(store.get("text").map(entryId), ["a/A"]);
 });
 
 test("a failed persistence changes neither memory nor the file", () => {
   const store = unwritableStore();
   const before = store.snapshot();
-  assert.deepEqual(before, { mode: FALLBACK_MODES.FIXED, text: [], vision: [] });
+  assert.deepEqual(before, { mode: FALLBACK_MODES.AUTO, text: [], vision: [] });
 
   // Asserts a FILESYSTEM failure, not merely "something threw": a missing or
   // broken update method would also throw, and would look like a pass.
   let thrown = null;
   try {
-    store.update({ mode: FALLBACK_MODES.AUTO, pool: "text", entries: [{ provider: "a", model: "A" }] });
+    store.update({ pool: "text", entries: [{ provider: "a", model: "A" }] });
   } catch (error) {
     thrown = error;
   }
   assert.ok(thrown, "the write failure must surface");
   assert.equal(typeof thrown.code, "string", `expected a filesystem error, got ${thrown.name}: ${thrown.message}`);
 
-  // Neither half may be applied: not the mode, not the chain.
+  // Nothing may be applied: not the selection, and so not the derived mode.
   assert.deepEqual(store.snapshot(), before, "memory must be exactly as it was");
-  assert.equal(store.mode, FALLBACK_MODES.FIXED);
+  assert.equal(store.mode, FALLBACK_MODES.AUTO);
   assert.deepEqual(store.get("text"), []);
 });
 
 test("a failed persistence leaves a previously saved file untouched", () => {
   const file = tmp("chain-keep-");
   const store = new FallbackChainStore({ file });
-  store.update({ mode: FALLBACK_MODES.LAST_SUCCESS, pool: "text", entries: [{ provider: "a", model: "A" }] });
+  store.update({ pool: "text", entries: [{ provider: "a", model: "A" }] });
   const onDisk = fs.readFileSync(file, "utf8");
 
-  // Break persistence, then attempt a combined update.
+  // Break persistence, then attempt another update.
   store.file = path.join(path.dirname(file), "blocker", "chain.json");
   fs.writeFileSync(path.join(path.dirname(file), "blocker"), "not a directory");
-  assert.throws(() => store.update({ mode: FALLBACK_MODES.AUTO, pool: "text", entries: [{ provider: "c", model: "C" }] }));
+  assert.throws(() => store.update({ pool: "text", entries: [{ provider: "c", model: "C" }] }));
 
-  assert.equal(store.mode, FALLBACK_MODES.LAST_SUCCESS, "in-memory mode unchanged");
-  assert.deepEqual(store.get("text").map(entryId), ["a/A"], "in-memory chain unchanged");
+  assert.equal(store.mode, FALLBACK_MODES.MANUAL, "in-memory mode unchanged");
+  assert.deepEqual(store.get("text").map(entryId), ["a/A"], "in-memory selection unchanged");
   assert.equal(fs.readFileSync(file, "utf8"), onDisk, "the saved file is byte-for-byte unchanged");
 });
 
-test("set and setMode still work, and still go through the same single write", () => {
+test("set, clear and the legacy setMode all go through the same single write", () => {
   const file = tmp("chain-single-");
   const store = new FallbackChainStore({ file });
   const writes = [];
@@ -329,10 +361,12 @@ test("set and setMode still work, and still go through the same single write", (
   store.persist = (data) => { writes.push(data); return persist(data); };
 
   store.set("text", [{ provider: "a", model: "A" }]);
-  store.setMode(FALLBACK_MODES.AUTO);
+  // The retired switch is a no-op that reports the derived mode; it must not
+  // write, because there is no separate mode left to persist.
+  assert.equal(store.setMode(FALLBACK_MODES.AUTO), FALLBACK_MODES.MANUAL);
   store.clear("text");
 
-  assert.equal(writes.length, 3, "one write per call");
+  assert.equal(writes.length, 2, "one write per real change");
   assert.deepEqual(store.get("text"), []);
   assert.equal(store.mode, FALLBACK_MODES.AUTO);
   assert.deepEqual(new FallbackChainStore({ file }).snapshot(), { mode: FALLBACK_MODES.AUTO, text: [], vision: [] });

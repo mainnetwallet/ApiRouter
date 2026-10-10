@@ -9,8 +9,8 @@ import {
   activeEntries,
   allowedKeyIndexes,
   entryId,
+  isKnownMode,
   normalizeEntries,
-  normalizeMode,
   remembersSuccess
 } from "./fallback-chain.js";
 import { readJsonBody } from "./adapters.js";
@@ -178,16 +178,15 @@ export function createApi({
   // read it defensively so the API module stays usable when it is constructed
   // without one (a test harness, or a future embedder).
   const fallbackSnapshot = () => (fallbackChain ? { text: fallbackChain.get("text"), vision: fallbackChain.get("vision") } : {});
-  const fallbackMode = () => fallbackChain?.mode ?? FALLBACK_MODES.FIXED;
+  const fallbackMode = () => fallbackChain?.mode ?? FALLBACK_MODES.AUTO;
 
   // --- /api/health -------------------------------------------------------
   function healthPayload(now = Date.now()) {
     const entries = describeAll(now);
-    // The real route order per pool, exactly as the Fallback Chain produces it;
+    // The real route order per pool, exactly as the saved selection produces it;
     // health only removes cooling targets. Not a health-score sort.
     const ranked = routeOrderByPool(targets, {
       chains: fallbackSnapshot(),
-      mode: fallbackMode(),
       health,
       now,
       isEligible: (target) => health.isAvailable(target, now)
@@ -511,7 +510,6 @@ export function createApi({
         protocol,
         pool,
         chain: fallbackChain?.get?.(pool) ?? [],
-        mode: fallbackMode(),
         retryableStatus: config.retryableStatus,
         model: (searchParams.get("model") || "").trim(),
         stickyTargetId: (searchParams.get("session") || "").trim() || null, // observability text only
@@ -641,13 +639,16 @@ export function createApi({
         const hasPool = body?.pool !== undefined;
         if (!hasMode && !hasPool) return fail(req, res, 400, "a pool or a mode is required", "invalid_request");
 
-        // The mode is its own setting and can be saved on its own, so the panel
-        // does not have to post a whole chain just to flip a switch.
-        let mode = null;
+        /*
+         * The mode is DERIVED from the saved selection now, so a posted mode is
+         * accepted for compatibility and ignored: an older client can still flip
+         * between Automatic and Manual Model Selection by saving an empty or a
+         * non-empty list. A value that names no mode at all — current or retired
+         * — is still refused, so a typo is not silently swallowed.
+         */
         if (hasMode) {
-          mode = normalizeMode(body.mode);
           const requested = body.mode === null ? "" : String(body.mode).trim().toLowerCase();
-          if (requested !== "" && mode !== requested) {
+          if (requested !== "" && !isKnownMode(requested)) {
             return fail(req, res, 400, `unknown mode "${body.mode}"`, "invalid_request", { modes: FALLBACK_MODES });
           }
         }
@@ -721,18 +722,14 @@ export function createApi({
         }
 
         // Nothing above failed, so this is the only place anything is written.
-        // A mode and a chain arriving together go through ONE persisted update:
-        // writing them separately could land the mode and then fail on the
-        // chain, leaving a half-applied configuration behind.
-        // What this pool's chain was, so a save that changes nothing (an
-        // identical chain, or a mode-only save) can be told from one that
-        // reorders, adds, removes, enables, disables or re-restricts a model.
+        // A posted mode is not written — it is derived from the entries — so
+        // only the pool (when one was given) is persisted, in ONE update.
+        // What this pool's chain was, so a save that changes nothing can be
+        // told from one that reorders, adds, removes, enables, disables or
+        // re-restricts a model.
         const chainBefore = hasPool ? JSON.stringify(fallbackChain.get(pool)) : null;
         try {
-          fallbackChain.update({
-            ...(hasMode ? { mode } : {}),
-            ...(hasPool ? { pool, entries } : {})
-          });
+          if (hasPool) fallbackChain.update({ pool, entries });
         } catch {
           return fail(req, res, 500, "Could not save the fallback configuration", "server_error");
         }
@@ -754,7 +751,7 @@ export function createApi({
 
     if (pathname === "/api/fallback/reset" && req.method === "POST" && fallbackChain) {
       // Reset clears what the router REMEMBERS. It must not touch the saved
-      // chain, the mode, the providers, the keys, the health measurements or a
+      // selection, the providers, the keys, the health measurements or a
       // genuine cooldown — those are all still true after the button is pressed.
       if (typeof resetFallbackState !== "function") {
         return fail(req, res, 503, "Reset is not available in this process", "unavailable");
@@ -764,7 +761,7 @@ export function createApi({
       catch { return fail(req, res, 500, "Could not reset the fallback state", "server_error"); }
       return sendJson(req, res, 200, {
         ok: true,
-        message: "Remembered targets cleared. The next request starts from the first target of the active chain.",
+        message: "Remembered targets cleared. The next request starts from the saved selection, or the automatic order when none is saved.",
         reset: result,
         ...fallbackPayload(now)
       });

@@ -58,7 +58,6 @@ const plan = (overrides = {}) => {
   return buildRoutePlan({
     targets,
     chain: selection,
-    mode: FALLBACK_MODES.MANUAL,
     health: new HealthRegistry(),
     cacheKey: `manual-${(cache += 1)}`,
     ...overrides
@@ -72,13 +71,19 @@ const models = (steps) => [...new Set(steps.map((step) => `${step.target.provide
 // Mode wiring
 // ---------------------------------------------------------------------------
 
-test("Manual Model Selection is a mode of its own, and does not remember a success", () => {
+test("there is no mode switch any more: a saved selection is manual, an empty one is automatic", () => {
   assert.equal(FALLBACK_MODES.MANUAL, "manual");
+  assert.equal(FALLBACK_MODES.AUTO, "auto");
   assert.equal(normalizeMode(" Manual "), "manual");
-  assert.equal(remembersSuccess("manual"), false);
-  assert.ok(FALLBACK_MODE_INFO.some((info) => info.id === "manual" && info.label === "Manual Model Selection"));
-  // The three existing modes are still offered, unchanged and in their old order.
-  assert.deepEqual(FALLBACK_MODE_INFO.slice(0, 3).map((info) => info.id), ["fixed", "last-success", "auto"]);
+  // The two retired ids still resolve — to the mode that replaced them.
+  assert.equal(normalizeMode("fixed"), "auto");
+  assert.equal(normalizeMode("last-success"), "auto");
+  // Whether a selection is saved or not, the last success now leads the next request.
+  assert.equal(remembersSuccess(FALLBACK_MODES.MANUAL), true);
+  assert.equal(remembersSuccess(FALLBACK_MODES.AUTO), true);
+  // The mode surface offers exactly the two derived modes.
+  assert.deepEqual(FALLBACK_MODE_INFO.map((info) => info.id), ["auto", "manual"]);
+  assert.equal(FALLBACK_MODE_INFO.find((info) => info.id === "manual").label, "Manual Model Selection");
 });
 
 // ---------------------------------------------------------------------------
@@ -219,13 +224,13 @@ test("the plan never lists a target twice within one phase", () => {
 // Where manual routing must NOT apply
 // ---------------------------------------------------------------------------
 
-test("with no selection saved, manual mode is the plain automatic order and has no phases", () => {
+test("with no selection saved the router uses the plain automatic order and has no phases", () => {
   const p = plan({ chain: [] });
   assert.equal(p.source, "auto");
   assert.ok(p.steps.every((step) => step.phase === PHASES.AUTO && step.retry !== true));
 });
 
-test("manual mode fails closed when nothing selected can serve the request", () => {
+test("a selection that cannot serve the request fails closed", () => {
   const p = plan({ chain: [entry("nobody", "Ghost")] });
   assert.equal(p.failClosed, true);
   assert.deepEqual(p.steps, [], "phase 2 must not substitute for a selection that cannot be honoured");
@@ -238,33 +243,30 @@ test("a pinned request ignores the selection: strict, no phases, no retry", () =
   assert.ok(p.steps.every((step) => step.phase === PHASES.CHAIN && step.retry !== true));
 });
 
-test("manual mode never lets a remembered target lead", () => {
+test("a remembered target that IS selected leads the walk", () => {
+  // E is the last entry in the selection: on the next request it moves to the front.
   const p = plan({ stickyTargetId: "gemini:E:key-1" });
-  assert.equal(p.sticky, null);
-  assert.equal(label(p.steps[0].target), "gemini/A#0");
-  assert.ok(p.steps.every((step) => step.phase !== PHASES.STICKY));
+  assert.equal(label(p.sticky), "gemini/E#1");
+  assert.equal(p.steps[0].phase, PHASES.STICKY);
+  assert.equal(label(p.steps[0].target), "gemini/E#1");
+  // The rest of E's keys, then the remaining selection, follow in saved order.
+  assert.deepEqual(labels(p.steps.slice(0, 2)), ["gemini/E#1", "gemini/E#0"]);
 });
 
-test("the other modes keep their plans: no health phase, no final pass", () => {
-  for (const mode of [FALLBACK_MODES.FIXED, FALLBACK_MODES.LAST_SUCCESS, FALLBACK_MODES.AUTO]) {
-    const p = plan({ mode });
-    assert.ok(p.steps.every((step) => step.retry !== true), `${mode}: no retry steps`);
-    assert.ok(
-      p.steps.every((step) => ![PHASES.MANUAL, PHASES.HEALTH, PHASES.MANUAL_RETRY].includes(step.phase)),
-      `${mode}: no manual phases`
-    );
-    assert.deepEqual(new Set(models(p.steps)), new Set(["gemini/A", "groq/B", "gemini/C", "mistral/D", "gemini/E"]),
-      `${mode}: only the configured models, never an unselected one`);
-  }
-  // Fixed Order still walks the saved order, once.
-  assert.deepEqual(labels(plan({ mode: FALLBACK_MODES.FIXED }).steps), MANUAL_ORDER);
+test("a remembered target that is NOT selected does not lead the selection", () => {
+  // X is served by gemini but was never selected, so it cannot jump the queue.
+  const p = plan({ stickyTargetId: "gemini:X:key-1" });
+  assert.equal(p.sticky, null);
+  assert.equal(label(p.steps[0].target), "gemini/A#0", "the saved order still leads");
+  assert.ok(p.steps.every((step) => step.phase !== PHASES.STICKY));
+  // It is still reachable — but only after the whole selection, in the health batch.
+  assert.ok(labels(phaseSteps(p, PHASES.HEALTH)).includes("gemini/X#1"));
 });
 
 test("text and vision pools stay separate under manual selection", () => {
   const text = [t("p", "T1", 0), t("q", "T2", 0), t("p", "T3", 0)];
   const vision = [t("p", "V1", 0, "vision"), t("q", "V2", 0, "vision")];
   const order = routeOrderByPool([...text, ...vision], {
-    mode: FALLBACK_MODES.MANUAL,
     chains: {
       text: [entry("q", "T2"), entry("p", "T1")],
       vision: [entry("q", "V2")]
@@ -517,9 +519,11 @@ test("the retry of a target succeeds and clears its cooldown", async () => {
   assert.ok(health.isAvailable(t("gemini", "A", 0)), "a success is the one thing that ends a cooldown early");
 });
 
-test("outside manual mode a duplicate step is still skipped, never retried", async () => {
-  const p = buildRoutePlan({ targets, chain: selection, mode: FALLBACK_MODES.FIXED, health: new HealthRegistry(), cacheKey: "dup" });
-  const doubled = [...p.steps, ...p.steps];
+test("a plan that lists a target twice still walks it once, never retried", async () => {
+  const p = buildRoutePlan({ targets, chain: selection, health: new HealthRegistry(), cacheKey: "dup" });
+  // The first pass, listed twice: the walker must still attempt each target once.
+  const first = p.steps.filter((step) => step.retry !== true);
+  const doubled = [...first, ...first];
   const calls = [];
   const skips = [];
   await assert.rejects(withFallback(
@@ -530,7 +534,7 @@ test("outside manual mode a duplicate step is still skipped, never retried", asy
     new HealthRegistry(),
     { plan: doubled, onSkip: (target, info) => skips.push(info.reason), remember: false }
   ));
-  assert.deepEqual(calls, MANUAL_ORDER, "the existing once-per-request rule is untouched");
+  assert.deepEqual(calls, [...MANUAL_ORDER, ...PHASE_TWO], "the existing once-per-request rule is untouched");
   assert.ok(skips.includes("already_attempted"));
 });
 

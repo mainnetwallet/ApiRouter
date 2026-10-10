@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HealthRegistry, targetId } from "../src/health.js";
-import { FALLBACK_MODES } from "../src/fallback-chain.js";
 import { buildRoutePlan, resetAutomaticOrderCache } from "../src/fallback-plan.js";
 import {
   CLIENT_ERROR_COOLDOWN_MS,
@@ -27,21 +26,20 @@ const targets = [
   t("c", "C", 0)
 ];
 
-/** Runs one walk with the chain a, b, c and every key, in the given mode. */
+/** Runs one walk with the chain a, b, c and every key. */
 async function walk(invoke, {
   health = new HealthRegistry(),
   session = new RouteSession(),
-  mode = FALLBACK_MODES.FIXED,
   chain = entries(["a", "A"], ["b", "B"], ["c", "C"]),
   retryable = new Set([400, 401, 402, 403, 404, 413, 429, 500, 502, 503]),
   onSkip = null,
   cacheKey = `walk-${Math.random()}`
 } = {}) {
-  const plan = buildRoutePlan({ targets, chain, mode, health, cacheKey });
+  const plan = buildRoutePlan({ targets, chain, health, cacheKey });
   return withFallback(targets, invoke, retryable, session, health, {
     plan: plan.steps,
     onSkip,
-    remember: mode !== FALLBACK_MODES.FIXED
+    remember: true
   });
 }
 
@@ -462,7 +460,11 @@ test("every target failing otherwise surfaces a 502 carrying the failures", asyn
     walk(async (target) => { throw fail(target.model === "C" ? 429 : 500); }),
     (error) => {
       assert.equal(error.status, 502);
-      assert.equal(error.failures.length, 5);
+      // Five targets, each attempted in the first round and once more in the
+      // permitted retry round: every failure is reported, not just the last.
+      assert.equal(error.failures.length, 10);
+      assert.equal(new Set(error.failures.map((f) => `${f.target.provider}/${f.target.model}#${f.target.keyIndex}`)).size, 5,
+        "one entry per failing target");
       return true;
     }
   );
@@ -479,22 +481,16 @@ test("the retryable status set is what decides, and the default set is the docum
 // Remembering
 // ---------------------------------------------------------------------------
 
-test("the remembering modes store the successful target; Fixed Order does not", async () => {
+test("the target that answered is remembered, whatever the selection", async () => {
   resetAutomaticOrderCache();
-  for (const [mode, expected] of [
-    [FALLBACK_MODES.FIXED, null],
-    [FALLBACK_MODES.LAST_SUCCESS, "b:B:key-1"],
-    [FALLBACK_MODES.AUTO, "b:B:key-1"]
-  ]) {
-    const session = new RouteSession();
-    await walk(async (target) => {
-      if (target.model === "A") throw fail(500);
-      if (target.keyIndex === 0) throw fail(500);
-      return "ok";
-    }, { mode, session, chain: entries(["a", "A"], ["b", "B"]) });
+  const session = new RouteSession();
+  await walk(async (target) => {
+    if (target.model === "A") throw fail(500);
+    if (target.keyIndex === 0) throw fail(500);
+    return "ok";
+  }, { session, chain: entries(["a", "A"], ["b", "B"]) });
 
-    assert.equal(session.validTargetId(), expected, `mode ${mode}`);
-  }
+  assert.equal(session.validTargetId(), "b:B:key-1", "the provider, model and key that answered are remembered");
 });
 
 test("a remembered target expires on its own and is then ignored", () => {
@@ -521,7 +517,8 @@ test("the session store is bounded and can enumerate what it holds", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Fixed Order: a remembered key is preferred only inside its own model's place
+// Manual Model Selection: a remembered target leads only from inside the
+// selection, and a restriction is honoured before the remembered key
 // ---------------------------------------------------------------------------
 
 // provider p1 serves two models, M1 with three keys and M2 with two; provider p2
@@ -537,7 +534,7 @@ const fixedTargets = [
 ];
 const fixedChain = entries(["p1", "M1"], ["p1", "M2"], ["p2", "N1"]);
 const lbl = (target) => `${target.provider}/${target.model}#${target.keyIndex}`;
-const FIXED_ORDER = ["p1/M1#0", "p1/M1#1", "p1/M1#2", "p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"];
+const SAVED_ORDER = ["p1/M1#0", "p1/M1#1", "p1/M1#2", "p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"];
 
 /**
  * One request exactly as the server makes it: the plan is built from the
@@ -548,10 +545,9 @@ async function fixedRequest(invoke, {
   session = new RouteSession(),
   chain = fixedChain,
   pool = fixedTargets,
-  mode = FALLBACK_MODES.FIXED,
-  cacheKey = `fixed-${Math.random()}`
+  cacheKey = `saved-${Math.random()}`
 } = {}) {
-  const plan = buildRoutePlan({ targets: pool, chain, mode, health, stickyTargetId: session.validTargetId(), cacheKey });
+  const plan = buildRoutePlan({ targets: pool, chain, health, stickyTargetId: session.validTargetId(), cacheKey });
   // The server refuses a chain it cannot honour before any walk starts; an empty
   // plan handed to the walker would otherwise widen to every target.
   if (plan.failClosed) throw Object.assign(new Error("the saved chain cannot serve this request"), { status: 503 });
@@ -559,7 +555,7 @@ async function fixedRequest(invoke, {
 }
 const remember = (session, target) => session.saveSuccess(target, new HealthRegistry());
 
-test("Fixed Order exhausts every key of a model, then every model of a provider, before the next provider", async () => {
+test("Manual Model Selection exhausts every key of a model, then every model of a provider, before the next provider", async () => {
   resetAutomaticOrderCache();
   const calls = [];
   await assert.rejects(fixedRequest(async (target) => {
@@ -569,9 +565,13 @@ test("Fixed Order exhausts every key of a model, then every model of a provider,
     assert.equal(error.status, 502);
     return true;
   });
-  assert.deepEqual(calls, FIXED_ORDER);
+
+  const first = calls.slice(0, SAVED_ORDER.length);
+  assert.deepEqual(first, SAVED_ORDER, "the saved order, every key of a model before the next model");
   // p2 is reached only after BOTH of p1's models were exhausted.
-  assert.ok(calls.indexOf("p2/N1#0") > calls.lastIndexOf("p1/M2#1"));
+  assert.ok(first.indexOf("p2/N1#0") > first.lastIndexOf("p1/M2#1"));
+  // The transient 500s earn each target one retry, in the same order.
+  assert.deepEqual(calls.slice(SAVED_ORDER.length), SAVED_ORDER, "the permitted retry round repeats the order");
 });
 
 test("the remembered key is tried first on the next request, then the model's remaining keys in key order", async () => {
@@ -596,27 +596,40 @@ test("the remembered key is tried first on the next request, then the model's re
   assert.equal(session.targetId, "p1:M2:key-0", "every success updates the remembered target");
 });
 
-test("a remembered model later in the chain never lets the walk skip an earlier model", async () => {
+test("a remembered target leads only when it is part of the selection", async () => {
   resetAutomaticOrderCache();
   const session = new RouteSession();
   remember(session, fx("p2", "N1", 1));
 
-  // Everything is healthy: the first configured model still answers first.
+  // The remembered target is one of the selected models, so it leads: the
+  // saved order decides between models, and this one answered last time.
   let calls = [];
   assert.equal(await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session }), "ok");
-  assert.deepEqual(calls, ["p1/M1#0"], "the earlier model is tried before the remembered later one");
-  assert.equal(session.targetId, "p1:M1:key-0");
+  assert.deepEqual(calls, ["p2/N1#1"], "a remembered target inside the selection leads");
+  assert.equal(session.targetId, "p2:N1:key-1");
 
-  // Earlier models fail: the walk reaches the remembered model only after exhausting them,
-  // and inside that model the remembered key goes first.
-  remember(session, fx("p2", "N1", 1));
+  // An unselected remembered target never jumps the queue: it is reached only
+  // by the health-based fallback, after the whole selection has been walked.
+  const unselected = new RouteSession();
+  remember(unselected, fx("p2", "N1", 1));
+  calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, {
+    session: unselected, chain: entries(["p1", "M1"], ["p1", "M2"])
+  });
+  assert.deepEqual(calls, ["p1/M1#0"], "an unselected remembered target does not lead the walk");
+  assert.equal(unselected.targetId, "p1:M1:key-0", "the success replaces what was remembered");
+
+  // And with the selected models failing, the unselected remembered model is
+  // reached only after every selected model has been exhausted.
+  remember(unselected, fx("p2", "N1", 1));
   calls = [];
   await fixedRequest(async (target) => {
     calls.push(lbl(target));
     if (target.provider === "p1") throw fail(500);
     return "ok";
-  }, { session });
-  assert.deepEqual(calls, ["p1/M1#0", "p1/M1#1", "p1/M1#2", "p1/M2#0", "p1/M2#1", "p2/N1#1"]);
+  }, { session: unselected, chain: entries(["p1", "M1"], ["p1", "M2"]) });
+  assert.deepEqual(calls, ["p1/M1#0", "p1/M1#1", "p1/M1#2", "p1/M2#0", "p1/M2#1", "p2/N1#0"],
+    "the selection is exhausted first, then the fallback batch in its health order — the remembered key does not lead it");
 });
 
 test("a remembered key that is cooling down is skipped without disturbing the order", async () => {
@@ -631,26 +644,28 @@ test("a remembered key that is cooling down is skipped without disturbing the or
   assert.deepEqual(calls, ["p1/M1#0"], "the cooling remembered key is skipped; the model's next key answers");
 });
 
-test("Fixed Order still honours disabled models and key restrictions over a remembered key", async () => {
+test("Manual Model Selection still honours disabled models and key restrictions over a remembered key", async () => {
   resetAutomaticOrderCache();
   const session = new RouteSession();
   remember(session, fx("p1", "M1", 2));
 
   // The remembered key is no longer allowed by the entry: it is not tried, and the model keeps its place.
+  const restricted = ["p1/M1#0", "p1/M1#1", "p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"];
   let calls = [];
   await fixedRequest(async (target) => { calls.push(lbl(target)); throw fail(500); }, {
     session,
     chain: entries(["p1", "M1", { keys: [0, 1] }], ["p1", "M2"], ["p2", "N1"])
   }).catch(() => {});
-  assert.deepEqual(calls, ["p1/M1#0", "p1/M1#1", "p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"]);
+  assert.deepEqual(calls, [...restricted, ...restricted], "the restriction holds in both rounds");
 
   // A disabled model is never walked, remembered or not.
+  const remaining = ["p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"];
   calls = [];
   await fixedRequest(async (target) => { calls.push(lbl(target)); throw fail(500); }, {
     session,
     chain: entries(["p1", "M1", { enabled: false }], ["p1", "M2"], ["p2", "N1"])
   }).catch(() => {});
-  assert.deepEqual(calls, ["p1/M2#0", "p1/M2#1", "p2/N1#0", "p2/N1#1"]);
+  assert.deepEqual(calls, [...remaining, ...remaining]);
 
   // A chain whose entries all exclude every key still fails closed: nothing is called.
   calls = [];
@@ -695,13 +710,11 @@ test("Reset clears the remembered key and nothing else; sessions and pools stay 
   assert.equal(b.targetId, "p1:M1:key-0", "resetting one session leaves another alone");
 });
 
-test("Last Success and Auto still let a remembered later model lead the walk", async () => {
+test("an empty selection routes automatically and remembers what answered", async () => {
   resetAutomaticOrderCache();
-  for (const mode of [FALLBACK_MODES.LAST_SUCCESS, FALLBACK_MODES.AUTO]) {
-    const session = new RouteSession();
-    remember(session, fx("p2", "N1", 1));
-    const calls = [];
-    await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session, mode, cacheKey: `unchanged-${mode}` });
-    assert.deepEqual(calls, ["p2/N1#1"], `${mode}: unchanged — the remembered target leads`);
-  }
+  const session = new RouteSession();
+  const calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session, chain: [] });
+  assert.deepEqual(calls, ["p1/M1#0"], "the automatic health/latency order leads");
+  assert.equal(session.targetId, "p1:M1:key-0", "and the target that answered is remembered");
 });

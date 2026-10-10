@@ -101,7 +101,7 @@ const sortedUniqueByModel = (ids) => [...new Set(ids.map((id) => id.split("#")[0
 
 // ---------------------------------------------------------------------------
 
-test("manual mode is selectable through the API and reported as such", async () => {
+test("a saved selection is reported as the manual mode, and the mode ids are validated", async () => {
   const fleet = await startFleet(() => down);
   try {
     const rejected = await putFallback(fleet.router, { mode: "manuel" });
@@ -109,7 +109,7 @@ test("manual mode is selectable through the API and reported as such", async () 
     await manual(fleet);
     const state = await fleet.router.request("/api/fallback").then(json);
     assert.equal(state.mode, "manual");
-    assert.equal(state.remembersSuccess, false);
+    assert.equal(state.remembersSuccess, true, "a successful target is always remembered");
     assert.ok(state.modes.some((mode) => mode.id === "manual" && mode.label === "Manual Model Selection"));
   } finally { await fleet.close(); }
 });
@@ -306,18 +306,22 @@ test("a pinned request stays strict under manual mode and does not touch session
   } finally { await fleet.close(); }
 });
 
-test("the existing modes are unchanged: they walk the chain once and never reach an unselected model", async () => {
-  for (const mode of ["fixed", "last-success", "auto"]) {
+test("the mode is derived from the selection: a mode field in the body is ignored", async () => {
+  for (const mode of ["fixed", "last-success", "auto", "manual"]) {
     const fleet = await startFleet(() => down);
     try {
       assert.equal((await putFallback(fleet.router, { pool: "text", entries: SELECTION })).status, 200);
-      assert.equal((await putFallback(fleet.router, { mode })).status, 200);
+      assert.equal((await putFallback(fleet.router, { mode })).status, 200, `${mode} is still a known id`);
       fleet.reset();
+
+      const state = await fleet.router.request("/api/fallback").then(json);
+      assert.equal(state.mode, "manual", `${mode}: the selection decides the mode, not the body`);
+
       assert.equal((await chat(fleet.router)).status, 502, mode);
-      assert.equal(fleet.calls.length, P1.length, `${mode}: every chain key exactly once`);
-      assert.deepEqual(new Set(fleet.calls), new Set(P1), `${mode}: only chain targets`);
-      assert.ok(!fleet.calls.some((id) => /\/[XYZ]#/.test(id)), `${mode}: no unselected model`);
-      if (mode === "fixed") assert.deepEqual(fleet.calls, P1, "Fixed Order keeps the exact saved order");
+      assert.deepEqual(fleet.calls.slice(0, P1.length), P1, `${mode}: the saved order is walked first, exactly`);
+      assert.deepEqual(new Set(fleet.calls.slice(P1.length, P1.length + H.length)), new Set(H),
+        `${mode}: then every unselected model, by health`);
+      assert.equal(fleet.calls.length, (P1.length + H.length) * 2, `${mode}: bounded, same as any selection`);
     } finally { await fleet.close(); }
   }
 });
