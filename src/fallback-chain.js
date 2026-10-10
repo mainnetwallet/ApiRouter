@@ -41,6 +41,24 @@ export const FALLBACK_MODES = Object.freeze({
 export const DEFAULT_MODE = FALLBACK_MODES.AUTO;
 
 /**
+ * The mode a set of per-pool selections derives to — the single definition of
+ * the rule that the store's `mode` getter and `persist()` both read.
+ *
+ * It takes the selections as an argument rather than reading the store's own
+ * state, so it can be applied to the data about to be written. Deriving from
+ * `this.byPool` instead would be wrong inside `update()`, where the new
+ * selection has not been adopted yet: the file would then record the *previous*
+ * mode next to the *new* entries, and a reader that trusts the field (an older
+ * build, or a person reading the file) would be told the opposite of what the
+ * selection means.
+ */
+function derivedMode(byPool) {
+  return FALLBACK_POOLS.some((pool) => (byPool?.[pool] ?? []).length > 0)
+    ? FALLBACK_MODES.MANUAL
+    : FALLBACK_MODES.AUTO;
+}
+
+/**
  * Mode ids that predate this design. They are still ACCEPTED at the API
  * boundary — an older UI posting "fixed" or "last-success" must not be handed a
  * validation error — but they all mean the derived mode now: Fixed Order and
@@ -239,9 +257,7 @@ export class FallbackChainStore {
    * separate switch left to fall out of sync with it.
    */
   get mode() {
-    return FALLBACK_POOLS.some((pool) => (this.byPool[pool] ?? []).length > 0)
-      ? FALLBACK_MODES.MANUAL
-      : FALLBACK_MODES.AUTO;
+    return derivedMode(this.byPool);
   }
 
   load(migrate = null) {
@@ -359,15 +375,21 @@ export class FallbackChainStore {
    * half-written chain that the next start would refuse to read.
    *
    * The derived mode is still written, so a file produced here is readable by an
-   * older build without it having to infer the mode from the entries.
+   * older build without it having to infer the mode from the entries. It is
+   * derived from the entries being written — never from `this.byPool`, which
+   * `update()` has deliberately not adopted yet.
    */
   persist(data = this.byPool) {
     if (!this.file) return;
+    // Normalize once, and derive the mode from exactly these entries, so the
+    // file can never describe a mode its own selection contradicts.
+    const text = normalizeEntries(data.text);
+    const vision = normalizeEntries(data.vision);
     const payload = {
       version: FILE_VERSION,
-      mode: this.mode,
-      text: normalizeEntries(data.text),
-      vision: normalizeEntries(data.vision)
+      mode: derivedMode({ text, vision }),
+      text,
+      vision
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
