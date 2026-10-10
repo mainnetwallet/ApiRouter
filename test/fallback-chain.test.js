@@ -295,6 +295,62 @@ test("a pool update is persisted in a single write, and the mode follows it", ()
   assert.equal(new FallbackChainStore({ file }).mode, FALLBACK_MODES.AUTO);
 });
 
+/** The `mode` field as it was actually written, without a store re-deriving it. */
+const modeOnDisk = (file) => JSON.parse(fs.readFileSync(file, "utf8")).mode;
+const selectionOnDisk = (file, pool) => JSON.parse(fs.readFileSync(file, "utf8"))[pool];
+
+// The mode must be derived from the entries in the SAME write. Deriving it from
+// the store's own state instead is not observable through a reload — `apply()`
+// re-derives the mode from the entries and ignores the field — so these read the
+// file directly. A file whose `mode` contradicts its own selection misleads any
+// reader that trusts the field, an older build included.
+
+test("adding the first model writes `manual` to the file, in that same write", () => {
+  const file = tmp("chain-mode-on-");
+  const store = new FallbackChainStore({ file });
+  // Establish the file with nothing selected, so there is a previous mode to
+  // get stuck on: without this the first write has no stale value to carry.
+  store.update({ pool: "text", entries: [] });
+  assert.equal(modeOnDisk(file), FALLBACK_MODES.AUTO, "an empty selection is automatic");
+
+  store.update({ pool: "text", entries: [{ provider: "gemini", model: "model-a" }] });
+
+  assert.equal(modeOnDisk(file), FALLBACK_MODES.MANUAL, "the file must not keep the previous mode");
+  assert.deepEqual(selectionOnDisk(file, "text").map(entryId), ["gemini/model-a"]);
+  assert.equal(store.mode, FALLBACK_MODES.MANUAL, "and memory agrees with it");
+});
+
+test("removing the last model writes `auto` back, in that same write", () => {
+  const file = tmp("chain-mode-off-");
+  const store = new FallbackChainStore({ file });
+  store.update({ pool: "text", entries: [{ provider: "gemini", model: "model-a" }] });
+  assert.equal(modeOnDisk(file), FALLBACK_MODES.MANUAL);
+
+  store.update({ pool: "text", entries: [] });
+
+  assert.equal(modeOnDisk(file), FALLBACK_MODES.AUTO, "the file must not keep the previous mode");
+  assert.deepEqual(selectionOnDisk(file, "text"), []);
+});
+
+test("either pool's selection keeps the file on `manual` until both are empty", () => {
+  const file = tmp("chain-mode-pools-");
+  const store = new FallbackChainStore({ file });
+
+  // A vision-only selection is still a selection.
+  store.update({ pool: "vision", entries: [{ provider: "a", model: "V" }] });
+  assert.equal(modeOnDisk(file), FALLBACK_MODES.MANUAL);
+
+  // Clearing vision leaves text selected, so the file stays manual.
+  store.update({ pool: "text", entries: [{ provider: "a", model: "T" }] });
+  store.update({ pool: "vision", entries: [] });
+  assert.equal(modeOnDisk(file), FALLBACK_MODES.MANUAL, "text is still selected");
+  assert.deepEqual(selectionOnDisk(file, "vision"), []);
+
+  // Only when both are empty does the file say automatic.
+  store.update({ pool: "text", entries: [] });
+  assert.equal(modeOnDisk(file), FALLBACK_MODES.AUTO);
+});
+
 test("a posted mode is accepted and ignored, so either pool can be left alone", () => {
   const store = new FallbackChainStore({ file: tmp("chain-halves-") });
   store.update({ pool: "text", entries: [{ provider: "a", model: "A" }] });
