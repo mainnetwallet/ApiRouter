@@ -396,7 +396,9 @@ export default function FallbackChainConfig() {
                       <span className="ms-num ms-num--sm">{i + 1}</span>
                       <ModelName entry={item} />
                       <span className="tiny dim">key {item.keyIndex}</span>
-                      <LatencyBadge ms={item.latencyMs} />
+                      <span title={item.orderLatencySource === "probe" ? "ordered by the health-probe latency" : item.orderLatencySource === "request" ? "ordered by the request-measured latency" : "not measured — placed after measured models"}>
+                        <LatencyBadge ms={item.orderLatencyMs} />
+                      </span>
                       {item.phase ? (
                         <span className={`badge ${item.phase === "sticky" ? "badge--info" : "badge--neutral"}`}>
                           {phaseLabel(item.phase) ?? item.phase}

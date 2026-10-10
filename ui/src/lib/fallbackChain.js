@@ -154,6 +154,14 @@ export function keysLabel(entry, group) {
  */
 export function latencyOf(group) {
   if (!group) return { ms: null, source: null, label: "not measured" };
+  // The gateway reports the figure it ORDERS this model by, with its source.
+  // That is the one number to show; the two component figures below are only
+  // the fallback for a payload that predates it.
+  if (Number.isFinite(group.latencyMs) && (group.latencySource === "request" || group.latencySource === "probe")) {
+    return group.latencySource === "request"
+      ? { ms: group.latencyMs, source: "request", label: "measured from requests" }
+      : { ms: group.latencyMs, source: "probe", label: "from the health probe" };
+  }
   if (Number.isFinite(group.measuredLatencyMs)) {
     return { ms: group.measuredLatencyMs, source: "request", label: "measured from requests" };
   }

@@ -150,6 +150,11 @@ export class HealthRegistry {
         failures: state.failures,
         consecutiveFailures: state.consecutiveFailures,
         latencyMs: state.latencyMs,
+        // The same two figures the router orders by (see `stateLatency` in
+        // fallback-plan.js). Reported so a panel can show the number a model was
+        // actually sorted on instead of the latest observation of either kind.
+        requestLatencyMs: Number.isFinite(state.requestLatencyMs) ? state.requestLatencyMs : null,
+        probeLatencyMs: Number.isFinite(state.probeLatencyMs) ? state.probeLatencyMs : null,
         lastStatus: state.lastStatus,
         lastReason: state.lastReason,
         // The LATEST observation, and separately the last CONFIRMED one. A `null`

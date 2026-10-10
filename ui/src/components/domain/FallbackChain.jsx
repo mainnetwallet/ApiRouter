@@ -73,6 +73,9 @@ function ChainCard({ target, index, mode }) {
           <span>key {target.keyIndex ?? "?"}</span>
           {target.protocols?.length ? <span>{protocolLabel(target.protocols[0])}</span> : null}
           {Number.isFinite(target.score) ? <span>score {Math.round(target.score)}</span> : null}
+          {Number.isFinite(target.orderLatencyMs) ? (
+            <span>ordered by <LatencyBadge ms={target.orderLatencyMs} /></span>
+          ) : null}
           {Number.isFinite(target.latencyMs) ? (
             <span>last <LatencyBadge ms={target.latencyMs} /></span>
           ) : null}

@@ -309,7 +309,7 @@ export default function RouterControl() {
                           <dt className="dl__term">Score</dt>
                           <dd className="dl__desc mono">{Number.isFinite(data.selected.score) ? Math.round(data.selected.score) : EMPTY}</dd>
                           <dt className="dl__term">Latency</dt>
-                          <dd className="dl__desc"><LatencyBadge ms={data.selected.latencyMs} /></dd>
+                          <dd className="dl__desc"><LatencyBadge ms={data.selected.orderLatencyMs} /></dd>
                         </dl>
                       ) : (
                         <EmptyState title="No eligible target" icon="alert">
@@ -371,7 +371,7 @@ export default function RouterControl() {
                           <span className="small">
                             {providerLabel(target.provider)} / <span className="mono">{target.model}</span>
                             {" · "}key {target.keyIndex}
-                            {Number.isFinite(target.latencyMs) ? ` · ${formatLatency(target.latencyMs)}` : ""}
+                            {Number.isFinite(target.orderLatencyMs) ? ` · ${formatLatency(target.orderLatencyMs)}` : ""}
                           </span>
                           {index === 0 ? <span className="tiny dim"> — primary</span> : null}
                         </li>

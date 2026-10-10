@@ -1,5 +1,5 @@
 import { selectTargetsForProtocol } from "./route-select.js";
-import { buildRoutePlan, effectiveOrder } from "../fallback-plan.js";
+import { buildRoutePlan, effectiveOrder, groupLatency } from "../fallback-plan.js";
 import { FALLBACK_MODES, fallbackModeLabel } from "../fallback-chain.js";
 
 /** Client protocols whose requests can be bridged to a non-native provider. */
@@ -19,7 +19,7 @@ const BRIDGED_PROTOCOLS = new Set(["anthropic", "openai-chat", "openai-responses
  * the stateless decision, which is what a fresh client receives.
  */
 
-function describeCandidate(target, health, { rank = null, available, status, phase = null }) {
+function describeCandidate(target, health, { rank = null, available, status, phase = null, ordering = null }) {
   const state = health.get(health.key(target));
 
   return {
@@ -36,7 +36,14 @@ function describeCandidate(target, health, { rank = null, available, status, pha
     available,
     status,
     score: Number.isFinite(state?.score) ? state.score : null,
+    // The LATEST observation of either kind — what the health panels show.
     latencyMs: Number.isFinite(state?.latencyMs) ? state.latencyMs : null,
+    // The figure this target's MODEL was ordered by, from the planner's own
+    // `groupLatency`, and where it came from. Every key of one model carries the
+    // same value, so a route-order list reads in the order it was sorted. `null`
+    // is "never measured" — those models are placed last, never given a number.
+    orderLatencyMs: ordering?.latencyMs ?? null,
+    orderLatencySource: ordering?.source ?? null,
     cooldownUntil: Number(state?.cooldownUntil) || 0,
     lastStatus: state?.lastStatus ?? null,
     lastReason: state?.lastReason ?? null,
@@ -85,6 +92,12 @@ export function describeRouting({
   const order = effective.map((step) => step.target);
   const phaseById = new Map(effective.map((step) => [health.key(step.target), step.phase]));
 
+  // The ordering latency per model, taken from the groups exactly as the plan
+  // holds them (narrowed by the chain's key restrictions), so the preview shows
+  // the number the planner sorted on rather than recomputing its own.
+  const orderingByGroup = new Map((plan.groups ?? []).map((group) => [group.id, groupLatency(group, health)]));
+  const orderingOf = (target) => orderingByGroup.get(`${target.provider}/${target.model}`) ?? null;
+
   /**
    * The reporting status of a target. Derived the same way for every list on
    * this page, so a target cannot read as "healthy" in the candidate table and
@@ -104,6 +117,7 @@ export function describeRouting({
   };
 
   const candidates = selected.map((target) => describeCandidate(target, health, {
+    ordering: orderingOf(target),
     phase: phaseById.get(health.key(target)) ?? null,
     rank: rankOf(target),
     available: rankedIds.has(health.key(target)),
@@ -250,6 +264,7 @@ export function describeRouting({
     excluded,
     selected: order[0]
       ? describeCandidate(order[0], health, {
+          ordering: orderingOf(order[0]),
           phase: phaseById.get(health.key(order[0])) ?? null,
           rank: 1,
           available: true,
@@ -259,6 +274,7 @@ export function describeRouting({
       : null,
     fallbackOrder: order.map((target, index) =>
       describeCandidate(target, health, {
+        ordering: orderingOf(target),
         phase: phaseById.get(health.key(target)) ?? null,
         rank: index + 1,
         available: rankedIds.has(health.key(target)),

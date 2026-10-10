@@ -96,6 +96,31 @@ describe("fallback chain presentation", () => {
     expect(latencyOf(undefined)).toEqual({ ms: null, source: null, label: "not measured" });
   });
 
+  it("shows the exact figure the gateway ordered the model by, with its source", () => {
+    // Key 0 was timed by a request (700), key 1 only by a probe (150): the gateway
+    // orders by the lowest per-key figure, so that is what the panel must show —
+    // not the request figure alone, and not whichever key happened to come first.
+    expect(latencyOf(group("a", "m1", {
+      latencyMs: 150, latencySource: "probe", measuredLatencyMs: 700, probeLatencyMs: 150
+    }))).toEqual({ ms: 150, source: "probe", label: "from the health probe" });
+    expect(latencyOf(group("a", "m1", {
+      latencyMs: 40, latencySource: "request", measuredLatencyMs: 40, probeLatencyMs: 900
+    }))).toEqual({ ms: 40, source: "request", label: "measured from requests" });
+    // Never measured stays "not measured", even though a source field is present.
+    expect(latencyOf(group("a", "m1", { latencyMs: null, latencySource: null })))
+      .toEqual({ ms: null, source: null, label: "not measured" });
+  });
+
+  it("lists models in non-decreasing latency with unmeasured ones last when sorted by the shown figure", () => {
+    const shown = [
+      group("a", "slow", { latencyMs: 2500, latencySource: "request" }),
+      group("a", "none", { latencyMs: null, latencySource: null }),
+      group("a", "fast", { latencyMs: 40, latencySource: "request" })
+    ].map((item) => latencyOf(item).ms);
+    const byFigure = [...shown].sort((x, y) => (x === null) - (y === null) || x - y);
+    expect(byFigure).toEqual([40, 2500, null]);
+  });
+
   it("explains what an entry will actually do", () => {
     expect(entryState(toEntry(a), a).key).toBe("active");
     expect(entryState({ ...toEntry(a), enabled: false }, a).key).toBe("disabled");

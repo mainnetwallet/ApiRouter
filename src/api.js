@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
-import { resetAutomaticOrderCache, routeOrderByPool } from "./fallback-plan.js";
+import { modelLatency, resetAutomaticOrderCache, routeOrderByPool } from "./fallback-plan.js";
 import {
   FALLBACK_MODE_INFO,
   FALLBACK_MODES,
@@ -398,13 +398,18 @@ export function createApi({
         // `keys` narrows. Kept separate from `keyStates` so an entry's saved
         // subset can never be confused with the provider's key inventory.
         group.keyIndexes = group.keyStates.map((key) => key.keyIndex);
-        const measured = group.keyStates.find((key) => Number.isFinite(key.requestLatencyMs));
-        const probed = group.keyStates.find((key) => Number.isFinite(key.probeLatencyMs));
-        group.measuredLatencyMs = measured?.requestLatencyMs ?? null;
-        group.probeLatencyMs = probed?.probeLatencyMs ?? null;
-        // The number routing actually orders by, and where it came from.
-        group.latencyMs = group.measuredLatencyMs ?? group.probeLatencyMs;
-        group.latencySource = group.measuredLatencyMs !== null ? "request" : group.probeLatencyMs !== null ? "probe" : null;
+        // The number routing actually orders by, and where it came from: the
+        // planner's own definition (`modelLatency`), not a second one. The two
+        // component figures are the lowest per kind across the model's keys.
+        const ordering = modelLatency(group.keyStates);
+        const lowest = (field) => {
+          const values = group.keyStates.map((key) => key[field]).filter((value) => Number.isFinite(value));
+          return values.length > 0 ? Math.min(...values) : null;
+        };
+        group.measuredLatencyMs = lowest("requestLatencyMs");
+        group.probeLatencyMs = lowest("probeLatencyMs");
+        group.latencyMs = ordering.latencyMs;
+        group.latencySource = ordering.source;
         group.available = group.keyStates.some((key) => key.available);
         group.status = rollupStatus(group.keyStates);
       }

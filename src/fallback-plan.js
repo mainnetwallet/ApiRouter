@@ -123,31 +123,64 @@ export function chainGroups(chain, targets) {
 }
 
 /**
- * Measured latency for a target, preferring a real request measurement over a
- * probe measurement. Never invents a value: an unmeasured target is `null`, and
- * the ordering below has an explicit, deterministic place for those.
+ * THE latency a model is ordered by, and the only definition of it. The router's
+ * automatic order, Manual Model Selection's health batch, the preview and the
+ * Fallback UI's model catalogue all read it from here, so a number shown next to
+ * a model is by construction the number that model was sorted on.
+ *
+ * Per key: a real request measurement outranks a probe measurement, and neither
+ * is ever invented — a key with neither is unmeasured. Per model: the lowest of
+ * its keys' figures, because every eligible key of a model is walked before the
+ * next model and the fastest key is what the model can offer.
+ *
+ * `states` are health states (or any object carrying `requestLatencyMs` /
+ * `probeLatencyMs`); the result names where the winning figure came from, so a
+ * display can say "measured from requests" or "from the health probe" truthfully.
  */
+export function stateLatency(state) {
+  if (Number.isFinite(state?.requestLatencyMs)) return { latencyMs: state.requestLatencyMs, source: "request" };
+  if (Number.isFinite(state?.probeLatencyMs)) return { latencyMs: state.probeLatencyMs, source: "probe" };
+  return { latencyMs: null, source: null };
+}
+
+export function modelLatency(states) {
+  let best = { latencyMs: null, source: null };
+  for (const state of Array.isArray(states) ? states : []) {
+    const current = stateLatency(state);
+    if (current.latencyMs === null) continue;
+    // On an exact tie the request-measured figure is the more trustworthy name.
+    if (
+      best.latencyMs === null
+      || current.latencyMs < best.latencyMs
+      || (current.latencyMs === best.latencyMs && current.source === "request" && best.source !== "request")
+    ) {
+      best = current;
+    }
+  }
+  return best;
+}
+
+/** Measured latency for one target, or `null`. See `stateLatency`. */
 export function targetLatency(target, health) {
   const state = health?.get?.(targetId(target));
-  if (!state) return null;
-  if (Number.isFinite(state.requestLatencyMs)) return state.requestLatencyMs;
-  if (Number.isFinite(state.probeLatencyMs)) return state.probeLatencyMs;
-  return null;
+  return state ? stateLatency(state).latencyMs : null;
+}
+
+/** The latency a group (one provider/model, its keys) is ordered by. */
+export function groupLatency(group, health) {
+  return modelLatency((group?.targets ?? []).map((target) => health?.get?.(targetId(target))));
 }
 
 function groupStats(group, health, now) {
   let available = 0;
-  let latency = null;
   let score = 0;
   for (const target of group.targets) {
     const state = health?.get?.(targetId(target));
     if (!(Number(state?.cooldownUntil) > now)) available += 1;
-    const measured = targetLatency(target, health);
-    if (measured !== null && (latency === null || measured < latency)) latency = measured;
     const targetScore = Number(state?.score);
     if (Number.isFinite(targetScore) && targetScore > score) score = targetScore;
   }
-  return { available, latency, score };
+  return { available, latency: groupLatency(group, health).latencyMs, score };
 }
 
 /**
@@ -191,6 +224,16 @@ function groupFingerprint(groups) {
   return groups.map((group) => `${group.id}[${group.targets.map((target) => target.keyIndex).join(",")}]`).join("|");
 }
 
+function coolingFingerprint(groups, health, now) {
+  const cooling = [];
+  for (const group of groups) {
+    const down = group.targets.length > 0
+      && group.targets.every((target) => Number(health?.get?.(targetId(target))?.cooldownUntil) > now);
+    if (down) cooling.push(group.id);
+  }
+  return cooling.join(",");
+}
+
 /**
  * Ordered group ids for the automatic order, cached against the configuration
  * being ordered, the health registry's version, and a coarse time bucket.
@@ -212,7 +255,12 @@ export function resetAutomaticOrderCache() {
 export function automaticGroupIds({ cacheKey, groups, health, now, bucketMs = AUTO_ORDER_BUCKET_MS }) {
   const version = Number(health?.version) || 0;
   const bucket = Math.floor(now / bucketMs);
-  const key = `${cacheKey}|${version}|${bucket}|${groupFingerprint(groups)}`;
+  // Which groups are fully cooling RIGHT NOW. A cooldown that lapses does not
+  // bump the health version, so without this a group that has recovered keeps
+  // its "cooling" position until the bucket rolls over, and two callers asking
+  // at different moments of one bucket (the router, the preview) could be given
+  // different orders for identical health.
+  const key = `${cacheKey}|${version}|${bucket}|${coolingFingerprint(groups, health, now)}|${groupFingerprint(groups)}`;
   const cached = AUTO_CACHE.get(key);
   if (cached) return cached;
 
