@@ -19,7 +19,7 @@ import {
   refreshAllHealth
 } from "./health.js";
 import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
-import { RouteSession, SessionStore, withFallback } from "./router.js";
+import { RouteSession, SessionStore, parseRetryAfterMs, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
@@ -652,6 +652,13 @@ async function proxy(req, res, protocol, pathname) {
             const text = await upstream.text();
             const error = new Error(text.slice(0, 2000) || ("Upstream HTTP " + upstream.status));
             error.status = upstream.status;
+            // A rate limit may say how long to wait. The router uses it to cool
+            // down only this key + model for that long, while the model's other
+            // keys keep being tried.
+            if (upstream.status === 429) {
+              const retryAfterMs = parseRetryAfterMs(upstream.headers?.get?.("retry-after"));
+              if (retryAfterMs !== null) error.retryAfterMs = retryAfterMs;
+            }
             // An upstream 413 means this provider/tier cannot take a request of
             // this size (e.g. a small tokens-per-minute cap). Another provider
             // may well accept it, so fall back instead of failing the request.

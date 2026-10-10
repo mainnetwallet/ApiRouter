@@ -120,11 +120,47 @@ const TIMEOUT_COOLDOWN_MS = 60 * 1000;
 // next target instead.
 const BAD_REQUEST_COOLDOWN_MS = 8 * 60 * 1000;
 
+// A 429 is a rate limit on THIS key + model. It normally clears within a minute
+// (per-minute quotas), so it must not park the key for the full 12 minute
+// default. The upstream's own `Retry-After` wins when it sent one; otherwise
+// a short fixed cooldown applies. The other keys of the same model are
+// separate targets and keep being tried.
+export const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
+export const RATE_LIMIT_MIN_COOLDOWN_MS = 5 * 1000;
+export const RATE_LIMIT_MAX_COOLDOWN_MS = 12 * 60 * 1000;
+
+function rateLimitCooldownMs(error) {
+  const retryAfterMs = Number(error?.retryAfterMs);
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
+    return Math.min(Math.max(retryAfterMs, RATE_LIMIT_MIN_COOLDOWN_MS), RATE_LIMIT_MAX_COOLDOWN_MS);
+  }
+  return RATE_LIMIT_COOLDOWN_MS;
+}
+
+/**
+ * Parses an HTTP `Retry-After` header value (delta-seconds or an HTTP date)
+ * into milliseconds from `now`, or `null` when it is absent or unusable.
+ */
+export function parseRetryAfterMs(value, now = Date.now()) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^\d+(\.\d+)?$/.test(text)) {
+    const ms = Number(text) * 1000;
+    return ms > 0 ? ms : null;
+  }
+  const at = Date.parse(text);
+  if (!Number.isFinite(at)) return null;
+  const ms = at - now;
+  return ms > 0 ? ms : null;
+}
+
 /** `markFailure` options for a failed attempt: short cooldowns for transient statuses. */
-function cooldownOptions(status) {
+function cooldownOptions(status, error = null) {
   if (status === 400) return { cooldownMs: BAD_REQUEST_COOLDOWN_MS };
   if (status === 413) return { cooldownMs: SIZE_LIMIT_COOLDOWN_MS };
   if (status === 408) return { cooldownMs: TIMEOUT_COOLDOWN_MS };
+  if (status === 429) return { cooldownMs: rateLimitCooldownMs(error) };
   return {};
 }
 
@@ -359,7 +395,7 @@ export async function withFallback(
       // A failure narrowed to this target by its message carries a fixed,
       // non-upstream reason so the Models page can say why it is cooling down.
       health.markFailure(target, status, {
-        ...cooldownOptions(status),
+        ...cooldownOptions(status, error),
         ...(kind ? { reason: `${status} ${kind} on ${target.model}` } : {})
       });
       if (scope === FAILURE_SCOPE.TARGET) {
