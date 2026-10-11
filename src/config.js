@@ -175,6 +175,7 @@ export function loadConfig(env = process.env) {
     // The Fallback Chain: the single source of truth for routing order, per
     // pool, plus the selected operating mode. Written by the control panel.
     fallbackChainFile: String(env.FALLBACK_CHAIN_FILE || "").trim() || "data/fallback-chain.json",
+    gatewayStateFile: String(env.GATEWAY_STATE_FILE || "").trim() || "data/gateway-state.json",
     // Legacy, read ONCE to seed the chain above when no chain has been saved
     // yet. Never consulted again afterwards: the old systems cannot override
     // the configured chain.

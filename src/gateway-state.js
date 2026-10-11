@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 /**
  * Master on/off switch for the gateway.
  *
@@ -8,13 +11,57 @@
  *   - the periodic health monitor skips its cycles
  *   - a manual health refresh is refused
  *
- * State is in-memory and resets to "running" on process restart, like the
- * rest of the telemetry.
+ * The state is persisted to `file` (when given) so a shutdown survives a
+ * restart: the next boot reads it back and stays paused until Resume. A missing
+ * or unreadable file means "running". Persistence is best effort - a write that
+ * fails is logged and never blocks the switch itself. Note that on hosts with
+ * an ephemeral disk (Render without a persistent disk) a redeploy wipes the
+ * file, which turns the gateway back on.
  */
 export class GatewayState {
   #paused = false;
   #since = null;
   #reason = null;
+  #file = null;
+
+  constructor({ file = null } = {}) {
+    this.#file = file ? path.resolve(file) : null;
+    this.#load();
+  }
+
+  #load() {
+    if (!this.#file) return;
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(this.#file, "utf8"));
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        console.warn(`gateway state: ignoring unreadable ${path.basename(this.#file)}`);
+      }
+      return;
+    }
+    if (parsed?.paused !== true) return;
+    const at = Date.parse(parsed.pausedAt);
+    this.#paused = true;
+    this.#since = Number.isFinite(at) ? at : Date.now();
+    this.#reason = typeof parsed.reason === "string" ? parsed.reason.slice(0, 200) : null;
+  }
+
+  #save() {
+    if (!this.#file) return;
+    try {
+      fs.mkdirSync(path.dirname(this.#file), { recursive: true });
+      const tmp = `${this.#file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({
+        paused: this.#paused,
+        pausedAt: this.#since ? new Date(this.#since).toISOString() : null,
+        reason: this.#reason
+      }, null, 2));
+      fs.renameSync(tmp, this.#file);
+    } catch (error) {
+      console.warn(`gateway state: could not persist (${error?.code || error?.message})`);
+    }
+  }
 
   get paused() { return this.#paused; }
 
@@ -24,6 +71,7 @@ export class GatewayState {
       this.#since = now;
     }
     this.#reason = reason ? String(reason).slice(0, 200) : this.#reason;
+    this.#save();
     return this.snapshot(now);
   }
 
@@ -31,6 +79,7 @@ export class GatewayState {
     this.#paused = false;
     this.#since = null;
     this.#reason = null;
+    this.#save();
     return this.snapshot(now);
   }
 

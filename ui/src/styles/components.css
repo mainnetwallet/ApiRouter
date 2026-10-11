@@ -1603,3 +1603,12 @@ button.livelog__rid:hover { color: var(--accent); text-decoration: underline; }
   border-radius: var(--radius, 8px);
   font-size: 13px;
 }
+
+.gateway-error {
+  color: var(--danger);
+  font-size: 12px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

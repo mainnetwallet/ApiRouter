@@ -442,7 +442,7 @@ async function refreshTarget(target, check) {
 export async function refreshAllHealth(
   targets,
   check,
-  { concurrency = DEFAULT_REFRESH_CONCURRENCY } = {}
+  { concurrency = DEFAULT_REFRESH_CONCURRENCY, shouldStop = () => false } = {}
 ) {
   if (!Array.isArray(targets) || typeof check !== "function") {
     throw new TypeError("refreshAllHealth requires targets[] and check(target)");
@@ -452,7 +452,9 @@ export async function refreshAllHealth(
   let cursor = 0;
 
   const worker = async () => {
-    while (cursor < targets.length) {
+    // `shouldStop` lets a running cycle wind down between targets (the gateway
+    // was shut down): probes already in flight finish, no new one starts.
+    while (cursor < targets.length && !shouldStop()) {
       const index = cursor;
       cursor += 1;
       results[index] = await refreshTarget(targets[index], check);
@@ -483,7 +485,7 @@ export function startHealthMonitor(
     if (running) return;
     running = true;
     try {
-      await refreshAllHealth(targets, check);
+      await refreshAllHealth(targets, check, { shouldStop: isPaused });
     } catch {
       // A failed cycle must never take the server down.
     } finally {

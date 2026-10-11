@@ -173,7 +173,10 @@ const monitor = new HealthMonitorState({
 const trackedCheckTargetHealth = monitor.wrapCheck(checkTargetHealth);
 
 /** Master switch controlled from the Control Panel (see src/gateway-state.js). */
-const gateway = new GatewayState();
+const gateway = new GatewayState({ file: config.gatewayStateFile });
+if (gateway.paused) {
+  console.warn("gateway: starting SHUT DOWN (restored from saved state); use Resume in the Control Panel to turn it on");
+}
 
 function respondPaused(res) {
   const snap = gateway.snapshot();
@@ -580,6 +583,17 @@ async function proxy(req, res, protocol, pathname) {
     const result = await withFallback(
       selection.selected,
       async (target, { phase } = {}) => {
+        // Shut down from the UI while this request was already walking its
+        // fallback chain: stop before the next upstream attempt. `retryable:
+        // false` ends the walk, and because this runs before any attempt is
+        // recorded no target is cooled down or marked unhealthy for it.
+        if (gateway.paused) {
+          const paused = new Error("Gateway was shut down from the Control Panel");
+          paused.status = 503;
+          paused.retryable = false;
+          paused.errorType = "gateway_paused";
+          throw paused;
+        }
         const upstreamProtocol = bridged
           ? upstreamProtocolFor(target)
           : protocol;
@@ -937,7 +951,7 @@ async function proxy(req, res, protocol, pathname) {
     });
     // `error.message` can be raw upstream text (an all-400 walk and non-retryable
     // statuses surface it), so it is scrubbed like every other outbound message.
-    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: error?.errorType === "gateway_paused" ? "gateway_paused" : "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 }
 
