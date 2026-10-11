@@ -1590,3 +1590,16 @@ button.livelog__rid:hover { color: var(--accent); text-decoration: underline; }
 .fc-key { min-width: 20px; height: 20px; padding: 0 5px; font-size: var(--fs-xs); font-family: var(--font-mono); color: var(--text-muted); background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
 .fc-key--on { color: var(--accent); background: var(--accent-dim); border-color: var(--accent-border); }
 .fc-key:disabled { opacity: 0.6; cursor: progress; }
+
+.gateway-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-radius: var(--radius, 8px);
+  font-size: 13px;
+}

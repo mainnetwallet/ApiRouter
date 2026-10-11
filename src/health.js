@@ -472,11 +472,14 @@ export async function refreshAllHealth(
 export function startHealthMonitor(
   targets,
   check,
-  intervalMs = DEFAULT_HEALTH_CHECK_INTERVAL_MS
+  intervalMs = DEFAULT_HEALTH_CHECK_INTERVAL_MS,
+  { isPaused = () => false } = {}
 ) {
   let running = false;
 
   const run = async () => {
+    // A paused gateway makes no upstream calls at all, probes included.
+    if (isPaused()) return;
     if (running) return;
     running = true;
     try {

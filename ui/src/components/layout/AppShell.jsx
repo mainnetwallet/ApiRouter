@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { Icon } from "../ui/Icon.jsx";
 import { Sidebar } from "./Sidebar.jsx";
 import { Header } from "./Header.jsx";
+import { GatewayPausedBanner } from "./GatewayControl.jsx";
 import { MetricSkeleton, TableSkeleton } from "../ui/LoadingSkeleton.jsx";
 
 /**
@@ -48,6 +49,7 @@ export function AppShell({
         ) : null}
 
         <main className="main" id="main-content" tabIndex={-1}>
+          <GatewayPausedBanner />
           <Suspense fallback={<PageFallback />}>
             {children}
           </Suspense>
