@@ -90,3 +90,54 @@ test("a running health cycle stops between targets once told to", async () => {
   );
   assert.deepEqual(checked, ["a"]);
 });
+
+test("a shutdown survives a restart; resume clears it", async () => {
+  const { mkdtempSync, existsSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const file = join(mkdtempSync(join(tmpdir(), "gw-")), "nested", "gateway-state.json");
+
+  assert.equal(new GatewayState({ file }).paused, false, "no file means running");
+
+  const first = new GatewayState({ file });
+  first.pause("from the panel", Date.parse("2026-10-11T10:00:00Z"));
+  assert.ok(existsSync(file));
+
+  const restarted = new GatewayState({ file });
+  assert.equal(restarted.paused, true);
+  assert.equal(restarted.snapshot().pausedAt, "2026-10-11T10:00:00.000Z");
+  assert.equal(restarted.snapshot().reason, "from the panel");
+
+  restarted.resume();
+  assert.equal(new GatewayState({ file }).paused, false, "resume is persisted too");
+
+  writeFileSync(file, "{not json");
+  assert.equal(new GatewayState({ file }).paused, false, "a corrupt file falls back to running");
+  assert.ok(readFileSync(file, "utf8"));
+});
+
+test("the gateway process boots paused when the state file says so", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const file = join(mkdtempSync(join(tmpdir(), "gw-")), "gateway-state.json");
+  writeFileSync(file, JSON.stringify({ paused: true, pausedAt: "2026-10-11T10:00:00Z", reason: "x" }));
+
+  const mock = await startMockUpstream(() => ({ status: 200, body: { choices: [{ message: { role: "assistant", content: "ok" } }] } }));
+  const router = await startRouter({
+    GROQ_API_KEYS: "k0",
+    GROQ_MODELS: "m",
+    GROQ_BASE_URL: `${mock.baseUrl}/v1`,
+    GATEWAY_STATE_FILE: file
+  });
+  try {
+    const blocked = await router.request("/v1/chat/completions", postJson(chat));
+    assert.equal(blocked.status, 503);
+    assert.equal(mock.apiRequests.length, 0);
+    await router.request("/api/gateway/resume", { method: "POST" });
+    assert.equal((await router.request("/v1/chat/completions", postJson(chat))).status, 200);
+  } finally {
+    await router.close();
+    await mock.close();
+  }
+});

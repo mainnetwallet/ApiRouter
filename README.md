@@ -285,7 +285,7 @@ The Control Panel header has a **Shutdown** button (it becomes **Resume** while 
 - the health monitor stops probing and a manual health refresh returns `409`;
 - the Control Panel, `/api/*`, `/health` and the keep-alive ping stay up, so the panel can resume the gateway.
 
-The state is in memory: restarting the process returns the gateway to running.
+The state is saved to `data/gateway-state.json` (`GATEWAY_STATE_FILE`), so a shutdown survives a restart or crash: the gateway boots paused and stays that way until you press Resume. A missing or unreadable file means running. On a host with an ephemeral disk (Render without a persistent disk) a redeploy wipes the file, which turns the gateway back on.
 
 ## Control Panel
 

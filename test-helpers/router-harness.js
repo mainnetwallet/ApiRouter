@@ -27,6 +27,7 @@ export async function startRouter(env = {}) {
       ...clearProviderEnv(),
       FALLBACK_CHAIN_FILE: path.join(configDir, "fallback-chain.json"),
       MANUAL_SELECTION_FILE: path.join(configDir, "manual-selection.json"),
+      GATEWAY_STATE_FILE: path.join(configDir, "gateway-state.json"),
       ...env
     },
     stdio: ["ignore", "pipe", "pipe"]

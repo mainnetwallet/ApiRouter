@@ -146,7 +146,7 @@ GROQ_MODELS=openai/gpt-oss-120b,qwen/qwen3.8-27b
 | Variable | Keno |
 |---|---|
 | `PORT` | Render nijei set kore (`10000`) |
-| `FALLBACK_CHAIN_FILE`, `MANUAL_SELECTION_FILE` | Code er default-i `data/*.json`, same |
+| `FALLBACK_CHAIN_FILE`, `MANUAL_SELECTION_FILE`, `GATEWAY_STATE_FILE` | Code er default-i `data/*.json`, same. Persistent disk na thakle redeploy-te `data/` muche jay, tokhon UI-r Shutdown-o muche jay (backend abar chalu hoy) |
 | `KEEPALIVE_URL` | Render e `RENDER_EXTERNAL_URL` theke auto |
 | `KEEPALIVE_INTERVAL_MS` | Default 10 min thik ache |
 

@@ -173,7 +173,10 @@ const monitor = new HealthMonitorState({
 const trackedCheckTargetHealth = monitor.wrapCheck(checkTargetHealth);
 
 /** Master switch controlled from the Control Panel (see src/gateway-state.js). */
-const gateway = new GatewayState();
+const gateway = new GatewayState({ file: config.gatewayStateFile });
+if (gateway.paused) {
+  console.warn("gateway: starting SHUT DOWN (restored from saved state); use Resume in the Control Panel to turn it on");
+}
 
 function respondPaused(res) {
   const snap = gateway.snapshot();
