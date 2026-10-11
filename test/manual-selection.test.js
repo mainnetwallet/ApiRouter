@@ -253,14 +253,16 @@ test("a remembered target that IS selected leads the walk", () => {
   assert.deepEqual(labels(p.steps.slice(0, 2)), ["gemini/E#1", "gemini/E#0"]);
 });
 
-test("a remembered target that is NOT selected does not lead the selection", () => {
-  // X is served by gemini but was never selected, so it cannot jump the queue.
+test("a remembered target that is NOT selected leads the Health batch, ahead of the selection", () => {
+  // X is served by gemini but was never selected: it is a Health model, and it
+  // answered last, so the Health batch is walked first and the selection after it.
   const p = plan({ stickyTargetId: "gemini:X:key-1" });
-  assert.equal(p.sticky, null);
-  assert.equal(label(p.steps[0].target), "gemini/A#0", "the saved order still leads");
-  assert.ok(p.steps.every((step) => step.phase !== PHASES.STICKY));
-  // It is still reachable — but only after the whole selection, in the health batch.
-  assert.ok(labels(phaseSteps(p, PHASES.HEALTH)).includes("gemini/X#1"));
+  assert.equal(label(p.sticky), "gemini/X#1");
+  assert.equal(p.steps[0].phase, PHASES.STICKY);
+  assert.equal(label(p.steps[0].target), "gemini/X#1");
+  const firstManual = p.steps.findIndex((step) => step.phase === PHASES.MANUAL);
+  const lastHealthLike = p.steps.findLastIndex((step) => step.phase === PHASES.STICKY || step.phase === PHASES.HEALTH);
+  assert.ok(firstManual > lastHealthLike, "no selected model is tried before the Health batch has been exhausted");
 });
 
 test("text and vision pools stay separate under manual selection", () => {

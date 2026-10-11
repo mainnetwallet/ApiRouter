@@ -346,10 +346,10 @@ function toSteps(groups, phase, extra = {}) {
  * Both batches are computed ONCE, here, so the health order is stable for the
  * whole request; a later health refresh can only change the next request's plan.
  *
- * The remembered target promotes only when it is one of the SELECTED models: the
- * operator's saved order is what decides between models, and an unselected model
- * that happened to answer last must not jump ahead of the selection. It is still
- * remembered (the session keeps it), it simply does not lead.
+ * The remembered target is the last success from EITHER batch and leads its own
+ * batch. When it is a Health model, the Health batch is walked first and the
+ * Manual batch only after every Health model and key has failed; when it is a
+ * selected model, the Manual batch leads as usual. The batches then alternate.
  *
  * Fail closed: when the selection itself has nothing walkable for this request,
  * the plan is empty. The health batch exists to catch FAILURES of the operator's
@@ -369,49 +369,63 @@ function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, 
     return { steps: [], groups: configured, failClosed: true, sticky: null, ...meta };
   }
 
-  // The remembered target, but only if it is part of the selection the operator
-  // saved. `configured` is that selection as the configuration narrowed it, so a
-  // key the entry excludes — or a model since disabled — is simply not found.
-  const sticky = resolveSticky({ stickyTargetId, ordered: configured, pinned: false });
-  let selectedGroups = configured;
-  let head = [];
-  let stickyTarget = null;
-  if (sticky) {
-    stickyTarget = sticky.target;
-    // The remembered model leads, with the key that answered first.
-    const siblings = sticky.group.targets
-      .filter((target) => targetId(target) !== targetId(sticky.target));
-    head = [
-      { target: sticky.target, phase: PHASES.STICKY, group: sticky.group.id },
-      ...siblings.map((target) => ({ target, phase: PHASES.STICKY, group: sticky.group.id }))
-    ];
-    selectedGroups = [sticky.group, ...configured.filter((group) => group.id !== sticky.group.id)];
-  }
-
-  // `head` already holds every target of the remembered group (the remembered
-  // key and its siblings), so that group must not be listed again under MANUAL.
-  const manualSteps = toSteps(
-    sticky ? selectedGroups.filter((group) => group.id !== sticky.group.id) : selectedGroups,
-    PHASES.MANUAL
-  );
-
+  // Health groups: every reachable model that is NOT in the saved selection,
+  // ordered by health. Computed first because the remembered target can live in
+  // either batch.
   const others = [...grouped.values()].filter((group) => !selected.has(group.id));
   const fallbackGroups = automaticGroupsOrder(others, { cacheKey: `${cacheKey}|manual-fallback`, health, now });
-  const healthFirst = toSteps(fallbackGroups, PHASES.HEALTH);
 
-  const steps = [...head, ...manualSteps, ...healthFirst];
+  // ONE remembered target (the last success anywhere), and it leads the plan
+  // from whichever batch it belongs to:
+  //
+  //   - a SELECTED (manual) model leads the Manual batch, then the Health batch
+  //     follows, then the two batches alternate as retries:
+  //         MANUAL(sticky first) -> HEALTH -> MANUAL_RETRY -> HEALTH_RETRY
+  //   - a HEALTH model leads the Health batch, and the Manual batch comes only
+  //     after every Health model and key has failed:
+  //         HEALTH(sticky first) -> MANUAL -> HEALTH_RETRY -> MANUAL_RETRY
+  //
+  // `configured` and `fallbackGroups` are the batches as the configuration
+  // narrowed them, so a model since disabled or a key an entry excludes is
+  // simply not found and cannot lead.
+  const manualSticky = resolveSticky({ stickyTargetId, ordered: configured, pinned: false });
+  const healthSticky = manualSticky ? null : resolveSticky({ stickyTargetId, ordered: fallbackGroups, pinned: false });
+  const sticky = manualSticky || healthSticky;
+
+  // The remembered model leads its batch, with the key that answered first and
+  // its other keys following before the next model of that batch.
+  const lead = (groups) => {
+    if (!sticky) return { groups, head: [], rest: groups };
+    const siblings = sticky.group.targets.filter((target) => targetId(target) !== targetId(sticky.target));
+    return {
+      groups: [sticky.group, ...groups.filter((group) => group.id !== sticky.group.id)],
+      head: [sticky.target, ...siblings].map((target) => ({ target, phase: PHASES.STICKY, group: sticky.group.id })),
+      rest: groups.filter((group) => group.id !== sticky.group.id)
+    };
+  };
+
+  const selectedBatch = manualSticky ? lead(configured) : { groups: configured, head: [], rest: configured };
+  const healthBatch = healthSticky ? lead(fallbackGroups) : { groups: fallbackGroups, head: [], rest: fallbackGroups };
+
+  const manualSteps = [...selectedBatch.head, ...toSteps(selectedBatch.rest, PHASES.MANUAL)];
+  const healthSteps = [...healthBatch.head, ...toSteps(healthBatch.rest, PHASES.HEALTH)];
+
+  // The batch that holds the remembered target goes first; the other follows.
+  const healthLeads = Boolean(healthSticky);
+  const steps = healthLeads ? [...healthSteps, ...manualSteps] : [...manualSteps, ...healthSteps];
   for (let round = 1; round <= TARGET_RETRY_ALLOWANCE; round += 1) {
-    steps.push(
-      ...toSteps(selectedGroups, PHASES.MANUAL_RETRY, { retry: true, round }),
-      ...toSteps(fallbackGroups, PHASES.HEALTH_RETRY, { retry: true, round })
-    );
+    const manualRetry = toSteps(selectedBatch.groups, PHASES.MANUAL_RETRY, { retry: true, round });
+    const healthRetry = toSteps(healthBatch.groups, PHASES.HEALTH_RETRY, { retry: true, round });
+    steps.push(...(healthLeads ? [...healthRetry, ...manualRetry] : [...manualRetry, ...healthRetry]));
   }
 
   return {
     steps,
-    groups: [...selectedGroups, ...fallbackGroups],
+    groups: healthLeads
+      ? [...healthBatch.groups, ...selectedBatch.groups]
+      : [...selectedBatch.groups, ...healthBatch.groups],
     failClosed: false,
-    sticky: stickyTarget,
+    sticky: sticky ? sticky.target : null,
     ...meta
   };
 }

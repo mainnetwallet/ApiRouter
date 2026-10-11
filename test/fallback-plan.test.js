@@ -326,8 +326,10 @@ test("a remembered target promotes its model within the selection, not out of it
 
 test("a remembered target the selection no longer allows is not promoted", () => {
   resetAutomaticOrderCache();
+  // A model that was parked or narrowed away is not in the Health batch either
+  // (the operator named it), so nothing can promote it. A model that is simply
+  // unselected is different: it is a Health model and leads the Health batch.
   for (const [why, chain] of [
-    ["not in the selection", entries(["a", "A"])],
     ["model disabled", entries(["a", "A"], ["b", "B", { enabled: false }])],
     ["key restricted away", entries(["a", "A"], ["b", "B", { keys: [0] }])]
   ]) {
@@ -372,7 +374,7 @@ test("a remembered target leads the walk whether or not a selection is saved", (
   assert.equal(labels(automatic.steps)[0], "sticky:b/B#1");
 });
 
-test("a remembered target outside the selection does not jump the queue", () => {
+test("a remembered Health model leads the Health batch, and the Manual batch follows only after it", () => {
   resetAutomaticOrderCache();
   const { steps, sticky } = buildRoutePlan({
     targets: twoKeyTargets,
@@ -380,10 +382,31 @@ test("a remembered target outside the selection does not jump the queue", () => 
     stickyTargetId: "c:C:key-0",
     cacheKey: "unselected-sticky"
   });
-  assert.equal(sticky, null, "an unselected model that answered last must not lead the selection");
-  assert.equal(steps[0].phase, PHASES.MANUAL);
-  // It is still reachable — but only after the whole selection, in the health batch.
-  assert.ok(labels(phaseSteps(steps, PHASES.HEALTH)).includes("health-fallback:c/C#0"));
+  assert.equal(sticky.model, "C", "the last success was a Health model, so it is the remembered one");
+  assert.equal(steps[0].phase, PHASES.STICKY);
+  // Manual models are not tried first any more: the remembered Health model goes
+  // first and the whole selection comes only after the Health batch has failed.
+  assert.deepEqual(labels(firstPass(steps)), [
+    "sticky:c/C#0",
+    "manual-selection:a/A#0", "manual-selection:a/A#1",
+    "manual-selection:b/B#0", "manual-selection:b/B#1"
+  ]);
+});
+
+test("after the Health batch fails the Manual batch is walked, then Health again, then Manual again", () => {
+  resetAutomaticOrderCache();
+  const { steps } = buildRoutePlan({
+    targets: twoKeyTargets,
+    chain: entries(["a", "A"], ["b", "B"]),
+    stickyTargetId: "c:C:key-0",
+    cacheKey: "health-led-alternation"
+  });
+  const phases = [];
+  for (const step of steps) if (phases[phases.length - 1] !== step.phase) phases.push(step.phase);
+  assert.deepEqual(phases, [
+    PHASES.STICKY, PHASES.MANUAL,
+    PHASES.HEALTH_RETRY, PHASES.MANUAL_RETRY
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -555,11 +578,12 @@ test("an entry removed from the selection cannot be promoted by sticky routing",
     cacheKey: "remember-removed-entry"
   });
 
-  assert.equal(sticky, null);
-  // B is unselected now, so it is reachable only after A, in the health batch.
+  // B is unselected now, i.e. a Health model: it leads the Health batch (the
+  // last success was a Health model), and the removed entry gets no manual slot.
+  assert.equal(sticky.model, "B");
   assert.deepEqual(labels(firstPass(steps)), [
-    "manual-selection:a/A#0", "manual-selection:a/A#1", "manual-selection:a/A#2",
-    "health-fallback:b/B#0"
+    "sticky:b/B#0",
+    "manual-selection:a/A#0", "manual-selection:a/A#1", "manual-selection:a/A#2"
   ]);
 });
 
