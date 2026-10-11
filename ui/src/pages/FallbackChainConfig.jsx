@@ -142,6 +142,15 @@ export default function FallbackChainConfig() {
             >
               <Icon name="trash" className="btn__icon" size={12} /><span className="btn__label">Clear {pool}</span>
             </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              title="Clears remembered model/key preferences only. Selection, providers, keys, health data and real cooldowns are kept."
+              onClick={() => run(() => resetFallback(), "Remembered targets cleared")}
+            >
+              <Icon name="refresh" className="btn__icon" size={12} /><span className="btn__label">Reset Fallback</span>
+            </button>
             <button type="button" className="btn btn--primary" disabled={busy || !dirty}
               onClick={() => run(() => saveChain(pool, chain), `${pool} chain saved`)}>
               <Icon name="check" className="btn__icon" size={12} /><span className="btn__label">Save</span>
@@ -176,16 +185,6 @@ export default function FallbackChainConfig() {
                     </ul>
                   ) : null}
                 </div>
-                <button
-                  type="button"
-                  className="btn btn--danger"
-                  disabled={busy}
-                  title="Clears remembered model/key preferences only. Selection, providers, keys, health data and real cooldowns are kept."
-                  onClick={() => run(() => resetFallback(), "Remembered targets cleared")}
-                >
-                  <Icon name="refresh" className="btn__icon" size={12} />
-                  <span className="btn__label">Reset Fallback</span>
-                </button>
               </div>
             </div>
           </section>
