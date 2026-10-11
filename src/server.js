@@ -66,6 +66,7 @@ import {
 import { isSignatureRejection } from "./gemini-signature.js";
 import { requestLog } from "./observability/request-log.js";
 import { HealthMonitorState } from "./observability/monitor-state.js";
+import { GatewayState } from "./gateway-state.js";
 import { sanitizeMessage, registerConfiguredSecrets } from "./observability/sanitize.js";
 import { validateRequestShape } from "./request-validation.js";
 
@@ -170,6 +171,17 @@ const monitor = new HealthMonitorState({
   targetCount: targets.length
 });
 const trackedCheckTargetHealth = monitor.wrapCheck(checkTargetHealth);
+
+/** Master switch controlled from the Control Panel (see src/gateway-state.js). */
+const gateway = new GatewayState();
+
+function respondPaused(res) {
+  const snap = gateway.snapshot();
+  return json(res, 503, {
+    error: { message: "Gateway is shut down from the Control Panel. Resume it to accept requests.", type: "gateway_paused" },
+    gateway: snap
+  }, { "retry-after": "30" });
+}
 
 function json(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
@@ -355,6 +367,10 @@ async function proxy(req, res, protocol, pathname) {
     });
     return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
   }
+
+  // Shut down from the UI: refuse before reading the body, picking a target
+  // or touching any upstream provider.
+  if (gateway.paused) return respondPaused(res);
 
   let body;
   try { body = await readJsonBody(req, config.maxBodyBytes); }
@@ -932,6 +948,7 @@ const handleApi = createApi({
   health: healthRegistry,
   requestLog,
   monitor,
+  gateway,
   // Reset Fallback clears what the router REMEMBERS, never what it was told:
   // the saved chain, the providers, the keys, the health measurements and any
   // genuine cooldown are all left exactly as they are.
@@ -1044,6 +1061,7 @@ async function handleRequest(req, res) {
     return json(res, 200, {
       ok: true,
       service: "apirouter",
+      gateway: gateway.snapshot(),
       providers: PROVIDERS,
       configuredTargets: targets.length,
       configuredTextTargets: textTargets.length,
@@ -1104,6 +1122,7 @@ async function handleRequest(req, res) {
 
   if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
     if (!authorized(req)) return json(res, 401, { error: { message: "Unauthorized", type: "authentication_error" } });
+    if (gateway.paused) return respondPaused(res);
     try {
       // The same configured cap as every other JSON body: this endpoint is
       // authenticated, but an oversized body must still fail as a 413 here
@@ -1142,7 +1161,7 @@ const server = http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => respondUnexpected(res, error));
 });
 
-const stopHealthMonitor = startHealthMonitor(targets, trackedCheckTargetHealth, HEALTH_CHECK_INTERVAL_MS);
+const stopHealthMonitor = startHealthMonitor(targets, trackedCheckTargetHealth, HEALTH_CHECK_INTERVAL_MS, { isPaused: () => gateway.paused });
 const stopKeepAlive = startKeepAlive();
 process.once("SIGINT", () => {
   monitor.stop();

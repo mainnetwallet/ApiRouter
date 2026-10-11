@@ -110,6 +110,7 @@ export function createApi({
   health,
   requestLog,
   monitor,
+  gateway = null,
   refreshHealth,
   fallbackChain = null,
   resetFallbackState = null,
@@ -602,7 +603,24 @@ export function createApi({
       return sendJson(req, res, 200, healthPayload(now));
     }
 
+    // Master on/off switch. "shutdown" pauses the gateway: no proxy request and
+    // no health probe reaches an upstream until it is resumed. The process and
+    // this admin API stay up so the Control Panel can turn it back on.
+    if (pathname === "/api/gateway" || pathname === "/api/gateway/shutdown" || pathname === "/api/gateway/resume") {
+      if (!gateway) return fail(req, res, 503, "Gateway control is not available", "unavailable");
+      if (pathname === "/api/gateway") {
+        if (req.method !== "GET") return fail(req, res, 405, "Use GET", "method_not_allowed");
+        return sendJson(req, res, 200, gateway.snapshot());
+      }
+      if (req.method !== "POST") return fail(req, res, 405, "Use POST", "method_not_allowed");
+      const snapshot = pathname.endsWith("/shutdown") ? gateway.pause("shut down from Control Panel") : gateway.resume();
+      return sendJson(req, res, 200, { ok: true, ...snapshot });
+    }
+
     if (pathname === "/api/health/refresh" && req.method === "POST") {
+      if (gateway?.paused) {
+        return fail(req, res, 409, "Gateway is shut down; resume it before refreshing health", "gateway_paused");
+      }
       if (!monitor || typeof refreshHealth !== "function") {
         return fail(req, res, 503, "Health refresh is not available", "unavailable");
       }
@@ -789,12 +807,15 @@ export function createApi({
     }
 
     if (pathname === "/api/system" && req.method === "GET") {
-      return sendJson(req, res, 200, describeSystem({
-        config,
-        targets,
-        monitor: monitor ? monitor.snapshot(now) : null,
-        now
-      }));
+      return sendJson(req, res, 200, {
+        ...describeSystem({
+          config,
+          targets,
+          monitor: monitor ? monitor.snapshot(now) : null,
+          now
+        }),
+        gateway: gateway ? gateway.snapshot(now) : null
+      });
     }
 
     if (pathname === "/api/requests" && req.method === "GET") {

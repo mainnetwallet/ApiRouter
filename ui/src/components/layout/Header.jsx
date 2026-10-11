@@ -2,6 +2,7 @@ import { Icon } from "../ui/Icon.jsx";
 import { StatusBadge } from "../ui/StatusBadge.jsx";
 import { useSystemStatus } from "../../context/SystemStatusContext.jsx";
 import { formatRelativeTime } from "../../lib/format.js";
+import { GatewayControl } from "./GatewayControl.jsx";
 
 /**
  * Top bar: page identity on the left, live system state on the right.
@@ -62,6 +63,8 @@ export function Header({ route, onOpenNav, onOpenSettings, theme, onToggleTheme 
           </StatusBadge>
           </span>
         ) : null}
+
+        <GatewayControl />
 
         <button
           type="button"
