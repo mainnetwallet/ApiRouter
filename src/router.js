@@ -137,6 +137,68 @@ export const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
 export const RATE_LIMIT_MIN_COOLDOWN_MS = 5 * 1000;
 export const RATE_LIMIT_MAX_COOLDOWN_MS = 12 * 60 * 1000;
 
+// A quota that resets once a day or once a month is not a per-minute rate limit:
+// asking again a minute later cannot succeed, it only burns a call (and, with
+// many keys and models, a request's worth of time). These get a cooldown that
+// matches the window instead of RATE_LIMIT_COOLDOWN_MS.
+export const QUOTA_MAX_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+export const MONTHLY_QUOTA_RECHECK_MS = 6 * 60 * 60 * 1000;
+const QUOTA_RESET_BUFFER_MS = 60 * 1000;
+
+const DAILY_QUOTA_MESSAGE = /per[- _]?day|\bdaily\b|\bper day\b|"code"\s*:\s*4006\b|\bcode["']?\s*[:=]\s*4006\b/i;
+const MONTHLY_QUOTA_MESSAGE = /per[- _]?month|\/\s*month\b|\bmonthly\b|\bper month\b/i;
+// Providers that say WHEN the quota resets put it in the body as an epoch
+// (seconds or milliseconds), e.g. OpenRouter's X-RateLimit-Reset.
+const RESET_EPOCH = /x-ratelimit-reset["']?\s*[:=]\s*["']?(\d{10,13})\b/i;
+
+const nextUtcMidnight = (now) => {
+  const date = new Date(now);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1);
+};
+
+/**
+ * Recognises a 429 that is a daily or monthly quota (not a per-minute rate
+ * limit) and says how long to leave the target alone.
+ *
+ * Returns `{ cooldownMs, kind }` or `null` when the 429 is an ordinary rate
+ * limit, in which case the caller keeps the short cooldown. Only the wording and
+ * a reset time the upstream itself reported are used; nothing is guessed from
+ * the status alone.
+ *
+ *   daily    until the reset the upstream reported, else the next 00:00 UTC
+ *   monthly  re-checked every MONTHLY_QUOTA_RECHECK_MS (a cheap single call)
+ *
+ * Capped at QUOTA_MAX_COOLDOWN_MS so a wrong guess can park a target for at
+ * most a day.
+ */
+export function quotaCooldown(status, error = null, now = Date.now()) {
+  if (Number(status) !== 429) return null;
+  const text = typeof error?.message === "string" ? error.message : "";
+  if (!text) return null;
+
+  const daily = DAILY_QUOTA_MESSAGE.test(text);
+  const monthly = !daily && MONTHLY_QUOTA_MESSAGE.test(text);
+  if (!daily && !monthly) return null;
+
+  let resetAt = null;
+  const match = RESET_EPOCH.exec(text);
+  if (match) {
+    const raw = Number(match[1]);
+    const epochMs = match[1].length <= 10 ? raw * 1000 : raw;
+    if (Number.isFinite(epochMs) && epochMs > now) resetAt = epochMs;
+  }
+
+  let cooldownMs;
+  if (resetAt !== null) cooldownMs = resetAt - now + QUOTA_RESET_BUFFER_MS;
+  else if (daily) cooldownMs = nextUtcMidnight(now) - now + QUOTA_RESET_BUFFER_MS;
+  else cooldownMs = MONTHLY_QUOTA_RECHECK_MS;
+
+  return {
+    kind: daily ? "daily" : "monthly",
+    cooldownMs: Math.min(Math.max(cooldownMs, RATE_LIMIT_COOLDOWN_MS), QUOTA_MAX_COOLDOWN_MS)
+  };
+}
+
 function rateLimitCooldownMs(error) {
   const retryAfterMs = Number(error?.retryAfterMs);
   if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
@@ -168,7 +230,11 @@ function cooldownOptions(status, error = null) {
   if (status === 400) return { cooldownMs: BAD_REQUEST_COOLDOWN_MS };
   if (status === 413) return { cooldownMs: SIZE_LIMIT_COOLDOWN_MS };
   if (status === 408) return { cooldownMs: TIMEOUT_COOLDOWN_MS };
-  if (status === 429) return { cooldownMs: rateLimitCooldownMs(error) };
+  if (status === 429) {
+    const quota = quotaCooldown(status, error);
+    if (quota) return { cooldownMs: quota.cooldownMs, quotaKind: quota.kind };
+    return { cooldownMs: rateLimitCooldownMs(error) };
+  }
   // Any other client error (405, 410, 415, 422, 451 ...) most likely belongs to
   // this one request, so it must not park the key for the full 12 minutes. 401,
   // 402, 403 and 404 describe the key or the model and keep the default.
@@ -424,16 +490,21 @@ export async function withFallback(
       }
 
       const { scope, kind } = describeFailure(status, error);
-      // Only a transient, target-scoped failure is worth a second look.
-      if (scope !== FAILURE_SCOPE.TARGET || !isTransientStatus(status)) noRetry.add(id);
+      const { quotaKind, ...cooldown } = cooldownOptions(status, error);
+      // Only a transient, target-scoped failure is worth a second look. A daily
+      // or monthly quota will not have reset by the time this request retries.
+      if (scope !== FAILURE_SCOPE.TARGET || !isTransientStatus(status) || quotaKind) noRetry.add(id);
       // A failure narrowed to this target by its message carries a fixed,
       // non-upstream reason so the Models page can say why it is cooling down.
       health.markFailure(target, status, {
-        ...cooldownOptions(status, error),
-        ...(kind ? { reason: `${status} ${kind} on ${target.model}` } : {})
+        ...cooldown,
+        // Fixed labels only, never upstream text, so nothing sensitive reaches /health.
+        ...(kind
+          ? { reason: `${status} ${kind} on ${target.model}` }
+          : quotaKind ? { reason: `429 ${quotaKind} quota exhausted on ${target.model}` } : {})
       });
       if (scope === FAILURE_SCOPE.TARGET) {
-        if (isTransientStatus(status)) {
+        if (isTransientStatus(status) && !quotaKind) {
           ownTransientCooldown.set(id, Number(health.get(id)?.cooldownUntil) || 0);
         }
         continue;
