@@ -121,7 +121,6 @@ export default function FallbackChainConfig() {
     }
   };
 
-  const remembered = data?.remembered?.remembered?.[pool] ?? [];
 
   return (
     <div className="page">
@@ -164,31 +163,6 @@ export default function FallbackChainConfig() {
 
       {data ? (
         <>
-          {/* How the pool is routed: derived from the selection, so there is no switch. */}
-          <section className="panel" aria-label="How this pool is routed">
-            <div className="panel__header">
-              <span className="panel__title">Routing</span>
-            </div>
-            <div className="panel__body">
-              <div className="fc-remembered">
-                <div>
-                  <span className="tiny dim">
-                    Remembered ({pool}): {remembered.length === 0 ? "none" : `${remembered.length} session(s)`}
-                  </span>
-                  {remembered.length > 0 ? (
-                    <ul className="fc-remembered__list">
-                      {remembered.slice(0, 5).map((item) => (
-                        <li key={`${item.protocol}-${item.sessionId}`} className="mono tiny">
-                          {item.targetId} <span className="dim">· {item.protocol} · session {item.sessionId}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          </section>
-
           <div className="fc-flow" aria-label="Ordering in force">
             <span className={`badge ${summary.failClosed ? "badge--danger" : summary.source === "chain" ? "badge--info" : "badge--warn"}`}>
               {summary.label}
