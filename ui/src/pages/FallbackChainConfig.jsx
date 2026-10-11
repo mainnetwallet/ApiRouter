@@ -159,29 +159,12 @@ export default function FallbackChainConfig() {
           <section className="panel" aria-label="How this pool is routed">
             <div className="panel__header">
               <span className="panel__title">Routing</span>
-              <div className="panel__actions">
-                <span className="tiny dim">
-                  {chain.length === 0
-                    ? "Nothing is selected, so every request is ordered by health and latency."
-                    : "Your selection is tried first, in this order, then every other model by health."}
-                </span>
-              </div>
             </div>
             <div className="panel__body">
-              <p className="tiny dim fc-note">
-                There is no mode to choose. A pool with models selected below is walked in that saved order — the last
-                target that answered leads the next request, and every eligible key of a model is tried before the next
-                model. If every selected target fails, every other model is tried by health and latency. Clear the
-                selection to route this pool automatically instead.
-              </p>
-
               <div className="fc-remembered">
                 <div>
                   <span className="tiny dim">
-                    Remembered right now for the {pool} pool:{" "}
-                    {remembered.length === 0
-                      ? "nothing — the next request starts at the first target of the active order."
-                      : `${remembered.length} session(s).`}
+                    Remembered ({pool}): {remembered.length === 0 ? "none" : `${remembered.length} session(s)`}
                   </span>
                   {remembered.length > 0 ? (
                     <ul className="fc-remembered__list">
@@ -197,16 +180,13 @@ export default function FallbackChainConfig() {
                   type="button"
                   className="btn btn--danger"
                   disabled={busy}
+                  title="Clears remembered model/key preferences only. Selection, providers, keys, health data and real cooldowns are kept."
                   onClick={() => run(() => resetFallback(), "Remembered targets cleared")}
                 >
                   <Icon name="refresh" className="btn__icon" size={12} />
                   <span className="btn__label">Reset Fallback</span>
                 </button>
               </div>
-              <p className="tiny dim fc-note">
-                Reset Fallback clears remembered model/key preferences only. It never deletes the selection,
-                the providers, the API keys, the configured models, valid health measurements or a genuine cooldown.
-              </p>
             </div>
           </section>
 
@@ -214,13 +194,11 @@ export default function FallbackChainConfig() {
             <span className={`badge ${summary.failClosed ? "badge--danger" : summary.source === "chain" ? "badge--info" : "badge--warn"}`}>
               {summary.label}
             </span>
-            <span className="tiny dim">
-              {summary.failClosed
-                ? `Every entry in this selection is disabled or names a model the ${pool} pool no longer has. Clear the selection to hand routing back to the automatic order.`
-                : chain.length === 0
-                  ? "Nothing is selected, so the automatic health-based order is used."
-                  : "Your saved order is followed exactly; health only skips models that are cooling down."}
-            </span>
+            {summary.failClosed ? (
+              <span className="tiny dim">
+                Every entry is disabled or names a model this pool no longer has. Clear the selection to use the automatic order.
+              </span>
+            ) : null}
           </div>
 
           <div className="tabs" role="tablist" aria-label="Pool">
