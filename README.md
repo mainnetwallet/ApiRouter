@@ -271,7 +271,21 @@ outright, and that wins over the status code.
 | GET | `/api/router/preview` | Preview routing decisions |
 | GET | `/api/analytics` | Usage and performance analytics |
 | GET | `/api/config` | Effective configuration without secrets |
-| GET | `/api/system` | Runtime and health-monitor state |
+| GET | `/api/system` | Runtime and health-monitor state (includes the gateway on/off state) |
+| GET | `/api/gateway` | Gateway on/off state (`running` or `paused`) |
+| POST | `/api/gateway/shutdown` | Shut the gateway down: no proxy request or health probe reaches an upstream |
+| POST | `/api/gateway/resume` | Turn the gateway back on |
+
+### Shutdown and resume
+
+The Control Panel header has a **Shutdown** button (it becomes **Resume** while the gateway is shut down). Shutting down *pauses* the gateway rather than exiting the process:
+
+- every proxy request (`/v1/...`, `/v1beta/...`, including `count_tokens`) is refused with `503` and `error.type: "gateway_paused"`;
+- a request already walking its fallback chain makes no further upstream attempt (an attempt already in flight is allowed to finish);
+- the health monitor stops probing and a manual health refresh returns `409`;
+- the Control Panel, `/api/*`, `/health` and the keep-alive ping stay up, so the panel can resume the gateway.
+
+The state is in memory: restarting the process returns the gateway to running.
 
 ## Control Panel
 

@@ -26,17 +26,18 @@ export function GatewayControl() {
       await action();
       await reload();
     } catch (e) {
+      // Surface the failure next to the button; never leave it unhandled.
       setError(e?.message || "Request failed");
-      throw e;
     }
   };
 
   return (
     <>
+      {error ? <span className="gateway-error" role="alert">{error}</span> : null}
       <button
         type="button"
         className={`btn ${paused ? "btn--primary" : "btn--danger"}`}
-        onClick={() => (paused ? run(resumeGateway).catch(() => {}) : setConfirmOpen(true))}
+        onClick={() => (paused ? run(resumeGateway) : setConfirmOpen(true))}
         title={error ?? (paused ? "Turn the backend back on" : "Shut down the backend: no calls will be made")}
       >
         <Icon name={paused ? "play" : "stop"} size={14} />

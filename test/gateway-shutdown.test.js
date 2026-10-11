@@ -51,3 +51,42 @@ test("shutdown blocks every upstream call and resume restores routing", async ()
     await mock.close();
   }
 });
+
+test("shutdown during a fallback walk stops the next upstream attempt", async () => {
+  let router;
+  let upstreamCalls = 0;
+  const mock = await startMockUpstream(() => {
+    upstreamCalls += 1;
+    // The operator hits Shutdown while the first attempt is still in flight;
+    // that attempt then fails, so the router would normally try the next key.
+    void router.request("/api/gateway/shutdown", { method: "POST" });
+    return { status: 500, afterMs: 300, body: { error: { message: "boom" } } };
+  });
+  router = await startRouter({
+    GROQ_API_KEYS: "k0,k1",
+    GROQ_MODELS: "m",
+    GROQ_BASE_URL: `${mock.baseUrl}/v1`
+  });
+  try {
+    const res = await router.request("/v1/chat/completions", postJson(chat));
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).error.type, "gateway_paused");
+    assert.equal(upstreamCalls, 1, "fallback must not try another key after shutdown");
+  } finally {
+    await router.close();
+    await mock.close();
+  }
+});
+
+test("a running health cycle stops between targets once told to", async () => {
+  const { refreshAllHealth } = await import("../src/health.js");
+  let stop = false;
+  const checked = [];
+  const targets = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  await refreshAllHealth(
+    targets,
+    async (t) => { checked.push(t.id); stop = true; return { ok: true }; },
+    { concurrency: 1, shouldStop: () => stop }
+  );
+  assert.deepEqual(checked, ["a"]);
+});

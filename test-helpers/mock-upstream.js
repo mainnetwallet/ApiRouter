@@ -86,8 +86,11 @@ export async function startMockUpstream(script, options = {}) {
         ? descriptor.body
         : JSON.stringify(descriptor.body ?? { ok: true });
 
-      res.writeHead(status, headers);
-      res.end(body);
+      // `afterMs` (non-stream only) delays the reply so a test can act while
+      // the upstream attempt is still in flight.
+      const send = () => { res.writeHead(status, headers); res.end(body); };
+      if (descriptor.afterMs) setTimeout(send, descriptor.afterMs);
+      else send();
     });
   });
 
