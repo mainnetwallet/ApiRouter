@@ -400,6 +400,16 @@ whose plan has more than one source, and it is built by `buildManualPlan` in
    same order, every step flagged `retry` and numbered by `round`. The sequence
    is therefore MANUAL → HEALTH → MANUAL → HEALTH.
 
+**The remembered target (last success) leads the batch it came from.** There is
+one remembered target per session and pool, whichever batch it answered in:
+
+- a *selected* model leads the Manual batch: MANUAL → HEALTH → MANUAL → HEALTH;
+- an *unselected* (Health) model leads the Health batch, and the Manual batch is
+  walked only after every Health model and key has failed:
+  HEALTH → MANUAL → HEALTH → MANUAL.
+
+A later success from the other batch replaces it, so the order flips back.
+
 Both batches are computed once when the request starts, so the Health order is
 stable for the whole request. A health refresh (every 12 minutes) can change the
 order the *next* request's plan gets; it never clears a cooldown.

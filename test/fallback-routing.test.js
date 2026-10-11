@@ -596,40 +596,64 @@ test("the remembered key is tried first on the next request, then the model's re
   assert.equal(session.targetId, "p1:M2:key-0", "every success updates the remembered target");
 });
 
-test("a remembered target leads only when it is part of the selection", async () => {
+test("the last success leads whichever batch it came from: a selected model leads Manual, an unselected one leads Health", async () => {
   resetAutomaticOrderCache();
   const session = new RouteSession();
   remember(session, fx("p2", "N1", 1));
 
-  // The remembered target is one of the selected models, so it leads: the
-  // saved order decides between models, and this one answered last time.
+  // N1 is one of the selected models here, so it leads the Manual batch.
   let calls = [];
   assert.equal(await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session }), "ok");
   assert.deepEqual(calls, ["p2/N1#1"], "a remembered target inside the selection leads");
   assert.equal(session.targetId, "p2:N1:key-1");
 
-  // An unselected remembered target never jumps the queue: it is reached only
-  // by the health-based fallback, after the whole selection has been walked.
+  // N1 is NOT selected here: it is a Health model that answered last, so it is
+  // tried first and the Manual models are not touched while it keeps working.
   const unselected = new RouteSession();
   remember(unselected, fx("p2", "N1", 1));
   calls = [];
   await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, {
     session: unselected, chain: entries(["p1", "M1"], ["p1", "M2"])
   });
-  assert.deepEqual(calls, ["p1/M1#0"], "an unselected remembered target does not lead the walk");
-  assert.equal(unselected.targetId, "p1:M1:key-0", "the success replaces what was remembered");
+  assert.deepEqual(calls, ["p2/N1#1"], "the remembered Health model leads, no Manual model is tried first");
+  assert.equal(unselected.targetId, "p2:N1:key-1");
+});
 
-  // And with the selected models failing, the unselected remembered model is
-  // reached only after every selected model has been exhausted.
-  remember(unselected, fx("p2", "N1", 1));
+test("Manual fails -> Health answers and is remembered -> next request skips Manual -> Health fails -> Manual answers and is remembered", async () => {
+  resetAutomaticOrderCache();
+  const session = new RouteSession();
+  const chain = entries(["p1", "M1"], ["p1", "M2"]);
+
+  // 1. Fresh start: Manual models go first. All of them fail, so the Health
+  //    model (p2/N1) is reached, and it answers on key 1.
+  let calls = [];
+  await fixedRequest(async (target) => {
+    calls.push(lbl(target));
+    if (target.provider === "p2" && target.keyIndex === 1) return "ok";
+    throw fail(500);
+  }, { session, chain });
+  assert.deepEqual(calls.slice(0, 5), ["p1/M1#0", "p1/M1#1", "p1/M1#2", "p1/M2#0", "p1/M2#1"], "Manual batch is walked first");
+  assert.equal(session.validTargetId(), "p2:N1:key-1", "the Health success is the remembered target");
+
+  // 2. Next request: the remembered Health model goes first; no Manual model is tried.
+  calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session, chain });
+  assert.deepEqual(calls, ["p2/N1#1"], "Manual models are not tried while the Health model keeps answering");
+
+  // 3. The Health model (every key) fails: only then is the Manual batch walked.
   calls = [];
   await fixedRequest(async (target) => {
     calls.push(lbl(target));
-    if (target.provider === "p1") throw fail(500);
-    return "ok";
-  }, { session: unselected, chain: entries(["p1", "M1"], ["p1", "M2"]) });
-  assert.deepEqual(calls, ["p1/M1#0", "p1/M1#1", "p1/M1#2", "p1/M2#0", "p1/M2#1", "p2/N1#0"],
-    "the selection is exhausted first, then the fallback batch in its health order — the remembered key does not lead it");
+    if (target.provider === "p1") return "ok";
+    throw fail(500);
+  }, { session, chain });
+  assert.deepEqual(calls, ["p2/N1#1", "p2/N1#0", "p1/M1#0"], "remembered Health key, its other keys, then the Manual batch");
+  assert.equal(session.validTargetId(), "p1:M1:key-0", "a Manual success becomes the remembered target again");
+
+  // 4. And now the Manual model leads again.
+  calls = [];
+  await fixedRequest(async (target) => { calls.push(lbl(target)); return "ok"; }, { session, chain });
+  assert.deepEqual(calls, ["p1/M1#0"]);
 });
 
 test("a remembered key that is cooling down is skipped without disturbing the order", async () => {
