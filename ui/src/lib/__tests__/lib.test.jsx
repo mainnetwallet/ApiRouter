@@ -81,6 +81,7 @@ describe("format", () => {
     expect(providerLabel("siliconflow")).toBe("SiliconFlow");
     expect(providerLabel("modelscope")).toBe("ModelScope");
     expect(providerLabel("llm7")).toBe("LLM7");
+    expect(providerLabel("unorouter")).toBe("UnoRouter");
     expect(providerLabel(null)).toBe(EMPTY);
   });
 
