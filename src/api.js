@@ -113,6 +113,7 @@ export function createApi({
   gateway = null,
   refreshHealth,
   fallbackChain = null,
+  modelSwitch = null,
   resetFallbackState = null,
   describeFallbackState = null,
   clearRememberedTargets = null
@@ -175,6 +176,11 @@ export function createApi({
 
   const describeAll = (now = Date.now()) => health.describe(targets, now);
 
+  // Targets routing may actually use: models switched off in the Control Panel
+  // are removed, so every order shown by the API is the order requests walk.
+  const isSwitchedOff = (target) => Boolean(modelSwitch?.isDisabled?.(target.provider, target.model));
+  const routableTargets = () => (modelSwitch ? targets.filter((target) => !isSwitchedOff(target)) : targets);
+
   // The chain store is the single source of truth for order and mode. These two
   // read it defensively so the API module stays usable when it is constructed
   // without one (a test harness, or a future embedder).
@@ -186,7 +192,7 @@ export function createApi({
     const entries = describeAll(now);
     // The real route order per pool, exactly as the saved selection produces it;
     // health only removes cooling targets. Not a health-score sort.
-    const ranked = routeOrderByPool(targets, {
+    const ranked = routeOrderByPool(routableTargets(), {
       chains: fallbackSnapshot(),
       health,
       now,
@@ -301,7 +307,9 @@ export function createApi({
   // --- /api/models -------------------------------------------------------
   function modelsPayload(now = Date.now()) {
     const entries = describeAll(now);
-    const catalogue = modelCatalogue(entries, [...requestLog.entries.values()]);
+    // `disabled` is per provider/model, so every key row of a model agrees.
+    const catalogue = modelCatalogue(entries, [...requestLog.entries.values()])
+      .map((row) => ({ ...row, disabled: isSwitchedOff(row) }));
 
     return {
       generatedAt: new Date(now).toISOString(),
@@ -427,6 +435,7 @@ export function createApi({
         group.latencySource = ordering.source;
         group.available = group.keyStates.some((key) => key.available);
         group.status = rollupStatus(group.keyStates);
+        group.disabled = Boolean(modelSwitch?.isDisabled?.(group.provider, group.model));
       }
     }
 
@@ -436,6 +445,7 @@ export function createApi({
       modes: FALLBACK_MODE_INFO,
       chain: { text: fallbackChain?.get?.("text") ?? [], vision: fallbackChain?.get?.("vision") ?? [] },
       catalogue: byPool,
+      disabledModels: modelSwitch?.list?.() ?? [],
       pools: FALLBACK_POOLS,
       poolsSeparate: true,
       // What the router is currently remembering, so the panel can show it and
@@ -478,7 +488,16 @@ export function createApi({
     // The preview must run against the same target set the proxy would use for
     // this pool — never the combined list, which could show a route the router
     // would refuse to take.
-    const poolTargets = targets.filter((target) => (target.pool ?? "text") === pool);
+    const configuredPoolTargets = targets.filter((target) => (target.pool ?? "text") === pool);
+    const poolTargets = configuredPoolTargets.filter((target) => !isSwitchedOff(target));
+
+    if (configuredPoolTargets.length > 0 && poolTargets.length === 0) {
+      return {
+        status: 503,
+        type: "models_disabled",
+        error: "Every model in this pool is switched off in the Control Panel"
+      };
+    }
 
     if (poolTargets.length === 0) {
       return {
@@ -764,6 +783,41 @@ export function createApi({
         // order already in force.
         resetAutomaticOrderCache();
         return sendJson(req, res, 200, fallbackPayload(now));
+      }
+    }
+
+    /*
+     * The Model Switch: turn one provider/model off or on without touching the
+     * saved chain. Takes effect immediately — new requests no longer plan the
+     * model, and a request still waiting on it is aborted and falls back to the
+     * next model (see server.js). Only ids and a flag are accepted.
+     */
+    if (pathname === "/api/models/switch" && modelSwitch) {
+      if (req.method === "GET") return sendJson(req, res, 200, { disabledModels: modelSwitch.list() });
+
+      if (req.method === "PUT") {
+        let body;
+        try { body = await readJsonBody(req, config.maxBodyBytes); }
+        catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
+
+        const provider = typeof body?.provider === "string" ? body.provider.trim().toLowerCase() : "";
+        const model = typeof body?.model === "string" ? body.model.trim() : "";
+        if (!provider || !model) return fail(req, res, 400, "provider and model are required", "invalid_request");
+        if (typeof body?.disabled !== "boolean") return fail(req, res, 400, "disabled must be true or false", "invalid_request");
+
+        // Only a configured model can be switched; a typo must not create an
+        // entry nobody can see or clear. A model that has since been removed
+        // from the configuration may still be switched back ON.
+        const known = targets.some((target) => target.provider === provider && target.model === model);
+        if (body.disabled && !known) {
+          return fail(req, res, 404, `no configured model "${provider}/${model}"`, "not_found");
+        }
+
+        let changed;
+        try { changed = modelSwitch.set(provider, model, body.disabled); }
+        catch { return fail(req, res, 500, "Could not save the model switch", "server_error"); }
+        resetAutomaticOrderCache();
+        return sendJson(req, res, 200, { ok: true, changed, provider, model, disabled: body.disabled, ...fallbackPayload(now) });
       }
     }
 

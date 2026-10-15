@@ -93,6 +93,8 @@ export function normalizeTarget(row, index = 0) {
     modelListedConfirmed: typeof row?.modelListedConfirmed === "boolean" ? row.modelListedConfirmed : null,
     modelListedConfirmedAt: typeof row?.modelListedConfirmedAt === "string" ? row.modelListedConfirmedAt : null,
     cooldownUntil: count(row?.cooldownUntil),
+    // Switched off in the Control Panel: routing never uses it until switched on.
+    disabled: row?.disabled === true,
     updatedAt: typeof row?.updatedAt === "string" ? row.updatedAt : null,
     // /api/models only. Null rather than 0 on the health projection, so the
     // panel says "not reported" instead of implying a measured zero.

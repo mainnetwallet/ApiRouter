@@ -203,6 +203,24 @@ no restart. It never deletes the saved selection, the providers,
 the API keys, the configured models, valid health measurements or a genuine
 cooldown.
 
+### Disabling a model (Model Switch)
+
+The **Switch** column on the Models page turns one provider/model off or on
+(`PUT /api/models/switch` with `{ "provider", "model", "disabled" }`). It works
+in the automatic order and in Manual Model Selection alike:
+
+- A disabled model is removed before any plan is built, so it is not tried as a
+  selected model, as a health-batch fallback, or as a last resort.
+- A request that is still **waiting for a response** from that model is aborted
+  and falls through to the next model right away.
+- Disabling is not a failure: nothing is put in cooldown and no health figure
+  changes, so enabling the model restores it exactly as it was.
+- A response that has already started streaming to the client is left to finish;
+  it cannot be handed to another model mid-stream.
+- Pinned requests (the Playground testing a specific key) ignore the switch.
+
+State is stored in `DISABLED_MODELS_FILE` (default `data/disabled-models.json`).
+
 ### Sticky sessions
 
 The remembered target is scoped per session, protocol and pool, and lasts

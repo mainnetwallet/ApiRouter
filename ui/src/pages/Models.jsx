@@ -14,7 +14,7 @@ import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { MetricSkeleton, TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
-import { getModels } from "../api/models.js";
+import { getModels, setModelDisabled } from "../api/models.js";
 import {
   filterChoices, filterTargets, findTarget, isRoutable, normalizeModelPayload, summarizeTargets
 } from "../lib/targets.js";
@@ -46,6 +46,8 @@ export default function Models() {
   const [status, setStatus] = useState(null);
   const [sort, setSort] = useState({ key: "provider", direction: "asc" });
   const [selectedId, setSelectedId] = useState(null);
+  const [pendingKey, setPendingKey] = useState(null);
+  const [switchError, setSwitchError] = useState(null);
 
   const debouncedSearch = useDebouncedValue(search, 220);
 
@@ -84,6 +86,23 @@ export default function Models() {
     return { text: build("text"), vision: build("vision") };
   }, [rows]);
 
+  // Applies at once on the gateway: new requests stop planning the model and a
+  // request still waiting on it is aborted and falls back to the next one.
+  const toggleModel = async (row) => {
+    const key = `${row.provider}/${row.model}`;
+    setPendingKey(key);
+    setSwitchError(null);
+    try {
+      await setModelDisabled(row.provider, row.model, !row.disabled);
+      models.reload();
+    } catch (error) {
+      setSwitchError(error);
+    } finally {
+      setPendingKey(null);
+    }
+  };
+  const columns = useMemo(() => makeColumns({ onToggle: toggleModel, pendingKey }), [pendingKey, models.reload]);
+
   if (models.loading && !models.data) {
     return (
       <div className="page">
@@ -110,6 +129,7 @@ export default function Models() {
       />
 
       {models.error ? <ErrorState error={models.error} onRetry={models.reload} compact /> : null}
+      {switchError ? <ErrorState error={switchError} compact /> : null}
 
       {POOL_ORDER.map((pool) => (
         <PoolMetrics key={pool} pool={pool} summary={poolSummaries[pool]} />
@@ -152,7 +172,7 @@ export default function Models() {
         </FilterBar>
 
         <DataTable
-          columns={COLUMNS}
+          columns={columns}
           rows={filtered}
           sort={sort}
           onSortChange={(next) => setSort(next)}
@@ -254,10 +274,12 @@ const COLUMN_ACCESSORS = {
   latency: (row) => row.latencyMs,
   success: (row) => row.successRate,
   failures: (row) => row.failures,
-  updated: (row) => row.updatedAt
+  updated: (row) => row.updatedAt,
+  switch: (row) => (row.disabled ? 1 : 0)
 };
 
-const COLUMNS = [
+function makeColumns({ onToggle, pendingKey }) {
+  return [
   {
     key: "pool",
     header: "Pool",
@@ -343,8 +365,39 @@ const COLUMNS = [
     sortable: true,
     get: (row) => row.updatedAt,
     render: (row) => <span className="dim tiny nowrap">{shortTime(row.updatedAt)}</span>
+  },
+  {
+    key: "switch",
+    header: "Switch",
+    align: "right",
+    sortable: true,
+    get: (row) => (row.disabled ? 1 : 0),
+    render: (row) => (
+      <ModelSwitchButton row={row} busy={pendingKey === `${row.provider}/${row.model}`} onToggle={onToggle} />
+    )
   }
-];
+  ];
+}
+
+/**
+ * On/Off for one provider/model. It is per MODEL, not per key: every key row of
+ * the model changes together. The click must not open the row's drawer.
+ */
+function ModelSwitchButton({ row, busy, onToggle }) {
+  const off = row.disabled === true;
+  return (
+    <button
+      type="button"
+      className={`btn btn--sm ${off ? "" : "btn--ghost"}`}
+      aria-pressed={!off}
+      disabled={busy}
+      title={off ? "Switched off — click to enable this model" : "Click to disable this model (removes it from routing and fallback)"}
+      onClick={(event) => { event.stopPropagation(); onToggle(row); }}
+    >
+      {busy ? "…" : off ? "Off" : "On"}
+    </button>
+  );
+}
 
 function shortTime(value) {
   const date = new Date(value);
