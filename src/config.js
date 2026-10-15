@@ -6,7 +6,7 @@ const DEFAULT_RETRY_STATUS_CODES = [401, 402, 403, 404, 408, 409, 425, 429, 500,
  * `providers/catalog.js`, the `/health` payload, the env-var audit — hangs off
  * this one, so adding a provider cannot half-register it.
  */
-export const PROVIDER_IDS = ["agentrouter", "gemini", "groq", "huggingface", "mistral", "openrouter", "cerebras", "cloudflare", "sambanova", "cohere", "zai", "vercel", "opencode", "nvidia", "nous", "pollinations", "siliconflow", "modelscope", "llm7"];
+export const PROVIDER_IDS = ["agentrouter", "gemini", "groq", "huggingface", "mistral", "openrouter", "cerebras", "cloudflare", "sambanova", "cohere", "zai", "vercel", "opencode", "nvidia", "nous", "pollinations", "siliconflow", "modelscope", "llm7", "unorouter"];
 
 const split = (value) => String(value || "").split(",").map((v) => v.trim()).filter(Boolean);
 
