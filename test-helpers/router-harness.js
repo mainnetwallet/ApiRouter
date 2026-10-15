@@ -28,6 +28,7 @@ export async function startRouter(env = {}) {
       FALLBACK_CHAIN_FILE: path.join(configDir, "fallback-chain.json"),
       MANUAL_SELECTION_FILE: path.join(configDir, "manual-selection.json"),
       GATEWAY_STATE_FILE: path.join(configDir, "gateway-state.json"),
+      DISABLED_MODELS_FILE: path.join(configDir, "disabled-models.json"),
       ...env
     },
     stdio: ["ignore", "pipe", "pipe"]

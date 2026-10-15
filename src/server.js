@@ -27,6 +27,7 @@ import { createSseUsageTap, createJsonUsageTap, tapBytes, tapEvents, usageFrom }
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
+import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
 import {
   FallbackChainStore,
   hasLegacyConfig,
@@ -92,6 +93,20 @@ registerConfiguredSecrets([
 const fallbackChain = new FallbackChainStore({
   file: config.fallbackChainFile,
   migrate: () => readLegacyConfig({ manualFile: config.legacyManualSelectionFile, env: process.env })
+});
+// The Model Switch: models the operator turned OFF from the control panel. It
+// is applied to the candidate targets before any plan is built, so it works in
+// the automatic order and in Manual Model Selection alike.
+const modelSwitch = new ModelSwitchStore({ file: config.disabledModelsFile });
+// Upstream attempts that are still waiting for a response, so switching a model
+// off can abort them and let their request fall back to the next model.
+const pendingAttempts = new Set();
+modelSwitch.onChange(({ provider, model, disabled }) => {
+  resetAutomaticOrderCache();
+  if (!disabled) return;
+  for (const attempt of [...pendingAttempts]) {
+    if (modelSwitchId(attempt.provider, attempt.model) === modelSwitchId(provider, model)) attempt.abortForSwitch();
+  }
 });
 if (fallbackChain.migrated) {
   console.log("fallback chain: migrated the legacy manual selection / priority configuration");
@@ -525,8 +540,15 @@ async function proxy(req, res, protocol, pathname) {
   // order when nothing is selected. Either way the remembered target
   // target is tried first. A pinned request is strict and walks its targets in
   // key order with no selection, no automatic order and no memory.
+  // Models switched off from the control panel never reach the planner, so they
+  // are absent from the selected batch, the health batch and the automatic
+  // order alike. A pinned request is an explicit one-off (the Playground testing
+  // a key) and ignores the switch.
+  const selectable = pinned.pinned
+    ? selection.selected
+    : selection.selected.filter((target) => !modelSwitch.isDisabled(target.provider, target.model));
   const routePlan = buildRoutePlan({
-    targets: selection.selected,
+    targets: selectable,
     chain: fallbackChain.get(pool),
     pinned: pinned.pinned,
     health: pinned.pinned ? null : healthRegistry,
@@ -554,6 +576,16 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 503, { error: { message: noRouteMessage, type: "no_route" } });
   }
 
+  if (selectable.length === 0) {
+    const offMessage = "Every model that could serve this request is switched off in the Control Panel";
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
+      outcome: "failed", errorType: "models_disabled", errorMessage: offMessage, attempts
+    });
+    return json(res, 503, { error: { message: offMessage, type: "models_disabled" } }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
   // A Manual Model Selection is saved for this pool but nothing in it can serve
   // this request. The plan is deliberately empty: reaching for a model the
   // selection does not name, or a key an entry excludes, would be the silent
@@ -562,6 +594,7 @@ async function proxy(req, res, protocol, pathname) {
   if (routePlan.failClosed) {
     const chainMessage = `The saved ${pool} Manual Model Selection has no usable target for this request `
       + `(${routePlan.entries} entr${routePlan.entries === 1 ? "y" : "ies"} saved, none reachable for this protocol). `
+      + (selection.selected.length > selectable.length ? " Some models are switched off in the Control Panel. " : "")
       + "Clear the selection to use the automatic order instead.";
     recordRequest({
       pendingSeq: liveSeq,
@@ -581,7 +614,7 @@ async function proxy(req, res, protocol, pathname) {
 
   try {
     const result = await withFallback(
-      selection.selected,
+      selectable,
       async (target, { phase } = {}) => {
         // Shut down from the UI while this request was already walking its
         // fallback chain: stop before the next upstream attempt. `retryable:
@@ -593,6 +626,23 @@ async function proxy(req, res, protocol, pathname) {
           paused.retryable = false;
           paused.errorType = "gateway_paused";
           throw paused;
+        }
+        // Switched off after this request's plan was built: skip it and fall
+        // through to the next model. `skipCooldown` keeps it out of the health
+        // registry — turning a model off is not a failure, so turning it back
+        // on restores it exactly as it was.
+        if (!pinned.pinned && modelSwitch.isDisabled(target.provider, target.model)) {
+          attempts.push({
+            phase, provider: target.provider, model: target.model, keyIndex: target.keyIndex,
+            protocol: null, ok: false, skipped: true, skipReason: "model_disabled",
+            status: null, startedAt: Date.now(), latencyMs: 0, errorMessage: null
+          });
+          progressRequest(liveSeq, { attempts, inflight: null });
+          const off = new Error("Model is switched off in the Control Panel");
+          off.status = 503;
+          off.skipCooldown = true;
+          off.errorType = "model_disabled";
+          throw off;
         }
         const upstreamProtocol = bridged
           ? upstreamProtocolFor(target)
@@ -619,6 +669,20 @@ async function proxy(req, res, protocol, pathname) {
           ? Math.min(config.timeoutMs, config.connectTimeoutMs)
           : config.timeoutMs;
         const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
+        // While this attempt waits for the upstream response, switching its model
+        // off aborts it so the walk moves on to the next model right away. Once
+        // headers arrive the attempt is done (the `finally` below removes it): a
+        // response that has started streaming to the client cannot be replaced.
+        let switchedOffWhileWaiting = false;
+        const pendingAttempt = {
+          provider: target.provider,
+          model: target.model,
+          abortForSwitch: () => {
+            switchedOffWhileWaiting = true;
+            controller.abort();
+          }
+        };
+        if (!pinned.pinned) pendingAttempts.add(pendingAttempt);
         const attemptStartedAt = Date.now();
         // Every invoke is a new attempt with its own id, even when the very same
         // provider/model/key was called a moment ago (or by an earlier request).
@@ -723,6 +787,14 @@ async function proxy(req, res, protocol, pathname) {
               attempt(false, cancelled.status, cancelled.message);
               throw cancelled;
             }
+            if (switchedOffWhileWaiting) {
+              const off = new Error("Model was switched off in the Control Panel while this request was waiting");
+              off.status = 503;
+              off.skipCooldown = true;
+              off.errorType = "model_disabled";
+              attempt(false, off.status, off.message);
+              throw off;
+            }
             const timeout = toTimeoutError("Upstream request timed out");
             attempt(false, timeout.status, timeout.message);
             throw timeout;
@@ -738,6 +810,7 @@ async function proxy(req, res, protocol, pathname) {
           throw error;
         } finally {
           clearTimeout(timer);
+          pendingAttempts.delete(pendingAttempt);
           req.off("aborted", abortForClient);
           res.off("close", onResponseClose);
         }
@@ -958,6 +1031,7 @@ async function proxy(req, res, protocol, pathname) {
 const handleApi = createApi({
   config,
   fallbackChain,
+  modelSwitch,
   targets,
   health: healthRegistry,
   requestLog,
@@ -1065,7 +1139,8 @@ async function handleRequest(req, res) {
   if (req.method === "GET" && pathname === "/health") {
     // The real route order the Fallback Chain produces, not a health-score sort;
     // cooling targets are excluded exactly as routing skips them.
-    const ranked = routeOrderByPool(targets, {
+    const routable = targets.filter((target) => !modelSwitch.isDisabled(target.provider, target.model));
+    const ranked = routeOrderByPool(routable, {
       chains: fallbackChain.snapshot(),
       health: healthRegistry,
       isEligible: (target) => healthRegistry.isAvailable(target)
@@ -1101,11 +1176,12 @@ async function handleRequest(req, res) {
         // own, because an unusable chain and an unavailable provider look the
         // same there. This says which it is. `failClosed` means every request
         // for that pool will fail until the chain is fixed or cleared.
-        pools: chainStatusByPool(targets, {
+        pools: chainStatusByPool(routable, {
           chains: fallbackChain.snapshot(),
           health: healthRegistry
         })
       },
+      disabledModels: modelSwitch.list(),
       retryableStatus: [...config.retryableStatus]
     });
   }
