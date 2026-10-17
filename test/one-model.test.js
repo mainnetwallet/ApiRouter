@@ -504,3 +504,27 @@ test("withOneModel: a key or model cooling in the health registry is never calle
   );
   assert.deepEqual(used, [], "nothing is called while everything is cooling");
 });
+
+test("withOneModel: a 503 puts the key in cooldown, so the next request does not call it", async () => {
+  const pacer = new KeyPacer();
+  const health = new HealthRegistry();
+  const targets = [
+    { provider: "p", model: "m1", keyIndex: 0, pool: "text" },
+    { provider: "p", model: "m2", keyIndex: 0, pool: "text" }
+  ];
+  const used = [];
+  const invoke = async (target) => {
+    used.push(target.model);
+    if (target.model === "m1") { const e = new Error("unavailable"); e.status = 503; throw e; }
+    return "done";
+  };
+  const run = () => withOneModel(targets, invoke, { pacer, health, models: ["m1", "m2"] });
+
+  assert.equal(await run(), "done");
+  assert.deepEqual(used, ["m1", "m2"], "m1 fails with 503, m2 answers");
+  assert.equal(health.isAvailable(targets[0]), false, "m1's key is now cooling");
+
+  used.length = 0;
+  assert.equal(await run(), "done");
+  assert.deepEqual(used, ["m2"], "m1 is cooling, so it is not called");
+});

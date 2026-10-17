@@ -451,9 +451,11 @@ export async function withOneModel(
       // The request itself is at fault: asking again after a cooldown cannot help.
       if (isRequestFault(status)) attemptsById.set(id, MAX_ATTEMPTS_PER_KEY);
 
-      // Recorded for the dashboards. `cooldownMs: 0` keeps the health registry's
-      // own cooldown out of it: this mode's only cooldown is the pacing above.
-      health?.markFailure(target, status, { cooldownMs: 0 });
+      // Recorded for the dashboards. A 503 (the upstream is unavailable) puts the
+      // key in the health registry's default cooldown, so it is not called again
+      // until that ends. Every other failure uses `cooldownMs: 0`: the only
+      // cooldown is then the pacing above.
+      health?.markFailure(target, status, status === 503 ? {} : { cooldownMs: 0 });
     }
   }
 
