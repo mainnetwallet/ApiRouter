@@ -19,7 +19,7 @@ import {
   refreshAllHealth
 } from "./health.js";
 import { probeTargetHealth, PROBE_TIMEOUT_MS } from "./health-checks.js";
-import { RouteSession, SessionStore, parseRetryAfterMs, withFallback } from "./router.js";
+import { RouteSession, SessionStore, cooldownOptions, parseRetryAfterMs, withFallback } from "./router.js";
 import { clientProtocol, buildUpstreamRequest, readJsonBody, isGeminiStream } from "./adapters.js";
 import { PROVIDERS } from "./providers/catalog.js";
 import { createApi } from "./api.js";
@@ -922,6 +922,7 @@ async function proxy(req, res, protocol, pathname) {
         models: oneModel.models,
         cooldownFor: (target) => oneModelStore.cooldownFor(target),
         health: healthRegistry,
+        failureCooldown: cooldownOptions,
         checkpoint: oneModelCheckpoint,
         maxWaitMs: config.oneModelMaxWaitMs,
         onSkip: (target, { phase, reason }) => {
