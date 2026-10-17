@@ -109,9 +109,10 @@ describe("One Provider Fallback page", () => {
     const markup = render(base);
     expect(markup).toContain("Models in order");
     expect(markup).toContain("Back to model 1");
-    expect(markup).toContain("No cooldown by default");
+    expect(markup).toContain("No pacing cooldown by default");
+    expect(markup).toContain("Failed keys cool down");
     expect(markup).toContain("Cooldown per key");
-    expect(markup).toMatch(/up to 120s/);
+    expect(markup).toContain("keeps going until a key answers");
   });
 
   it("shows one cooldown input per key, naming its model, empty when none is set and in seconds when set", () => {
