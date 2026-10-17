@@ -6,14 +6,14 @@ vi.mock("../../context/ToastContext.jsx", () => ({ useToast: () => ({ success() 
 vi.mock("../../context/ConnectionContext.jsx", () => ({ useConnection: () => ({ generation: 0 }) }));
 
 import { useApi } from "../../hooks/useApi.js";
-import OneModelFallback from "../OneModelFallback.jsx";
+import OneModelFallback, { parseCooldownSeconds } from "../OneModelFallback.jsx";
 
 const candidate = (provider, model, extra = {}) => ({
   provider, model, pools: ["text"], keyCount: 2, disabled: false, selected: false, ...extra
 });
 
 const key = (keyIndex, extra = {}) => ({
-  provider: "groq", model: "m1", pool: "text", keyIndex, ready: true, cooldownUntil: 0,
+  provider: "groq", model: "m1", pool: "text", keyIndex, ready: true, cooldownUntil: 0, cooldownMs: 0,
   status: "healthy", lastStatus: 200, successes: 3, failures: 1, latencyMs: 420, ...extra
 });
 
@@ -24,7 +24,7 @@ function render(data) {
 
 const base = {
   enabled: false, active: false, provider: null, model: null, switchedOff: false,
-  cooldownMs: 60_000, maxWaitMs: 120_000,
+  maxWaitMs: 120_000,
   candidates: [candidate("groq", "m1"), candidate("mistral", "m2", { keyCount: 1 })],
   keys: []
 };
@@ -72,8 +72,47 @@ describe("One Model Fallback page", () => {
     expect(markup).toContain("switched off in the Control Panel");
   });
 
-  it("explains the cooldown rule using the gateway's own number", () => {
-    expect(render({ ...base, cooldownMs: 60_000 })).toContain("1 minute");
-    expect(render({ ...base, cooldownMs: 90_000 })).toContain("90 seconds");
+  it("explains that there is no cooldown or waiting unless one is set per key", () => {
+    const markup = render(base);
+    expect(markup).toContain("No cooldown by default");
+    expect(markup).toContain("Cooldown per key");
+    expect(markup).toMatch(/up to 120s/);
+  });
+
+  const on = (keys) => render({
+    ...base, enabled: true, active: true, provider: "groq", model: "m1",
+    candidates: [candidate("groq", "m1", { selected: true }), candidate("mistral", "m2")], keys
+  });
+
+  it("shows one cooldown input per key, empty when none is set and in seconds when set", () => {
+    const markup = on([key(0), key(1, { cooldownMs: 60_000 })]);
+    expect(markup).toContain('aria-label="Cooldown in seconds for key 0 (empty for none)"');
+    expect(markup).toContain('aria-label="Cooldown in seconds for key 1 (empty for none)"');
+    expect(markup).toContain('placeholder="none"');
+    expect(markup).toMatch(/value="60"/);
+    expect(markup).toContain("Apply to all");
+  });
+
+  it("offers no cooldown editing before the mode has a model to edit", () => {
+    const markup = render(base);
+    expect(markup).not.toContain("Apply to all");
+    expect(markup).not.toContain("Cooldown in seconds for key");
+  });
+});
+
+describe("parseCooldownSeconds", () => {
+  it("maps empty and zero to no cooldown, whole seconds to milliseconds", () => {
+    expect(parseCooldownSeconds("")).toBeNull();
+    expect(parseCooldownSeconds("   ")).toBeNull();
+    expect(parseCooldownSeconds("0")).toBeNull();
+    expect(parseCooldownSeconds("60")).toBe(60_000);
+    expect(parseCooldownSeconds(" 5 ")).toBe(5_000);
+    expect(parseCooldownSeconds("86400")).toBe(86_400_000);
+  });
+
+  it("rejects anything that is not a whole number of seconds up to a day", () => {
+    for (const bad of ["abc", "-5", "1.5", "1e3", "86401", "6 0"]) {
+      expect(parseCooldownSeconds(bad)).toBeUndefined();
+    }
   });
 });

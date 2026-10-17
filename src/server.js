@@ -28,7 +28,7 @@ import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
 import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
-import { OneModelStore, KeyPacer, withOneModel } from "./one-model.js";
+import { OneModelStore, KeyPacer, withOneModel, oneModelKeyId } from "./one-model.js";
 import {
   FallbackChainStore,
   hasLegacyConfig,
@@ -100,15 +100,22 @@ const fallbackChain = new FallbackChainStore({
 // the automatic order and in Manual Model Selection alike.
 const modelSwitch = new ModelSwitchStore({ file: config.disabledModelsFile });
 // One Model Fallback: when on, every request is served from ONE chosen model
-// (all of its keys, nothing else). Each key cools for a fixed time the moment it
-// is called; see one-model.js.
+// (all of its keys, nothing else). A key the operator gave a cooldown cools for
+// that long the moment it is called; see one-model.js.
 const oneModelStore = new OneModelStore({ file: config.oneModelFile });
-const keyPacer = new KeyPacer({ cooldownMs: config.oneModelCooldownMs });
-oneModelStore.onChange(() => {
-  // A different model (or mode) starts from a clean slate, and the remembered
-  // automatic order no longer describes what is routed.
-  keyPacer.clear();
+const keyPacer = new KeyPacer();
+oneModelStore.onChange(({ scope, changedKeys }) => {
   resetAutomaticOrderCache();
+  if (scope === "selection") {
+    // A different model (or mode) starts from a clean slate.
+    keyPacer.clear();
+    return;
+  }
+  // Only a key's cooldown was edited: that key is ready again at once, so a
+  // shorter (or removed) cooldown takes effect immediately.
+  for (const target of targets) {
+    if (oneModelStore.matches(target) && changedKeys.includes(oneModelKeyId(target))) keyPacer.release(target);
+  }
 });
 // Upstream attempts that are still waiting for a response, so switching a model
 // off can abort them and let their request fall back to the next model.
@@ -897,6 +904,7 @@ async function proxy(req, res, protocol, pathname) {
     const result = oneModel
       ? await withOneModel(oneModelTargets, invokeTarget, {
         pacer: keyPacer,
+        cooldownFor: (target) => oneModelStore.cooldownFor(target),
         health: healthRegistry,
         checkpoint: oneModelCheckpoint,
         maxWaitMs: config.oneModelMaxWaitMs,

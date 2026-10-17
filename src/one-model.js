@@ -9,15 +9,15 @@ import { targetId } from "./health.js";
  * operator picked and from nothing else: no other provider and no other model is
  * ever used as a fallback. Within that model the keys are used like this:
  *
- *   - A key is used for a call and goes into a cooldown (default 1 minute) THE
- *     MOMENT the call is made, whether the call then succeeds or fails. It is
- *     called again once that minute is over. Calls therefore rotate across the
- *     model's keys, each key at most once per cooldown.
- *   - A key that is not cooling is used next, in key order. If its call fails,
- *     the next key that is not cooling is tried, and so on until every key has
- *     been tried once for this request.
- *   - When every key that is left is cooling, the request waits for the first one
- *     to become ready (up to a bound) instead of failing at once.
+ *   - By default a key has NO cooldown and nothing ever waits. A key that
+ *     succeeded is the first one tried for the next request; if its call fails,
+ *     the next key is tried, and so on until every key has been tried once for
+ *     this request.
+ *   - The operator can set a cooldown on a key. Then, the moment a call is made
+ *     with that key, it goes into that cooldown (success or failure) and is
+ *     called again once it is over. A key with no cooldown set is never paced.
+ *   - Only when every key that is left is cooling does a request wait, for the
+ *     first one to become ready (up to a bound), instead of failing at once.
  *
  * The cooldown lives in `KeyPacer`, not in the health registry, on purpose. The
  * health registry's cooldown is cleared by a success and is read by the normal
@@ -25,11 +25,18 @@ import { targetId } from "./health.js";
  * applies, so switching the mode off leaves no key stuck in a cooldown that the
  * normal modes would honour.
  *
- * The file holds ids and a flag only, never credentials.
+ * The file holds ids, a flag and per-key cooldown numbers, never credentials.
  */
 
-export const ONE_MODEL_DEFAULT_COOLDOWN_MS = 60 * 1000;
 export const ONE_MODEL_DEFAULT_MAX_WAIT_MS = 120 * 1000;
+// A cooldown is a pacing rule, not a ban: a day is the most it can be set to.
+export const ONE_MODEL_MAX_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+/** A key's id inside the chosen model: its pool and key index. */
+export const oneModelKeyId = (target) => `${target?.pool ?? "text"}:${target?.keyIndex}`;
+const KEY_ID_PATTERN = /^(text|vision):\d{1,4}$/;
+const validCooldown = (value) =>
+  Number.isSafeInteger(value) && value >= 1 && value <= ONE_MODEL_MAX_COOLDOWN_MS;
 
 // Waiting is done in short slices so a client that goes away, a paused gateway or
 // a model that was switched off is noticed within a second.
@@ -45,6 +52,8 @@ export class OneModelStore {
     this.enabled = false;
     this.provider = "";
     this.model = "";
+    // "pool:keyIndex" -> cooldown ms. A key with no entry has no cooldown.
+    this.cooldowns = new Map();
     this.listeners = new Set();
     this.load();
   }
@@ -59,6 +68,9 @@ export class OneModelStore {
         this.provider = provider;
         this.model = model;
         this.enabled = parsed?.enabled === true;
+        for (const [id, ms] of Object.entries(parsed?.cooldowns ?? {})) {
+          if (KEY_ID_PATTERN.test(id) && validCooldown(ms)) this.cooldowns.set(id, ms);
+        }
       }
     } catch (error) {
       // A missing file is the normal first run; a corrupt one must not stop the
@@ -69,6 +81,16 @@ export class OneModelStore {
 
   get() {
     return { enabled: this.enabled, provider: this.provider, model: this.model };
+  }
+
+  /** Cooldown the operator set on this key, in ms; 0 means none. */
+  cooldownFor(target) {
+    return this.cooldowns.get(oneModelKeyId(target)) ?? 0;
+  }
+
+  /** Every key cooldown that is set, as { "pool:keyIndex": ms }. */
+  getCooldowns() {
+    return Object.fromEntries(this.cooldowns);
   }
 
   /** The selection while the mode is ON and a model is chosen, otherwise null. */
@@ -85,18 +107,25 @@ export class OneModelStore {
       && target.model === this.model;
   }
 
-  /** Called with the new { enabled, provider, model } after every real change. */
+  /**
+   * Called after every real change with { enabled, provider, model, scope,
+   * changedKeys }. `scope` is "selection" when the mode or the model changed, and
+   * "cooldowns" when only key cooldowns did (`changedKeys` lists those keys).
+   */
   onChange(listener) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
   /**
-   * Updates the selection and/or the on/off flag and persists it. Memory only
-   * changes once the write has landed, so a failed save leaves the running state
-   * as it was. Returns false when nothing changed.
+   * Updates the selection, the on/off flag and/or key cooldowns, and persists it.
+   * `cooldowns` is a partial { "pool:keyIndex": ms | null }: a number sets that
+   * key's cooldown, null (or 0) removes it, a key left out is untouched. Choosing
+   * a different model clears every cooldown, because they described other keys.
+   * Memory only changes once the write has landed, so a failed save leaves the
+   * running state as it was. Returns false when nothing changed.
    */
-  set({ enabled = this.enabled, provider = this.provider, model = this.model } = {}) {
+  set({ enabled = this.enabled, provider = this.provider, model = this.model, cooldowns = {} } = {}) {
     const next = {
       enabled: Boolean(enabled),
       provider: normProvider(provider),
@@ -104,37 +133,53 @@ export class OneModelStore {
     };
     if (next.provider.length > 100 || next.model.length > 300) throw new Error("provider or model is too long");
     if (next.enabled && (!next.provider || !next.model)) throw new Error("choose a provider and a model first");
-    if (next.enabled === this.enabled && next.provider === this.provider && next.model === this.model) return false;
 
-    this.persist(next);
+    const modelChanged = next.provider !== this.provider || next.model !== this.model;
+    const nextCooldowns = new Map(modelChanged ? [] : this.cooldowns);
+    for (const [id, ms] of Object.entries(cooldowns ?? {})) {
+      if (!KEY_ID_PATTERN.test(id)) throw new Error(`invalid key id "${String(id).slice(0, 20)}"`);
+      if (ms === null || ms === 0) nextCooldowns.delete(id);
+      else if (validCooldown(ms)) nextCooldowns.set(id, ms);
+      else throw new Error("a cooldown must be a whole number of milliseconds from 1 to 86400000");
+    }
+
+    const changedKeys = [...new Set([...this.cooldowns.keys(), ...nextCooldowns.keys()])]
+      .filter((id) => this.cooldowns.get(id) !== nextCooldowns.get(id));
+    const selectionChanged = next.enabled !== this.enabled || modelChanged;
+    if (!selectionChanged && changedKeys.length === 0) return false;
+
+    this.persist(next, nextCooldowns);
     this.enabled = next.enabled;
     this.provider = next.provider;
     this.model = next.model;
+    this.cooldowns = nextCooldowns;
 
+    const event = { ...this.get(), scope: selectionChanged ? "selection" : "cooldowns", changedKeys };
     for (const listener of this.listeners) {
-      try { listener(this.get()); }
+      try { listener(event); }
       catch (error) { console.warn(`one model: listener failed (${error?.message || error})`); }
     }
     return true;
   }
 
-  persist(state = this.get()) {
+  persist(state = this.get(), cooldowns = this.cooldowns) {
     if (!this.file) return;
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, ...state }, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify({ version: 1, ...state, cooldowns: Object.fromEntries(cooldowns) }, null, 2));
     fs.renameSync(tmp, this.file);
   }
 }
 
 /**
- * The per-key pacing cooldown. In memory only: after a restart every key is
- * ready, which is the safe direction (the upstream's own limits still apply).
+ * The per-key pacing cooldown, plus which key last answered. In memory only:
+ * after a restart every key is ready and the first key leads, which is the safe
+ * direction (the upstream's own limits still apply).
  */
 export class KeyPacer {
-  constructor({ cooldownMs = ONE_MODEL_DEFAULT_COOLDOWN_MS } = {}) {
-    this.cooldownMs = cooldownMs;
+  constructor() {
     this.readyAtById = new Map();
+    this.goodKeyIndexByPool = new Map();
   }
 
   readyAt(target) {
@@ -145,23 +190,36 @@ export class KeyPacer {
     return this.readyAt(target) <= now;
   }
 
-  /** Called the moment a call is made: the key cools for `cooldownMs` from now. */
-  claim(target, now = Date.now()) {
-    this.readyAtById.set(targetId(target), now + this.cooldownMs);
+  /**
+   * Called the moment a call is made with a key that has a cooldown set: it cools
+   * for `cooldownMs` from now. A key with no cooldown is never claimed.
+   */
+  claim(target, now = Date.now(), cooldownMs = 0) {
+    if (cooldownMs > 0) this.readyAtById.set(targetId(target), now + cooldownMs);
   }
 
   /**
    * Gives a claim back. Used when the call was never really made against the key
-   * (the model was switched off, the target refused the request itself): that is
-   * not a use of the key, so it must not cost it a minute.
+   * (the model was switched off, the target refused the request itself), or when
+   * the operator changed that key's cooldown: it is ready again at once.
    */
   release(target) {
     this.readyAtById.delete(targetId(target));
   }
 
-  /** Forgets every cooldown (used when the selected model changes). */
+  /** The key that answered last in this pool leads the next request. */
+  markGood(target) {
+    this.goodKeyIndexByPool.set(target.pool ?? "text", target.keyIndex);
+  }
+
+  preferredKeyIndex(pool = "text") {
+    return this.goodKeyIndexByPool.get(pool);
+  }
+
+  /** Forgets every cooldown and the preferred key (used when the model changes). */
   clear() {
     this.readyAtById.clear();
+    this.goodKeyIndexByPool.clear();
   }
 
   /** Reporting view: when the key is next ready, as an epoch ms (0 = ready now). */
@@ -199,13 +257,14 @@ export async function withOneModel(
   invoke,
   {
     pacer,
+    cooldownFor = () => 0,
     health = null,
     checkpoint = () => {},
     maxWaitMs = ONE_MODEL_DEFAULT_MAX_WAIT_MS,
     onSkip = null
   } = {}
 ) {
-  const ordered = [...(Array.isArray(targets) ? targets : [])]
+  let ordered = [...(Array.isArray(targets) ? targets : [])]
     .sort((a, b) => (a.keyIndex ?? 0) - (b.keyIndex ?? 0));
 
   if (ordered.length === 0) {
@@ -213,6 +272,13 @@ export async function withOneModel(
     err.status = 503;
     throw err;
   }
+
+  // The key that answered last leads, then the rest in key order. With no
+  // cooldowns set this keeps calling the key that works instead of re-trying one
+  // that just failed.
+  const preferredIndex = pacer.preferredKeyIndex?.(ordered[0]?.pool ?? "text");
+  const preferredAt = ordered.findIndex((target) => target.keyIndex === preferredIndex);
+  if (preferredAt > 0) ordered = [...ordered.slice(preferredAt), ...ordered.slice(0, preferredAt)];
 
   const tried = new Set();
   const failures = [];
@@ -249,13 +315,14 @@ export async function withOneModel(
 
     const id = targetId(target);
     tried.add(id);
-    // Cooldown starts the moment the call is made, success or not.
-    pacer.claim(target, now);
+    // A key with a cooldown set cools the moment the call is made, success or not.
+    pacer.claim(target, now, cooldownFor(target));
     const startedAt = Date.now();
 
     try {
       const result = await invoke(target, { phase: null });
       health?.markSuccess(target, { latencyMs: Date.now() - startedAt });
+      pacer.markGood?.(target);
       return result;
     } catch (error) {
       const status = Number(error?.status || 0);

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { getOneModel, setOneModel } from "../api/oneModel.js";
+import { getOneModel, setOneModel, keyIdOf } from "../api/oneModel.js";
 import { useApi } from "../hooks/useApi.js";
 import { useConnection } from "../context/ConnectionContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
@@ -21,17 +21,73 @@ import { formatCountdown, formatNumber, providerLabel, EMPTY } from "../lib/form
  * provider or model is ever used as a fallback. Within that model the keys work
  * like this:
  *
- *   - a key goes into a cooldown (1 minute) the moment a call is made with it,
- *     whether the call succeeds or fails, and is called again after that minute
- *   - a key that is not cooling is used next; if its call fails the next key
- *     that is not cooling is tried
- *   - when every key is cooling the request waits for the first one to be ready
+ *   - by default a key has no cooldown and nothing waits: the key that answered
+ *     is called again for the next request, and if a call fails the next key is
+ *     tried
+ *   - a cooldown can be set per key: that key then cools for that long the
+ *     moment a call is made with it, whether the call succeeds or fails
+ *   - only when every key that is left is cooling does a request wait
  *
  * The switch applies at once on the gateway and changes no saved chain, model
  * switch or health data, so turning it off restores the previous routing.
  */
 
 const idOf = (provider, model) => `${provider}/${model}`;
+
+const secondsOf = (ms) => (ms > 0 ? String(Math.round(ms / 1000)) : "");
+
+/** "" -> null (no cooldown); a whole number of seconds -> ms; anything else -> undefined (invalid). */
+export function parseCooldownSeconds(text) {
+  const trimmed = String(text ?? "").trim();
+  if (trimmed === "") return null;
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const seconds = Number(trimmed);
+  if (seconds === 0) return null;
+  return seconds <= 86_400 ? seconds * 1000 : undefined;
+}
+
+/**
+ * One key's cooldown, in seconds. Empty means "no cooldown": the key is never
+ * paced. Saved when the field loses focus or Enter is pressed.
+ */
+function CooldownInput({ keyRow, disabled, onCommit }) {
+  const saved = secondsOf(keyRow.cooldownMs);
+  const [text, setText] = useState(saved);
+  const [editing, setEditing] = useState(false);
+  const invalid = parseCooldownSeconds(text) === undefined;
+
+  // Follow the gateway's value, but never while the operator is typing.
+  useEffect(() => { if (!editing) setText(saved); }, [saved, editing]);
+
+  const commit = () => {
+    setEditing(false);
+    const ms = parseCooldownSeconds(text);
+    if (ms === undefined) { setText(saved); return; }
+    if ((ms ?? 0) !== keyRow.cooldownMs) onCommit(keyRow, ms);
+  };
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "var(--sp-1)", justifyContent: "flex-end" }}>
+      <input
+        type="text"
+        inputMode="numeric"
+        className="input mono"
+        style={{ width: 84, textAlign: "right" }}
+        placeholder="none"
+        value={text}
+        disabled={disabled}
+        aria-label={`Cooldown in seconds for key ${keyRow.keyIndex} (empty for none)`}
+        aria-invalid={invalid || undefined}
+        title="Seconds this key cools after each call. Empty = no cooldown. 60 = 1 minute."
+        onFocus={() => setEditing(true)}
+        onChange={(event) => setText(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+      />
+      <span className="tiny dim">s</span>
+    </span>
+  );
+}
 
 export default function OneModelFallback() {
   const { generation } = useConnection();
@@ -45,6 +101,7 @@ export default function OneModelFallback() {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState(null);
   const [sort, setSort] = useState({ key: "key", direction: "asc" });
+  const [allText, setAllText] = useState("");
 
   // One tick a second so every cooldown counts down between polls.
   const [now, setNow] = useState(() => Date.now());
@@ -85,10 +142,24 @@ export default function OneModelFallback() {
   );
   const turnOff = () => apply({ enabled: false }, "One Model Fallback is off — normal fallback restored");
 
-  const cooldownLabel = useMemo(() => {
-    const seconds = Math.round((data?.cooldownMs ?? 60_000) / 1000);
-    return seconds % 60 === 0 ? `${seconds / 60} minute${seconds === 60 ? "" : "s"}` : `${seconds} seconds`;
-  }, [data?.cooldownMs]);
+  // Cooldowns belong to the keys of the model the gateway is using, so they can
+  // only be edited for the saved model, not for one that is merely picked.
+  const keys = data?.keys ?? [];
+  const canEditKeys = chosenId === savedId && savedId !== "" && keys.length > 0;
+
+  const setKeyCooldown = (keyRow, ms) => apply(
+    { cooldowns: { [keyIdOf(keyRow)]: ms } },
+    ms === null ? `Key #${keyRow.keyIndex}: no cooldown` : `Key #${keyRow.keyIndex}: ${Math.round(ms / 1000)}s cooldown`
+  );
+
+  const allMs = parseCooldownSeconds(allText);
+  const applyToAll = () => {
+    if (allMs === undefined) return;
+    apply(
+      { cooldowns: Object.fromEntries(keys.map((keyRow) => [keyIdOf(keyRow), allMs])) },
+      allMs === null ? "No cooldown on any key" : `Every key: ${Math.round(allMs / 1000)}s cooldown`
+    );
+  };
 
   const columns = useMemo(() => [
     {
@@ -102,7 +173,7 @@ export default function OneModelFallback() {
       render: (row) => <span className="mono">#{row.keyIndex}</span>
     },
     {
-      key: "state", header: "Cooldown", sortable: true,
+      key: "state", header: "State", sortable: true,
       get: (row) => (row.cooldownUntil > now ? row.cooldownUntil : 0),
       render: (row) => {
         const left = row.cooldownUntil > now ? formatCountdown(row.cooldownUntil, now) : null;
@@ -110,6 +181,13 @@ export default function OneModelFallback() {
           ? <StatusBadge tone="warn" title="Called less than a cooldown ago; ready again after the countdown">cooling · {left}</StatusBadge>
           : <StatusBadge tone="ok">ready</StatusBadge>;
       }
+    },
+    {
+      key: "cooldown", header: "Cooldown per call", sortable: true, align: "right",
+      get: (row) => row.cooldownMs,
+      render: (row) => (
+        <CooldownInput keyRow={row} disabled={busy || !canEditKeys} onCommit={setKeyCooldown} />
+      )
     },
     {
       key: "health", header: "Health", sortable: true,
@@ -138,7 +216,7 @@ export default function OneModelFallback() {
       get: (row) => row.latencyMs,
       render: (row) => <LatencyBadge ms={row.latencyMs} />
     }
-  ], [now]);
+  ], [now, busy, canEditKeys]);
 
   if (state.loading && !data) {
     return (
@@ -148,8 +226,6 @@ export default function OneModelFallback() {
       </div>
     );
   }
-
-  const keys = data?.keys ?? [];
 
   return (
     <div className="page">
@@ -231,9 +307,9 @@ export default function OneModelFallback() {
           <div className="panel__body">
             <ul className="tiny" style={{ margin: 0, paddingLeft: "var(--sp-4)", display: "grid", gap: "var(--sp-1)" }}>
               <li>Only the chosen model is called. No other provider or model is ever tried, even when it fails.</li>
-              <li>A key goes into a <strong>{cooldownLabel}</strong> cooldown the moment a call is made with it — success or failure — and is called again after that.</li>
-              <li>A key that is not cooling is used next. If its call fails, the next key that is not cooling is tried.</li>
-              <li>If every key is cooling, the request waits for the first one to be ready (up to {Math.round((data?.maxWaitMs ?? 120_000) / 1000)}s), then fails with a 503 that says when a key is ready.</li>
+              <li><strong>No cooldown by default:</strong> nothing waits. The key that answered is called again for the next request, and if a call fails the next key is tried.</li>
+              <li><strong>Cooldown per key (optional):</strong> set seconds on a key below and, the moment one call is made with it, that key cools for that long — success or failure — then is called again. Keys with no cooldown are never paced.</li>
+              <li>Only if every key that is left is cooling does a request wait for the first one to be ready (up to {Math.round((data?.maxWaitMs ?? 120_000) / 1000)}s), then it fails with a 503 that says when a key is ready.</li>
               <li>An image request needs this model to have a key in the vision pool; otherwise it fails instead of falling back to another model.</li>
             </ul>
           </div>
@@ -247,6 +323,29 @@ export default function OneModelFallback() {
             {chosen ? `${providerLabel(chosen.provider)} / ${chosen.model}` : "Choose a model to see its keys"}
           </span>
         </div>
+        {canEditKeys ? (
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", flexWrap: "wrap", marginBottom: "var(--sp-2)" }}>
+            <span className="tiny dim">Same cooldown for every key:</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              className="input mono"
+              style={{ width: 84, textAlign: "right" }}
+              placeholder="none"
+              value={allText}
+              disabled={busy}
+              aria-label="Cooldown in seconds for every key (empty for none)"
+              aria-invalid={allMs === undefined || undefined}
+              onChange={(event) => setAllText(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") applyToAll(); }}
+            />
+            <span className="tiny dim">s</span>
+            <button type="button" className="btn btn--sm" onClick={applyToAll} disabled={busy || allMs === undefined}>
+              Apply to all
+            </button>
+            <span className="tiny dim">60 = 1 minute · empty = no cooldown</span>
+          </div>
+        ) : null}
         <div className="panel">
           <DataTable
             columns={columns}

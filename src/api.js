@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
+import { ONE_MODEL_MAX_COOLDOWN_MS } from "./one-model.js";
 import { modelLatency, resetAutomaticOrderCache, routeOrderByPool } from "./fallback-plan.js";
 import {
   FALLBACK_MODE_INFO,
@@ -376,6 +377,8 @@ export function createApi({
           model: target.model,
           pool: target.pool ?? "text",
           keyIndex: target.keyIndex,
+          // The cooldown the operator set on this key, in ms (0 = none).
+          cooldownMs: oneModel.cooldownFor(target),
           ready: pacing.ready,
           cooldownUntil: pacing.cooldownUntil,
           status: entry?.status ?? "unknown",
@@ -393,7 +396,6 @@ export function createApi({
       model: state.model || null,
       // True when requests are really being routed this way right now.
       active: Boolean(oneModel.active()),
-      cooldownMs: keyPacer?.cooldownMs ?? null,
       maxWaitMs: config.oneModelMaxWaitMs ?? null,
       switchedOff: Boolean(state.model) && Boolean(modelSwitch?.isDisabled?.(state.provider, state.model)),
       candidates,
@@ -980,6 +982,26 @@ export function createApi({
           return fail(req, res, 400, "provider and model must be strings", "invalid_request");
         }
 
+        // Per-key cooldowns: { "text:0": 60000, "text:1": null }. A number sets a
+        // key's cooldown in ms, null (or 0) removes it, a key left out is kept.
+        let cooldowns = {};
+        if (body?.cooldowns !== undefined) {
+          if (body.cooldowns === null || typeof body.cooldowns !== "object" || Array.isArray(body.cooldowns)) {
+            return fail(req, res, 400, "cooldowns must be an object of \"pool:keyIndex\" to milliseconds", "invalid_request");
+          }
+          for (const [id, ms] of Object.entries(body.cooldowns)) {
+            if (!/^(text|vision):\d{1,4}$/.test(id)) {
+              return fail(req, res, 400, `invalid key id "${id.slice(0, 20)}": use "text:0" or "vision:0"`, "invalid_request");
+            }
+            const ok = ms === null || ms === 0
+              || (Number.isSafeInteger(ms) && ms >= 1 && ms <= ONE_MODEL_MAX_COOLDOWN_MS);
+            if (!ok) {
+              return fail(req, res, 400, "a cooldown must be a whole number of milliseconds from 1 to 86400000, or null for none", "invalid_request");
+            }
+          }
+          cooldowns = body.cooldowns;
+        }
+
         const current = oneModel.get();
         const next = {
           enabled: body?.enabled ?? current.enabled,
@@ -997,8 +1019,18 @@ export function createApi({
           return fail(req, res, 404, `no configured model "${next.provider}/${next.model}"`, "not_found");
         }
 
+        // Cooldowns are for the chosen model's keys; one for a key it does not
+        // have would sit in the file doing nothing and nobody could see it.
+        if (Object.keys(cooldowns).length > 0) {
+          const keyIds = new Set(targets
+            .filter((target) => target.provider === next.provider && target.model === next.model)
+            .map((target) => `${target.pool ?? "text"}:${target.keyIndex}`));
+          const unknownKey = Object.entries(cooldowns).find(([id, ms]) => ms !== null && ms !== 0 && !keyIds.has(id));
+          if (unknownKey) return fail(req, res, 404, `the chosen model has no key "${unknownKey[0]}"`, "not_found");
+        }
+
         let changed;
-        try { changed = oneModel.set(next); }
+        try { changed = oneModel.set({ ...next, cooldowns }); }
         catch { return fail(req, res, 500, "Could not save the One Model Fallback setting", "server_error"); }
         resetAutomaticOrderCache();
         return sendJson(req, res, 200, { ok: true, changed, ...oneModelPayload(Date.now()) });
