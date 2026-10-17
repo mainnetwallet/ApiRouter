@@ -22,8 +22,9 @@ import { targetId } from "./health.js";
  *     with that key, it goes into that cooldown (success or failure) and is
  *     called again once it is over. A key with no cooldown set is never paced.
  *   - When every key of every model has failed or is cooling, the request waits
- *     for the first cooldown to end (up to a bound) and tries again, instead of
- *     failing at once. A key without a cooldown is tried once per request.
+ *     for the first cooldown to end and tries again, and keeps doing so with no
+ *     limit until a key answers, the client goes away, or the mode is changed.
+ *     Only a request-level 4xx (the request itself is bad) is not retried.
  *
  * Two cooldowns apply. The operator's per-key pacing cooldown lives in `KeyPacer`
  * (it is this mode's own rule and is dropped when the mode is switched off). On
@@ -36,12 +37,9 @@ import { targetId } from "./health.js";
  * never credentials.
  */
 
-export const ONE_MODEL_DEFAULT_MAX_WAIT_MS = 120 * 1000;
 // A cooldown is a pacing rule, not a ban: a day is the most it can be set to.
 export const ONE_MODEL_MAX_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 export const ONE_PROVIDER_MAX_MODELS = 50;
-// A key may be called again after its cooldown within one request, once.
-const MAX_ATTEMPTS_PER_KEY = 2;
 
 /** A key's id inside the chosen provider: its model, pool and key index. */
 export const oneModelKeyId = (target) => `${target?.model}::${target?.pool ?? "text"}:${target?.keyIndex}`;
@@ -336,7 +334,6 @@ export async function withOneModel(
     cooldownFor = () => 0,
     health = null,
     checkpoint = () => {},
-    maxWaitMs = ONE_MODEL_DEFAULT_MAX_WAIT_MS,
     onSkip = null,
     // (status, error) -> markFailure options. The default is the health
     // registry's own cooldown, so every failed key is parked.
@@ -379,19 +376,16 @@ export async function withOneModel(
     Number(health?.get?.(targetId(target))?.cooldownUntil) || 0
   );
 
-  const attemptsById = new Map();
+  // Keys that must not be called again for this request: the request itself is
+  // at fault (asking again cannot help), or the target refused it for its own
+  // reasons. Every other failed key is only cooling and is called again once it
+  // is ready.
+  const blocked = new Set();
   const failures = [];
   const skipped = [];
-  const waitDeadline = Date.now() + maxWaitMs;
   let reportedWait = false;
 
-  // A key is tried once per request. One that has a cooldown set may be tried a
-  // second time, after the cooldown, so that a request that finds every key of
-  // every model failed or cooling waits for the first one to come back.
-  const canTry = (target) => {
-    const used = attemptsById.get(targetId(target)) ?? 0;
-    return used === 0 || (used < MAX_ATTEMPTS_PER_KEY && cooldownFor(target) > 0);
-  };
+  const canTry = (target) => !blocked.has(targetId(target));
 
   for (;;) {
     checkpoint();
@@ -401,22 +395,10 @@ export async function withOneModel(
     const target = remaining.find((candidate) => readyAtOf(candidate) <= now);
 
     if (!target) {
-      // Every key that is left is cooling: wait for the first to be ready.
+      // Every key that is left is cooling: wait for the first one to be ready and
+      // go on. The loop only ends with an answer, a request-level error, or when
+      // the client goes away / the mode is changed (checkpoint throws).
       const readyAt = Math.min(...remaining.map((candidate) => readyAtOf(candidate)));
-      if (readyAt > waitDeadline) {
-        const untried = remaining.some((candidate) => !attemptsById.has(targetId(candidate)));
-        // Only keys that already failed are left and they will not be ready in
-        // time: the failure is the answer, not "cooling down".
-        if (!untried && failures.length > 0) break;
-        const err = new Error(
-          `Every key of every model is cooling down; the next one is ready in ${Math.max(1, Math.ceil((readyAt - now) / 1000))}s`
-        );
-        err.status = 503;
-        err.errorType = "one_model_cooldown";
-        err.retryAfterMs = readyAt - now;
-        err.failures = failures;
-        throw err;
-      }
       if (!reportedWait) {
         reportedWait = true;
         if (typeof onSkip === "function") onSkip(remaining[0], { phase: null, reason: "cooldown" });
@@ -426,7 +408,6 @@ export async function withOneModel(
     }
 
     const id = targetId(target);
-    attemptsById.set(id, (attemptsById.get(id) ?? 0) + 1);
     // A key with a cooldown set cools the moment the call is made, success or not.
     pacer.claim(target, now, cooldownFor(target));
     const startedAt = Date.now();
@@ -447,19 +428,22 @@ export async function withOneModel(
       // not a use of the key, so it costs no cooldown, and it is not a failure.
       if (error?.skipCooldown) {
         pacer.release(target);
-        attemptsById.set(id, MAX_ATTEMPTS_PER_KEY);
+        blocked.add(id);
         skipped.push(error);
         continue;
       }
 
       // The request itself is at fault: asking again after a cooldown cannot help.
-      if (isRequestFault(status)) attemptsById.set(id, MAX_ATTEMPTS_PER_KEY);
+      if (isRequestFault(status)) blocked.add(id);
 
       // Every failed key goes into the health registry's cooldown (the same
       // status rules as the normal walk), so it is not called again until that
       // ends: the next request passes it over and uses the next key or model.
       const { quotaKind, ...cooldown } = failureCooldown(status, error) ?? {};
       health?.markFailure(target, status, cooldown);
+      // With nothing to cool the key (no health registry, no pacing cooldown) it
+      // would be called again at once: it counts as used for this request.
+      if (!health && cooldownFor(target) <= 0) blocked.add(id);
     }
   }
 

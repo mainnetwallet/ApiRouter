@@ -183,7 +183,6 @@ export function loadConfig(env = process.env) {
     // cooldowns the operator set (numbers and ids only), plus how long a request
     // may wait when every key it has left is cooling.
     oneModelFile: String(env.ONE_MODEL_FILE || "").trim() || "data/one-model.json",
-    oneModelMaxWaitMs: readNumber(env, "ONE_MODEL_MAX_WAIT_MS", 120 * 1000, { min: 0, expected: "a non-negative integer" }),
     // Legacy, read ONCE to seed the chain above when no chain has been saved
     // yet. Never consulted again afterwards: the old systems cannot override
     // the configured chain.

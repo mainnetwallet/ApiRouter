@@ -15,6 +15,17 @@ const ok = (model) => ({
 });
 const down = { status: 500, body: { error: "down" } };
 const chat = (router) => router.request("/v1/chat/completions", postJson({ model: "anything", messages: [{ role: "user", content: "hello" }] }));
+// A request that is left waiting (every key cooling) never ends by itself: the client gives up after `ms`.
+const chatFor = async (router, ms) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await router.request("/v1/chat/completions", { ...postJson({ model: "anything", messages: [{ role: "user", content: "hello" }] }), signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") return { status: "waiting", aborted: true };
+    throw error;
+  } finally { clearTimeout(timer); }
+};
 const posts = (mock) => mock.requests.filter((record) => record.method === "POST");
 const put = (router, route, body) => router.request(route, {
   method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
@@ -23,7 +34,7 @@ const setOneModel = (router, body) => put(router, "/api/one-model", body);
 const authOf = (record) => String(record.headers?.authorization ?? "");
 
 // groq has two keys (g0, g1); mistral has one. No key has a cooldown unless a test sets one.
-async function start({ groqScript, mistralScript, maxWaitMs = 5000, groqModels = "m1" } = {}) {
+async function start({ groqScript, mistralScript, groqModels = "m1" } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "one-model-"));
   const groq = await startMockUpstream(groqScript ?? (() => ok("m1")));
   const mistral = await startMockUpstream(mistralScript ?? (() => ok("m2")));
@@ -32,8 +43,7 @@ async function start({ groqScript, mistralScript, maxWaitMs = 5000, groqModels =
     MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`,
     FALLBACK_CHAIN_FILE: path.join(dir, "fallback-chain.json"),
     DISABLED_MODELS_FILE: path.join(dir, "disabled-models.json"),
-    ONE_MODEL_FILE: path.join(dir, "one-model.json"),
-    ONE_MODEL_MAX_WAIT_MS: String(maxWaitMs)
+    ONE_MODEL_FILE: path.join(dir, "one-model.json")
   });
   const stop = async () => { await router.close(); await groq.close(); await mistral.close(); };
   return { router, groq, mistral, dir, stop };
@@ -49,10 +59,10 @@ test("one model: only the chosen model is ever called, even when it fails", asyn
   const { router, groq, mistral, stop } = await start({ groqScript: () => down });
   try {
     assert.equal((await enableGroq(router)).status, 200);
-    const res = await chat(router);
-    assert.notEqual(res.status, 200, "no other provider rescues the request");
+    const res = await chatFor(router, 700);
+    assert.equal(res.aborted, true, "every key failed and is cooling: the request keeps waiting, it is not failed");
     assert.equal(posts(mistral).length, 0, "no other provider is ever called");
-    assert.equal(posts(groq).length, 2, "both keys of the chosen model were tried, once each");
+    assert.equal(posts(groq).length, 2, "both keys of the chosen model were tried once and are not called while cooling");
   } finally { await stop(); }
 });
 
@@ -150,31 +160,32 @@ test("one model: with every key cooling the request waits, then calls the key th
   } finally { await stop(); }
 });
 
-test("one model: a wait longer than the bound ends in a 503 that says when a key is ready", async () => {
-  const { router, groq, stop } = await start({ maxWaitMs: 300 });
+test("one model: a long wait has no bound: the request keeps waiting and calls nothing while every key cools", async () => {
+  const { router, groq, stop } = await start();
   try {
-    assert.equal((await enableGroq(router, { k0: 5000, k1: 5000 })).status, 200);
+    assert.equal((await enableGroq(router, { k0: 60000, k1: 60000 })).status, 200);
     assert.equal((await chat(router)).status, 200);
     assert.equal((await chat(router)).status, 200);
-    const res = await chat(router);
-    assert.equal(res.status, 503);
-    const body = await res.json();
-    assert.equal(body.error.type, "one_model_cooldown");
+    const res = await chatFor(router, 1500);
+    assert.equal(res.aborted, true, "still waiting, not a 503");
     assert.equal(posts(groq).length, 2, "no key was called while all were cooling");
   } finally { await stop(); }
 });
 
-test("one model: switching it off restores the normal fallback and leaves no cooldown behind", async () => {
-  const { router, groq, mistral, stop } = await start({ groqScript: () => down, maxWaitMs: 100 });
+test("one model: switching it off restores the normal fallback and leaves no pacing cooldown behind", async () => {
+  let calls = 0;
+  const { router, groq, mistral, stop } = await start({ groqScript: () => { calls += 1; return calls <= 2 ? ok("m1") : down; } });
   try {
     assert.equal((await enableGroq(router, { k0: 60000, k1: 60000 })).status, 200);
-    assert.notEqual((await chat(router)).status, 200);
+    assert.equal((await chat(router)).status, 200);
+    assert.equal((await chat(router)).status, 200);
     assert.equal(posts(mistral).length, 0);
 
     assert.equal((await setOneModel(router, { enabled: false })).status, 200);
     const res = await chat(router);
-    assert.equal(res.status, 200, "normal fallback reaches mistral again, with no cooldown stuck on groq's keys");
+    assert.equal(res.status, 200, "normal fallback reaches mistral again, with no pacing cooldown stuck on groq's keys");
     assert.equal(posts(mistral).length, 1);
+    assert.equal(posts(groq).length >= 3, true, "the normal walk still called groq's keys first");
   } finally { await stop(); }
 });
 
@@ -436,17 +447,13 @@ test("one provider: a model whose keys are all cooling is skipped without waitin
   } finally { await stop(); }
 });
 
-test("one provider: when every key of every model fails, they all cool and the next request calls nothing", async () => {
+test("one provider: when every key of every model fails, the request keeps waiting and calls nothing while they cool", async () => {
   const { router, groq, stop } = await start({ groqModels: "m1,m3", groqScript: () => down });
   try {
     assert.equal((await setOneModel(router, { enabled: true, provider: "groq", models: ["m1", "m3"] })).status, 200);
-    const first = await chat(router);
-    assert.equal(first.status, 502, "every key failed");
-    assert.equal(posts(groq).length, 4, "each key was tried once");
-    const second = await chat(router);
-    assert.equal(second.status, 503, "every key is cooling");
-    assert.equal((await second.json()).error.type, "one_model_cooldown");
-    assert.equal(posts(groq).length, 4, "no key was called while cooling");
+    const res = await chatFor(router, 1500);
+    assert.equal(res.aborted, true, "the request is still waiting, not failed");
+    assert.equal(posts(groq).length, 4, "each key was tried once and none was called again while cooling");
   } finally { await stop(); }
 });
 
@@ -495,11 +502,14 @@ test("withOneModel: a key or model cooling in the health registry is never calle
 
   health.markFailure(targets[2], 429, { cooldownMs: 60_000 });
   used.length = 0;
+  const gone = () => { const e = new Error("Client disconnected"); e.status = 499; e.retryable = false; return e; };
+  const until = Date.now() + 300;
   await assert.rejects(
-    withOneModel(targets, invoke, { pacer, health, models: ["m1", "m2"], maxWaitMs: 100 }),
-    (error) => error.errorType === "one_model_cooldown"
+    withOneModel(targets, invoke, { pacer, health, models: ["m1", "m2"], checkpoint: () => { if (Date.now() > until) throw gone(); } }),
+    (error) => error.status === 499
   );
-  assert.deepEqual(used, [], "nothing is called while everything is cooling");
+  assert.deepEqual(used, [], "nothing is called while everything is cooling, and it kept waiting until the client left");
+
 });
 
 test("withOneModel: a 503 puts the key in cooldown, so the next request does not call it", async () => {
@@ -543,4 +553,18 @@ test("withOneModel: every failing status cools the key, so the next request does
     await withOneModel(targets, invoke, options);
     assert.deepEqual(used, ["m2"], `status ${status}: m1 is cooling and is not called`);
   }
+});
+
+test("withOneModel: every key cooling means waiting for the first cooldown and trying again, round after round", async () => {
+  const pacer = new KeyPacer();
+  const health = new HealthRegistry();
+  const targets = [0, 1].map((keyIndex) => ({ provider: "p", model: "m1", keyIndex, pool: "text" }));
+  let calls = 0;
+  const invoke = async () => { calls += 1; if (calls <= 4) { const e = new Error("down"); e.status = 503; throw e; } return "ok"; };
+  // a short cooldown per failure, so several rounds fit in the test
+  const failureCooldown = () => ({ cooldownMs: 120 });
+  const startedAt = Date.now();
+  assert.equal(await withOneModel(targets, invoke, { pacer, health, models: ["m1"], failureCooldown }), "ok");
+  assert.equal(calls, 5, "two keys, two rounds of failures, then an answer: it never gave up");
+  assert.ok(Date.now() - startedAt >= 200, "it waited for the cooldowns");
 });

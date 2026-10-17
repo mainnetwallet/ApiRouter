@@ -472,7 +472,7 @@ export default function OneProviderFallback() {
               <li><strong>Back to model 1:</strong> every request starts from model 1 again, so a key that is out of its cooldown is used again at once.</li>
               <li><strong>No cooldown by default:</strong> nothing waits. The key that answered is called again for the next request, and if a call fails the next key is tried.</li>
               <li><strong>Cooldown per key (optional):</strong> set seconds on a key below and, the moment one call is made with it, that key cools for that long — success or failure — then is called again. Keys with no cooldown are never paced.</li>
-              <li>If every key of every model has failed or is cooling, the request waits for the first cooldown to end (up to {Math.round((data?.maxWaitMs ?? 120_000) / 1000)}s) and tries again, then fails with a 503 that says when a key is ready.</li>
+              <li>If every key of every model has failed or is cooling, the request waits for the first cooldown to end and tries again, and keeps going until a key answers.</li>
               <li>An image request needs a model of this provider with a key in the vision pool; otherwise it fails instead of falling back to another provider.</li>
             </ul>
           </div>

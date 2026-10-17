@@ -25,7 +25,6 @@ function render(data) {
 
 const base = {
   enabled: false, active: false, provider: null, models: [], switchedOff: false,
-  maxWaitMs: 120_000,
   candidates: [candidate("groq", "m1"), candidate("groq", "m3"), candidate("mistral", "m2", { keyCount: 1 })],
   keys: []
 };

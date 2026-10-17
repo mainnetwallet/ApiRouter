@@ -407,7 +407,6 @@ export function createApi({
       models: state.models,
       // True when requests are really being routed this way right now.
       active: Boolean(oneModel.active()),
-      maxWaitMs: config.oneModelMaxWaitMs ?? null,
       // True when every listed model is switched off in the Control Panel.
       switchedOff: state.models.length > 0
         && state.models.every((model) => Boolean(modelSwitch?.isDisabled?.(state.provider, model))),

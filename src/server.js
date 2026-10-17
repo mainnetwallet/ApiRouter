@@ -924,7 +924,6 @@ async function proxy(req, res, protocol, pathname) {
         health: healthRegistry,
         failureCooldown: cooldownOptions,
         checkpoint: oneModelCheckpoint,
-        maxWaitMs: config.oneModelMaxWaitMs,
         onSkip: (target, { phase, reason }) => {
           attempts.push({
             phase, provider: target.provider, model: target.model, keyIndex: target.keyIndex,
