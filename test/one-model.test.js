@@ -479,3 +479,28 @@ test("one provider API: models are ordered, ranked, validated, and dropping a mo
     assert.deepEqual(saved.cooldowns, { "m1::text:1": 2000 });
   } finally { await stop(); }
 });
+
+test("withOneModel: a key or model cooling in the health registry is never called", async () => {
+  const pacer = new KeyPacer();
+  const health = new HealthRegistry();
+  const targets = [
+    { provider: "p", model: "m1", keyIndex: 0, pool: "text" },
+    { provider: "p", model: "m1", keyIndex: 1, pool: "text" },
+    { provider: "p", model: "m2", keyIndex: 0, pool: "text" }
+  ];
+  health.markFailure(targets[0], 429, { cooldownMs: 60_000 });
+  health.markFailure(targets[1], 429, { cooldownMs: 60_000 });
+  const used = [];
+  const invoke = async (target) => { used.push(`${target.model}:${target.keyIndex}`); return "done"; };
+
+  assert.equal(await withOneModel(targets, invoke, { pacer, health, models: ["m1", "m2"] }), "done");
+  assert.deepEqual(used, ["m2:0"], "both keys of m1 are cooling, so only m2 is called");
+
+  health.markFailure(targets[2], 429, { cooldownMs: 60_000 });
+  used.length = 0;
+  await assert.rejects(
+    withOneModel(targets, invoke, { pacer, health, models: ["m1", "m2"], maxWaitMs: 100 }),
+    (error) => error.errorType === "one_model_cooldown"
+  );
+  assert.deepEqual(used, [], "nothing is called while everything is cooling");
+});

@@ -367,6 +367,14 @@ export async function withOneModel(
       return at > 0 ? [...sorted.slice(at), ...sorted.slice(0, at)] : sorted;
     });
 
+  // A key is cooling when its own pacing cooldown has not ended OR the health
+  // registry has it in a cooldown (a 429/quota/timeout seen by any mode or probe).
+  // A cooling key is never called: it is passed over until it is ready again.
+  const readyAtOf = (target) => Math.max(
+    pacer.readyAt(target),
+    Number(health?.get?.(targetId(target))?.cooldownUntil) || 0
+  );
+
   const attemptsById = new Map();
   const failures = [];
   const skipped = [];
@@ -386,11 +394,11 @@ export async function withOneModel(
     const remaining = ordered.filter(canTry);
     if (remaining.length === 0) break;
     const now = Date.now();
-    const target = remaining.find((candidate) => pacer.isReady(candidate, now));
+    const target = remaining.find((candidate) => readyAtOf(candidate) <= now);
 
     if (!target) {
       // Every key that is left is cooling: wait for the first to be ready.
-      const readyAt = Math.min(...remaining.map((candidate) => pacer.readyAt(candidate)));
+      const readyAt = Math.min(...remaining.map((candidate) => readyAtOf(candidate)));
       if (readyAt > waitDeadline) {
         const untried = remaining.some((candidate) => !attemptsById.has(targetId(candidate)));
         // Only keys that already failed are left and they will not be ready in
