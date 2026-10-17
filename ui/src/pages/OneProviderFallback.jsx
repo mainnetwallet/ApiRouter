@@ -106,6 +106,7 @@ export default function OneProviderFallback() {
   const [actionError, setActionError] = useState(null);
   const [sort, setSort] = useState({ key: "model", direction: "asc" });
   const [allText, setAllText] = useState("");
+  const [query, setQuery] = useState("");
 
   // One tick a second so every cooldown counts down between polls.
   const [now, setNow] = useState(() => Date.now());
@@ -124,13 +125,31 @@ export default function OneProviderFallback() {
   const dirty = chosenProvider !== savedProvider || !sameList(chosenModels, savedModels);
   const changedSelection = enabled && chosenProvider !== "" && chosenModels.length > 0 && dirty;
 
+  // One card per provider: how many models and keys it has to offer.
+  const providerCards = useMemo(() => providers.map((provider) => {
+    const own = candidates.filter((candidate) => candidate.provider === provider);
+    return { provider, models: own.length, keys: own.reduce((sum, candidate) => sum + candidate.keyCount, 0) };
+  }), [providers, candidates]);
+
   const providerModels = candidates.filter((candidate) => candidate.provider === chosenProvider);
+  const needle = query.trim().toLowerCase();
+  const visibleModels = needle
+    ? providerModels.filter((candidate) => candidate.model.toLowerCase().includes(needle))
+    : providerModels;
   const modelInfo = (model) => providerModels.find((candidate) => candidate.model === model) ?? null;
   const addable = providerModels.filter((candidate) => !chosenModels.includes(candidate.model));
 
   const edit = (provider, models) => setDraft({ provider, models });
-  const pickProvider = (provider) => edit(provider, provider === savedProvider ? savedModels : []);
-  const addModel = (model) => model && edit(chosenProvider, [...chosenModels, model]);
+  const pickProvider = (provider) => {
+    if (provider === chosenProvider) return;
+    setQuery("");
+    edit(provider, provider === savedProvider ? savedModels : []);
+  };
+  const addModel = (model) => model && !chosenModels.includes(model) && edit(chosenProvider, [...chosenModels, model]);
+  const toggleModel = (model) => (chosenModels.includes(model)
+    ? edit(chosenProvider, chosenModels.filter((entry) => entry !== model))
+    : addModel(model));
+  const addAll = () => edit(chosenProvider, [...chosenModels, ...visibleModels.map((candidate) => candidate.model).filter((model) => !chosenModels.includes(model))]);
   const removeModel = (index) => edit(chosenProvider, chosenModels.filter((_, at) => at !== index));
   const moveModel = (index, delta) => {
     const to = index + delta;
@@ -296,51 +315,138 @@ export default function OneProviderFallback() {
               </p>
             ) : null}
 
-            <div style={{ display: "flex", alignItems: "flex-end", gap: "var(--sp-3)", flexWrap: "wrap", marginTop: "var(--sp-3)" }}>
-              <label style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)", minWidth: 220 }}>
-                <span className="tiny dim">Provider to use</span>
-                <select
-                  className="select"
-                  value={chosenProvider}
-                  disabled={busy || providers.length === 0}
-                  onChange={(event) => pickProvider(event.target.value)}
-                  aria-label="Provider to use"
-                >
-                  <option value="" disabled>Choose a provider…</option>
-                  {providers.map((provider) => (
-                    <option key={provider} value={provider}>{providerLabel(provider)}</option>
-                  ))}
-                </select>
-              </label>
+            <div className="op-step">
+              <div className="op-step__title"><span className="op-step__num">1</span>Provider to use</div>
+              {providerCards.length === 0 ? (
+                <p className="tiny dim" style={{ margin: 0 }}>No provider is configured.</p>
+              ) : (
+                <div className="op-providers" role="radiogroup" aria-label="Provider to use">
+                  {providerCards.map((card) => {
+                    const active = card.provider === chosenProvider;
+                    return (
+                      <button
+                        key={card.provider}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        className={`op-provider${active ? " is-active" : ""}`}
+                        disabled={busy}
+                        onClick={() => pickProvider(card.provider)}
+                      >
+                        <span className="op-provider__name">{providerLabel(card.provider)}</span>
+                        <span className="op-provider__meta">
+                          {card.models} model{card.models === 1 ? "" : "s"} · {card.keys} key{card.keys === 1 ? "" : "s"}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
 
-              <label style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)", minWidth: 280 }}>
-                <span className="tiny dim">Add a model (as many as you like)</span>
-                <select
-                  className="select"
-                  value=""
-                  disabled={busy || chosenProvider === "" || addable.length === 0}
-                  onChange={(event) => addModel(event.target.value)}
-                  aria-label="Add a model"
-                >
-                  <option value="" disabled>{chosenProvider === "" ? "Choose a provider first" : addable.length === 0 ? "Every model is already added" : "Add a model…"}</option>
-                  {addable.map((candidate) => (
-                    <option key={candidate.model} value={candidate.model}>
-                      {candidate.model} — {candidate.keyCount} key{candidate.keyCount === 1 ? "" : "s"} · {candidate.pools.join("+")}
-                      {candidate.disabled ? " (switched off)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <div className="op-step">
+              <div className="op-step__title"><span className="op-step__num">2</span>Models — add as many as you like</div>
+              {chosenProvider === "" ? (
+                <p className="tiny dim" style={{ margin: 0 }}>Choose a provider first.</p>
+              ) : (
+                <div className="op-picker">
+                  <div className="op-col">
+                    <div className="op-col__head">
+                      <span className="tiny dim">Available · tap to add</span>
+                      <button type="button" className="btn btn--sm" disabled={busy || visibleModels.every((candidate) => chosenModels.includes(candidate.model))} onClick={addAll}>
+                        Add all{needle ? " shown" : ""}
+                      </button>
+                    </div>
+                    {providerModels.length > 6 ? (
+                      <input
+                        type="search"
+                        className="input op-search"
+                        placeholder="Search models…"
+                        value={query}
+                        aria-label="Search models"
+                        onChange={(event) => setQuery(event.target.value)}
+                      />
+                    ) : null}
+                    <ul className="op-list op-list--scroll" aria-label="Available models">
+                      {visibleModels.map((candidate) => {
+                        const added = chosenModels.includes(candidate.model);
+                        return (
+                          <li key={candidate.model}>
+                            <button
+                              type="button"
+                              className={`op-row op-row--button${added ? " op-row--added" : ""}`}
+                              disabled={busy}
+                              aria-pressed={added}
+                              aria-label={added ? `Remove ${candidate.model} from the list` : `Add ${candidate.model}`}
+                              onClick={() => toggleModel(candidate.model)}
+                            >
+                              <span className="op-row__main">
+                                <span className="op-row__name">{candidate.model}</span>
+                                <span className="op-row__meta">
+                                  {candidate.keyCount} key{candidate.keyCount === 1 ? "" : "s"} · {candidate.pools.join("+")}
+                                  {candidate.disabled ? " · switched off" : ""}
+                                </span>
+                              </span>
+                              <span className={`op-tag${added ? " op-tag--on" : ""}`}>{added ? "✓ Added" : "+ Add"}</span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                      {visibleModels.length === 0 ? (
+                        <li className="tiny dim" style={{ padding: "var(--sp-2)" }}>No model matches “{query}”.</li>
+                      ) : null}
+                    </ul>
+                  </div>
 
+                  <div className="op-col op-col--order">
+                    <div className="op-col__head">
+                      <span className="tiny dim">Your order · #1 leads, the next is used when all keys before it fail or cool</span>
+                    </div>
+                    {chosenModels.length === 0 ? (
+                      <p className="tiny dim op-empty">No model added yet.</p>
+                    ) : (
+                      <ol className="op-list" aria-label="Models in order">
+                        {chosenModels.map((model, index) => {
+                          const info = modelInfo(model);
+                          return (
+                            <li key={model} className="op-row">
+                              <span className="op-rank">{index + 1}</span>
+                              <span className="op-row__main">
+                                <span className="op-row__name">{model}</span>
+                                <span className="op-row__meta">
+                                  {info ? `${info.keyCount} key${info.keyCount === 1 ? "" : "s"} · ${info.pools.join("+")}${info.disabled ? " · switched off" : ""}` : "not configured"}
+                                </span>
+                              </span>
+                              <span className="op-actions">
+                                <button type="button" className="btn op-iconbtn" disabled={busy || index === 0}
+                                  aria-label={`Move ${model} up`} onClick={() => moveModel(index, -1)}>↑</button>
+                                <button type="button" className="btn op-iconbtn" disabled={busy || index === chosenModels.length - 1}
+                                  aria-label={`Move ${model} down`} onClick={() => moveModel(index, 1)}>↓</button>
+                                <button type="button" className="btn op-iconbtn" disabled={busy}
+                                  aria-label={`Remove ${model}`} onClick={() => removeModel(index)}>✕</button>
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="op-bar">
+              {dirty ? <span className="tiny" style={{ color: "var(--warn)" }}>Unsaved changes</span> : null}
+              <span className="grow" />
               {enabled ? (
                 <>
+                  {dirty ? (
+                    <button type="button" className="btn" onClick={() => setDraft(null)} disabled={busy}>Undo changes</button>
+                  ) : null}
                   {changedSelection ? (
                     <button type="button" className="btn btn--primary" onClick={saveChanges} disabled={busy}>
                       {busy ? "…" : "Save changes"}
                     </button>
-                  ) : null}
-                  {dirty ? (
-                    <button type="button" className="btn" onClick={() => setDraft(null)} disabled={busy}>Undo changes</button>
                   ) : null}
                   <button type="button" className="btn" onClick={turnOff} disabled={busy}>
                     {busy ? "…" : "Turn off"}
@@ -352,34 +458,6 @@ export default function OneProviderFallback() {
                 </button>
               )}
             </div>
-
-            <div className="tiny dim" style={{ marginTop: "var(--sp-3)", marginBottom: "var(--sp-1)" }}>
-              Models in order — model 1 leads, the next one is used when every key of the one before has failed or is cooling
-            </div>
-            {chosenModels.length === 0 ? (
-              <p className="tiny dim" style={{ margin: 0 }}>No model added yet.</p>
-            ) : (
-              <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: "var(--sp-1)" }} aria-label="Models in order">
-                {chosenModels.map((model, index) => {
-                  const info = modelInfo(model);
-                  return (
-                    <li key={model} style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", flexWrap: "wrap" }}>
-                      <span className="tiny dim" style={{ width: 28 }}>#{index + 1}</span>
-                      <span className="mono">{model}</span>
-                      <span className="tiny dim">
-                        {info ? `${info.keyCount} key${info.keyCount === 1 ? "" : "s"} · ${info.pools.join("+")}${info.disabled ? " · switched off" : ""}` : "not configured"}
-                      </span>
-                      <button type="button" className="btn btn--sm" disabled={busy || index === 0}
-                        aria-label={`Move ${model} up`} onClick={() => moveModel(index, -1)}>↑</button>
-                      <button type="button" className="btn btn--sm" disabled={busy || index === chosenModels.length - 1}
-                        aria-label={`Move ${model} down`} onClick={() => moveModel(index, 1)}>↓</button>
-                      <button type="button" className="btn btn--sm" disabled={busy}
-                        aria-label={`Remove ${model}`} onClick={() => removeModel(index)}>Remove</button>
-                    </li>
-                  );
-                })}
-              </ol>
-            )}
           </div>
         </div>
       </section>

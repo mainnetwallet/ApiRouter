@@ -50,14 +50,37 @@ describe("One Provider Fallback page", () => {
     expect(markup).not.toContain("Turn off");
     expect(markup).toMatch(/<button[^>]*disabled[^>]*>Turn on<\/button>/);
     expect(markup).toContain("Normal fallback is in use");
-    expect(markup).toContain("No model added yet");
+    expect(markup).toContain("Choose a provider first");
   });
 
-  it("offers every provider to choose from", () => {
+  it("offers every provider as a tappable card with its model and key counts", () => {
     const markup = render(base);
+    expect(markup).toContain('role="radiogroup"');
     expect(markup).toContain('aria-label="Provider to use"');
-    expect(markup).toMatch(/Groq|groq/);
-    expect(markup).toMatch(/Mistral|mistral/);
+    expect(markup.match(/role="radio"/g)).toHaveLength(2);
+    expect(markup).toMatch(/2 models · 4 keys/);
+    expect(markup).toMatch(/1 model · 1 key/);
+    expect(markup).not.toContain("<select");
+  });
+
+  it("with a provider on: shows its models to tap and add, and the order built so far", () => {
+    const markup = on([key(0)]);
+    expect(markup).toContain('aria-label="Available models"');
+    expect(markup).toContain('aria-label="Remove m1 from the list"');
+    expect(markup).toContain('aria-label="Remove m3 from the list"');
+    expect(markup).toContain("✓ Added");
+    expect(markup).not.toContain("mistral");
+    expect(markup).toContain("Add all");
+    expect(markup).not.toContain('aria-label="Search models"');
+  });
+
+  it("offers a search box once a provider has many models", () => {
+    const many = Array.from({ length: 8 }, (_, i) => candidate("groq", `model-${i}`));
+    const markup = render({
+      ...base, enabled: true, active: true, provider: "groq", models: ["model-0"], candidates: many, keys: [key(0)]
+    });
+    expect(markup).toContain('aria-label="Search models"');
+    expect(markup).toContain('aria-label="Add model-5"');
   });
 
   it("when on: lists the models in order with move/remove controls, offers Turn off, and shows the key cooldowns", () => {

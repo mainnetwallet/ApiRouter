@@ -1612,3 +1612,50 @@ button.livelog__rid:hover { color: var(--accent); text-decoration: underline; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* --- One Provider Fallback: provider cards and model picker --------------- */
+.op-step { margin-top: var(--sp-4); }
+.op-step__title { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-2); font-size: var(--fs-md); font-weight: 600; }
+.op-step__num { flex: none; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-size: var(--fs-xs); font-weight: 700; color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-border); }
+.op-providers { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-2); }
+.op-provider { display: flex; flex-direction: column; gap: 2px; min-height: 56px; padding: var(--sp-2) var(--sp-3); text-align: left; font: inherit; color: var(--text); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); cursor: pointer; }
+.op-provider:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg-hover); }
+.op-provider.is-active { border-color: var(--accent-border); background: var(--accent-dim); }
+.op-provider:disabled { opacity: 0.6; cursor: progress; }
+.op-provider__name { font-size: var(--fs-md); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.op-provider.is-active .op-provider__name { color: var(--accent); }
+.op-provider__meta { font-size: var(--fs-xs); color: var(--text-muted); }
+.op-picker { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
+.op-col { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.op-col__head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-height: 28px; }
+.op-search { width: 100%; }
+.op-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.op-list--scroll { max-height: 360px; overflow-y: auto; padding-right: 2px; }
+.op-row { display: flex; align-items: center; gap: var(--sp-2); min-height: 48px; padding: 6px var(--sp-2); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius); }
+.op-row--button { width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.op-row--button:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg-hover); }
+.op-row--added { border-color: var(--accent-border); background: var(--accent-dim); }
+.op-row__main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.op-row__name { font-family: var(--font-mono); font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.op-row__meta { font-size: var(--fs-xs); color: var(--text-muted); }
+.op-tag { flex: none; font-size: var(--fs-xs); font-weight: 600; color: var(--text-muted); }
+.op-tag--on { color: var(--accent); }
+.op-rank { flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-size: var(--fs-xs); font-weight: 700; color: var(--accent); background: var(--accent-dim); border: 1px solid var(--accent-border); }
+.op-actions { flex: none; display: flex; gap: 4px; }
+.op-iconbtn { min-width: 36px; min-height: 36px; padding: 0 8px; justify-content: center; }
+.op-empty { margin: 0; padding: var(--sp-3); border: 1px dashed var(--border-strong); border-radius: var(--radius); }
+.op-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin-top: var(--sp-4); padding-top: var(--sp-3); border-top: 1px solid var(--border-subtle); }
+@media (max-width: 900px) {
+  .op-picker { grid-template-columns: minmax(0, 1fr); }
+  /* On a narrow screen the order being built comes first, the pool to pick from second. */
+  .op-col--order { order: -1; }
+  .op-list--scroll { max-height: 300px; }
+}
+@media (max-width: 720px) {
+  .op-providers { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .op-iconbtn { min-width: 42px; min-height: 42px; }
+  .op-row--button { min-height: 52px; }
+  .op-bar .grow { display: none; }
+  .op-bar .btn { flex: 1 1 140px; min-height: 44px; justify-content: center; }
+  .op-bar > .tiny { flex: 1 0 100%; }
+}
