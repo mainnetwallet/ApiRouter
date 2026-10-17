@@ -18,6 +18,7 @@ const HealthMonitor = lazy(() => import("./pages/HealthMonitor.jsx"));
 const RouterControl = lazy(() => import("./pages/RouterControl.jsx"));
 const Fallback = lazy(() => import("./pages/Fallback.jsx"));
 const FallbackChainConfig = lazy(() => import("./pages/FallbackChainConfig.jsx"));
+const OneModelFallback = lazy(() => import("./pages/OneModelFallback.jsx"));
 const Playground = lazy(() => import("./pages/Playground.jsx"));
 const Requests = lazy(() => import("./pages/Requests.jsx"));
 const LiveLogs = lazy(() => import("./pages/LiveLogs.jsx"));
@@ -45,6 +46,8 @@ export const ROUTES = [
     description: "The ordered chain the router walks when a target fails" },
   { path: "/fallback-chain", label: "Fallback Chain", icon: "list", group: "Configure", element: FallbackChainConfig,
     description: "The single source of truth for Text and Vision routing order" },
+  { path: "/one-model-fallback", label: "One Model Fallback", icon: "zap", group: "Configure", element: OneModelFallback,
+    description: "Serve every request from one model only, with per-key cooldown" },
   { path: "/playground", label: "Playground", icon: "terminal", group: "Operate", element: Playground,
     description: "Send a real request through the gateway router" },
 

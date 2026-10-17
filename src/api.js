@@ -114,6 +114,8 @@ export function createApi({
   refreshHealth,
   fallbackChain = null,
   modelSwitch = null,
+  oneModel = null,
+  keyPacer = null,
   resetFallbackState = null,
   describeFallbackState = null,
   clearRememberedTargets = null
@@ -181,7 +183,13 @@ export function createApi({
   // True when the model is off on its own OR its whole provider is off.
   const isSwitchedOff = (target) => Boolean(modelSwitch?.isDisabled?.(target.provider, target.model));
   const isProviderSwitchedOff = (provider) => Boolean(modelSwitch?.isProviderDisabled?.(provider));
-  const routableTargets = () => (modelSwitch ? targets.filter((target) => !isSwitchedOff(target)) : targets);
+  // With One Model Fallback on, only the chosen model's keys are ever routed, so
+  // every order the API shows is limited to them, as the proxy path is.
+  const oneModelActive = () => oneModel?.active?.() ?? null;
+  const routableTargets = () => {
+    const live = modelSwitch ? targets.filter((target) => !isSwitchedOff(target)) : targets;
+    return oneModelActive() ? live.filter((target) => oneModel.matches(target)) : live;
+  };
 
   // The chain store is the single source of truth for order and mode. These two
   // read it defensively so the API module stays usable when it is constructed
@@ -332,6 +340,64 @@ export function createApi({
         statuses: Object.values(HEALTH_STATES)
       },
       summary: summarizeHealth(entries)
+    };
+  }
+
+  // --- /api/one-model ----------------------------------------------------
+  function oneModelPayload(now = Date.now()) {
+    const state = oneModel.get();
+    const healthById = new Map(describeAll(now).map((entry) => [entry.id, entry]));
+
+    // What can be chosen: one row per provider/model, with how many keys it has
+    // in each pool and whether the Model Switch currently has it off.
+    const groups = new Map();
+    for (const target of targets) {
+      const id = `${target.provider}/${target.model}`;
+      const group = groups.get(id) ?? {
+        provider: target.provider, model: target.model, pools: [], keyCount: 0, disabled: isSwitchedOff(target)
+      };
+      const pool = target.pool ?? "text";
+      if (!group.pools.includes(pool)) group.pools.push(pool);
+      group.keyCount += 1;
+      groups.set(id, group);
+    }
+    const candidates = [...groups.values()]
+      .sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model))
+      .map((group) => ({ ...group, selected: group.provider === state.provider && group.model === state.model }));
+
+    const keys = targets
+      .filter((target) => oneModel.matches(target))
+      .sort((a, b) => (a.pool ?? "text").localeCompare(b.pool ?? "text") || a.keyIndex - b.keyIndex)
+      .map((target) => {
+        const entry = healthById.get(health.key(target));
+        const pacing = keyPacer ? keyPacer.describe(target, now) : { cooldownUntil: 0, ready: true };
+        return {
+          provider: target.provider,
+          model: target.model,
+          pool: target.pool ?? "text",
+          keyIndex: target.keyIndex,
+          ready: pacing.ready,
+          cooldownUntil: pacing.cooldownUntil,
+          status: entry?.status ?? "unknown",
+          lastStatus: entry?.lastStatus ?? null,
+          successes: entry?.successes ?? 0,
+          failures: entry?.failures ?? 0,
+          latencyMs: entry?.requestLatencyMs ?? entry?.latencyMs ?? null
+        };
+      });
+
+    return {
+      generatedAt: new Date(now).toISOString(),
+      enabled: state.enabled,
+      provider: state.provider || null,
+      model: state.model || null,
+      // True when requests are really being routed this way right now.
+      active: Boolean(oneModel.active()),
+      cooldownMs: keyPacer?.cooldownMs ?? null,
+      maxWaitMs: config.oneModelMaxWaitMs ?? null,
+      switchedOff: Boolean(state.model) && Boolean(modelSwitch?.isDisabled?.(state.provider, state.model)),
+      candidates,
+      keys
     };
   }
 
@@ -502,13 +568,28 @@ export function createApi({
     // this pool — never the combined list, which could show a route the router
     // would refuse to take.
     const configuredPoolTargets = targets.filter((target) => (target.pool ?? "text") === pool);
-    const poolTargets = configuredPoolTargets.filter((target) => !isSwitchedOff(target));
+    const switchedOnTargets = configuredPoolTargets.filter((target) => !isSwitchedOff(target));
 
-    if (configuredPoolTargets.length > 0 && poolTargets.length === 0) {
+    if (configuredPoolTargets.length > 0 && switchedOnTargets.length === 0) {
       return {
         status: 503,
         type: "models_disabled",
         error: "Every model in this pool is switched off in the Control Panel"
+      };
+    }
+
+    // One Model Fallback: only the chosen model's keys are routed, and a pool it
+    // has no key in cannot be served at all (nothing else is ever tried).
+    const activeOneModel = oneModelActive();
+    const poolTargets = activeOneModel
+      ? switchedOnTargets.filter((target) => oneModel.matches(target))
+      : switchedOnTargets;
+
+    if (activeOneModel && switchedOnTargets.length > 0 && poolTargets.length === 0) {
+      return {
+        status: 503,
+        type: "one_model_unavailable",
+        error: `One Model Fallback is on and ${activeOneModel.provider}/${activeOneModel.model} has no usable key in the ${pool} pool`
       };
     }
 
@@ -871,6 +952,56 @@ export function createApi({
           disabledProviders: modelSwitch.listProviders(),
           ...fallbackPayload(now)
         });
+      }
+    }
+
+    /*
+     * One Model Fallback: serve every request from ONE chosen provider/model and
+     * nothing else. Each of its keys cools for a fixed time the moment it is
+     * called (see one-model.js). Takes effect immediately and changes no saved
+     * chain, health measurement or model switch, so switching it off restores
+     * the previous routing exactly.
+     */
+    if (pathname === "/api/one-model" && oneModel) {
+      if (req.method === "GET") return sendJson(req, res, 200, oneModelPayload(now));
+
+      if (req.method === "PUT") {
+        let body;
+        try { body = await readJsonBody(req, config.maxBodyBytes); }
+        catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
+
+        if (body?.enabled !== undefined && typeof body.enabled !== "boolean") {
+          return fail(req, res, 400, "enabled must be true or false", "invalid_request");
+        }
+        const hasProvider = body?.provider !== undefined;
+        const hasModel = body?.model !== undefined;
+        if (hasProvider !== hasModel) return fail(req, res, 400, "provider and model must be sent together", "invalid_request");
+        if (hasProvider && (typeof body.provider !== "string" || typeof body.model !== "string")) {
+          return fail(req, res, 400, "provider and model must be strings", "invalid_request");
+        }
+
+        const current = oneModel.get();
+        const next = {
+          enabled: body?.enabled ?? current.enabled,
+          provider: hasProvider ? body.provider.trim().toLowerCase() : current.provider,
+          model: hasModel ? body.model.trim() : current.model
+        };
+        if (next.enabled && (!next.provider || !next.model)) {
+          return fail(req, res, 400, "choose a provider and a model first", "invalid_request");
+        }
+        // Only a configured model can be chosen; a typo must not leave the
+        // gateway routing everything to a model that does not exist. Switching
+        // the mode OFF is always allowed.
+        const known = targets.some((target) => target.provider === next.provider && target.model === next.model);
+        if ((next.enabled || hasProvider) && next.provider && !known) {
+          return fail(req, res, 404, `no configured model "${next.provider}/${next.model}"`, "not_found");
+        }
+
+        let changed;
+        try { changed = oneModel.set(next); }
+        catch { return fail(req, res, 500, "Could not save the One Model Fallback setting", "server_error"); }
+        resetAutomaticOrderCache();
+        return sendJson(req, res, 200, { ok: true, changed, ...oneModelPayload(Date.now()) });
       }
     }
 

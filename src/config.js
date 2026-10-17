@@ -179,6 +179,12 @@ export function loadConfig(env = process.env) {
     // Models the operator switched OFF from the control panel (ids only). A
     // disabled model is removed from routing in every mode until switched on.
     disabledModelsFile: String(env.DISABLED_MODELS_FILE || "").trim() || "data/disabled-models.json",
+    // One Model Fallback: the chosen model and its on/off flag (ids only), plus
+    // how long a key cools after each call and how long a request may wait for
+    // a key to be ready. The two numbers exist mainly so tests can use short ones.
+    oneModelFile: String(env.ONE_MODEL_FILE || "").trim() || "data/one-model.json",
+    oneModelCooldownMs: readNumber(env, "ONE_MODEL_COOLDOWN_MS", 60 * 1000, { min: 1, expected: "a positive integer" }),
+    oneModelMaxWaitMs: readNumber(env, "ONE_MODEL_MAX_WAIT_MS", 120 * 1000, { min: 0, expected: "a non-negative integer" }),
     // Legacy, read ONCE to seed the chain above when no chain has been saved
     // yet. Never consulted again afterwards: the old systems cannot override
     // the configured chain.

@@ -28,6 +28,7 @@ import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
 import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
+import { OneModelStore, KeyPacer, withOneModel } from "./one-model.js";
 import {
   FallbackChainStore,
   hasLegacyConfig,
@@ -98,6 +99,17 @@ const fallbackChain = new FallbackChainStore({
 // is applied to the candidate targets before any plan is built, so it works in
 // the automatic order and in Manual Model Selection alike.
 const modelSwitch = new ModelSwitchStore({ file: config.disabledModelsFile });
+// One Model Fallback: when on, every request is served from ONE chosen model
+// (all of its keys, nothing else). Each key cools for a fixed time the moment it
+// is called; see one-model.js.
+const oneModelStore = new OneModelStore({ file: config.oneModelFile });
+const keyPacer = new KeyPacer({ cooldownMs: config.oneModelCooldownMs });
+oneModelStore.onChange(() => {
+  // A different model (or mode) starts from a clean slate, and the remembered
+  // automatic order no longer describes what is routed.
+  keyPacer.clear();
+  resetAutomaticOrderCache();
+});
 // Upstream attempts that are still waiting for a response, so switching a model
 // off can abort them and let their request fall back to the next model.
 const pendingAttempts = new Set();
@@ -552,14 +564,23 @@ async function proxy(req, res, protocol, pathname) {
   const selectable = pinned.pinned
     ? selection.selected
     : selection.selected.filter((target) => !modelSwitch.isDisabled(target.provider, target.model));
-  const routePlan = buildRoutePlan({
-    targets: selectable,
-    chain: fallbackChain.get(pool),
-    pinned: pinned.pinned,
-    health: pinned.pinned ? null : healthRegistry,
-    cacheKey: `pool:${pool}`,
-    stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
-  });
+  // One Model Fallback overrides the saved chain and the automatic order: only
+  // the chosen model's keys are candidates, and nothing else is ever tried. A
+  // pinned request is an explicit one-off and ignores it, like the switch.
+  const oneModel = pinned.pinned ? null : oneModelStore.active();
+  const oneModelTargets = oneModel
+    ? selectable.filter((target) => oneModelStore.matches(target))
+    : [];
+  const routePlan = oneModel
+    ? { steps: [], failClosed: false, entries: 0 }
+    : buildRoutePlan({
+      targets: selectable,
+      chain: fallbackChain.get(pool),
+      pinned: pinned.pinned,
+      health: pinned.pinned ? null : healthRegistry,
+      cacheKey: `pool:${pool}`,
+      stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
+    });
 
   if (selection.compatible.length === 0) {
     const noRouteMessage = pool === VISION_POOL
@@ -591,6 +612,22 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 503, { error: { message: offMessage, type: "models_disabled" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
+  // One Model Fallback is on but the chosen model cannot serve THIS request (it
+  // has no key in this pool, or does not speak this client's protocol). The mode
+  // never falls back to another model, so say so plainly.
+  if (oneModel && oneModelTargets.length === 0) {
+    const label = `${oneModel.provider}/${oneModel.model}`;
+    const oneMessage = modelSwitch.isDisabled(oneModel.provider, oneModel.model)
+      ? `One Model Fallback is on and ${sanitizeMessage(label)} is switched off in the Control Panel`
+      : `One Model Fallback is on and ${sanitizeMessage(label)} cannot serve this request (no key for the ${pool} pool or this protocol)`;
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
+      outcome: "failed", errorType: "one_model_unavailable", errorMessage: oneMessage, attempts
+    });
+    return json(res, 503, { error: { message: oneMessage, type: "one_model_unavailable" } }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
   // A Manual Model Selection is saved for this pool but nothing in it can serve
   // this request. The plan is deliberately empty: reaching for a model the
   // selection does not name, or a key an entry excludes, would be the silent
@@ -618,9 +655,7 @@ async function proxy(req, res, protocol, pathname) {
   }
 
   try {
-    const result = await withFallback(
-      selectable,
-      async (target, { phase } = {}) => {
+    const invokeTarget = async (target, { phase } = {}) => {
         // Shut down from the UI while this request was already walking its
         // fallback chain: stop before the next upstream attempt. `retryable:
         // false` ends the walk, and because this runs before any attempt is
@@ -819,7 +854,64 @@ async function proxy(req, res, protocol, pathname) {
           req.off("aborted", abortForClient);
           res.off("close", onResponseClose);
         }
-      },
+    };
+
+    // The request's own abort signal for waits that happen outside an upstream
+    // call (a key that is still cooling): a client that goes away ends the wait.
+    let waitClientGone = false;
+    const markWaitClientGone = () => { waitClientGone = true; };
+    if (oneModel) {
+      req.once("aborted", markWaitClientGone);
+      res.once("close", () => { if (!res.writableEnded) markWaitClientGone(); });
+    }
+    const oneModelCheckpoint = () => {
+      if (waitClientGone) {
+        const gone = new Error("Client disconnected");
+        gone.status = 499;
+        gone.retryable = false;
+        throw gone;
+      }
+      if (gateway.paused) {
+        const paused = new Error("Gateway was shut down from the Control Panel");
+        paused.status = 503;
+        paused.retryable = false;
+        paused.errorType = "gateway_paused";
+        throw paused;
+      }
+      if (!oneModelStore.active() || !oneModelStore.matches(oneModel)) {
+        const changed = new Error("One Model Fallback was changed in the Control Panel while this request was waiting");
+        changed.status = 503;
+        changed.retryable = false;
+        changed.errorType = "one_model_changed";
+        throw changed;
+      }
+      if (modelSwitch.isDisabled(oneModel.provider, oneModel.model)) {
+        const off = new Error("The selected model was switched off in the Control Panel while this request was waiting");
+        off.status = 503;
+        off.retryable = false;
+        off.errorType = "model_disabled";
+        throw off;
+      }
+    };
+
+    const result = oneModel
+      ? await withOneModel(oneModelTargets, invokeTarget, {
+        pacer: keyPacer,
+        health: healthRegistry,
+        checkpoint: oneModelCheckpoint,
+        maxWaitMs: config.oneModelMaxWaitMs,
+        onSkip: (target, { phase, reason }) => {
+          attempts.push({
+            phase, provider: target.provider, model: target.model, keyIndex: target.keyIndex,
+            protocol: null, ok: false, skipped: true, skipReason: reason,
+            status: null, startedAt: Date.now(), latencyMs: 0, errorMessage: null
+          });
+          progressRequest(liveSeq, { attempts, inflight: null });
+        }
+      })
+      : await withFallback(
+      selectable,
+      invokeTarget,
       config.retryableStatus,
       // A pin is a one-off override (e.g. the Playground testing a key): its
       // success must not become the session's sticky target for normal traffic.
@@ -1029,14 +1121,21 @@ async function proxy(req, res, protocol, pathname) {
     });
     // `error.message` can be raw upstream text (an all-400 walk and non-retryable
     // statuses surface it), so it is scrubbed like every other outbound message.
-    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: error?.errorType === "gateway_paused" ? "gateway_paused" : "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
+    return json(res, error.status || 502, { error: { message: clientMessage(error.message) || "All routing targets failed", type: PASSTHROUGH_ERROR_TYPES.has(error?.errorType) ? error.errorType : "upstream_error", failures: publicFailure(error) }, }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 }
+
+// Error types the client is told verbatim; every other failure reads "upstream_error".
+const PASSTHROUGH_ERROR_TYPES = new Set([
+  "gateway_paused", "one_model_cooldown", "one_model_failed", "one_model_changed", "model_disabled"
+]);
 
 const handleApi = createApi({
   config,
   fallbackChain,
   modelSwitch,
+  oneModel: oneModelStore,
+  keyPacer,
   targets,
   health: healthRegistry,
   requestLog,
@@ -1188,6 +1287,7 @@ async function handleRequest(req, res) {
       },
       disabledModels: modelSwitch.list(),
       disabledProviders: modelSwitch.listProviders(),
+      oneModel: oneModelStore.get(),
       retryableStatus: [...config.retryableStatus]
     });
   }
