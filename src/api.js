@@ -178,7 +178,9 @@ export function createApi({
 
   // Targets routing may actually use: models switched off in the Control Panel
   // are removed, so every order shown by the API is the order requests walk.
+  // True when the model is off on its own OR its whole provider is off.
   const isSwitchedOff = (target) => Boolean(modelSwitch?.isDisabled?.(target.provider, target.model));
+  const isProviderSwitchedOff = (provider) => Boolean(modelSwitch?.isProviderDisabled?.(provider));
   const routableTargets = () => (modelSwitch ? targets.filter((target) => !isSwitchedOff(target)) : targets);
 
   // The chain store is the single source of truth for order and mode. These two
@@ -272,6 +274,8 @@ export function createApi({
       const healthRow = rollup.find((row) => row.provider === provider.id);
       return {
         ...provider,
+        // Switched off from the Control Panel: none of its models are routed.
+        disabled: isProviderSwitchedOff(provider.id),
         health: healthRow ?? emptyRollup(provider),
         // Per-target detail is what the provider drawer renders.
         targets: entries.filter((entry) => entry.provider === provider.id)
@@ -296,6 +300,7 @@ export function createApi({
         const healthRow = visionRollup.find((row) => row.provider === provider.id);
         return {
           ...provider,
+          disabled: isProviderSwitchedOff(provider.id),
           health: healthRow ?? emptyRollup(provider),
           targets: visionEntries.filter((entry) => entry.provider === provider.id)
         };
@@ -307,9 +312,15 @@ export function createApi({
   // --- /api/models -------------------------------------------------------
   function modelsPayload(now = Date.now()) {
     const entries = describeAll(now);
-    // `disabled` is per provider/model, so every key row of a model agrees.
+    // `disabled` is the effective state (the model's own switch OR its provider's),
+    // so every key row of a model agrees. `providerDisabled` says when the
+    // provider is the reason, because the model's own switch cannot undo that.
     const catalogue = modelCatalogue(entries, [...requestLog.entries.values()])
-      .map((row) => ({ ...row, disabled: isSwitchedOff(row) }));
+      .map((row) => ({
+        ...row,
+        disabled: isSwitchedOff(row),
+        providerDisabled: isProviderSwitchedOff(row.provider)
+      }));
 
     return {
       generatedAt: new Date(now).toISOString(),
@@ -436,6 +447,7 @@ export function createApi({
         group.available = group.keyStates.some((key) => key.available);
         group.status = rollupStatus(group.keyStates);
         group.disabled = Boolean(modelSwitch?.isDisabled?.(group.provider, group.model));
+        group.providerDisabled = isProviderSwitchedOff(group.provider);
       }
     }
 
@@ -446,6 +458,7 @@ export function createApi({
       chain: { text: fallbackChain?.get?.("text") ?? [], vision: fallbackChain?.get?.("vision") ?? [] },
       catalogue: byPool,
       disabledModels: modelSwitch?.list?.() ?? [],
+      disabledProviders: modelSwitch?.listProviders?.() ?? [],
       pools: FALLBACK_POOLS,
       poolsSeparate: true,
       // What the router is currently remembering, so the panel can show it and
@@ -818,6 +831,46 @@ export function createApi({
         catch { return fail(req, res, 500, "Could not save the model switch", "server_error"); }
         resetAutomaticOrderCache();
         return sendJson(req, res, 200, { ok: true, changed, provider, model, disabled: body.disabled, ...fallbackPayload(now) });
+      }
+    }
+
+    /*
+     * The Provider Switch: turn a whole provider off or on. While it is off none
+     * of its models (any key, either pool) is planned, fallen back to or
+     * previewed, and requests already waiting on it are aborted and fall back to
+     * the next model. Nothing is cooled down and no model's own switch or health
+     * data changes, so enabling the provider restores exactly the previous
+     * behaviour.
+     */
+    if (pathname === "/api/providers/switch" && modelSwitch) {
+      if (req.method === "GET") return sendJson(req, res, 200, { disabledProviders: modelSwitch.listProviders() });
+
+      if (req.method === "PUT") {
+        let body;
+        try { body = await readJsonBody(req, config.maxBodyBytes); }
+        catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
+
+        const provider = typeof body?.provider === "string" ? body.provider.trim().toLowerCase() : "";
+        if (!provider) return fail(req, res, 400, "provider is required", "invalid_request");
+        if (typeof body?.disabled !== "boolean") return fail(req, res, 400, "disabled must be true or false", "invalid_request");
+
+        // Only a configured provider can be switched off; a typo must not create
+        // an entry nobody can see or clear. A provider that has since been
+        // removed from the configuration may still be switched back ON.
+        const known = targets.some((target) => target.provider === provider);
+        if (body.disabled && !known) {
+          return fail(req, res, 404, `no configured provider "${provider}"`, "not_found");
+        }
+
+        let changed;
+        try { changed = modelSwitch.setProvider(provider, body.disabled); }
+        catch { return fail(req, res, 500, "Could not save the provider switch", "server_error"); }
+        resetAutomaticOrderCache();
+        return sendJson(req, res, 200, {
+          ok: true, changed, provider, disabled: body.disabled,
+          disabledProviders: modelSwitch.listProviders(),
+          ...fallbackPayload(now)
+        });
       }
     }
 

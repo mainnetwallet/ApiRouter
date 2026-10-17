@@ -15,10 +15,34 @@ import path from "node:path";
  * not a health event: nothing is cooled down and no measurement changes, so
  * enabling the model again restores exactly the behaviour it had before.
  *
+ * A whole PROVIDER can be switched off too. `isDisabled(provider, model)` is true
+ * when the model itself is off OR its provider is off, so every place that
+ * already filters by the switch (routing, fallback, health batch, previews)
+ * drops all of that provider's models without any further change. The two
+ * switches are independent: enabling a provider never touches a model the
+ * operator turned off on its own, and turning a model off never touches its
+ * provider.
+ *
  * The file holds ids only, never credentials.
  */
 
 const MAX_IDS = 500;
+const MAX_PROVIDERS = 200;
+
+const providerId = (provider) => String(provider ?? "").trim().toLowerCase();
+
+function normalizeProviders(value) {
+  const ids = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(value) ? value : []) {
+    const id = providerId(typeof raw === "string" ? raw : raw?.provider);
+    if (!id || id.length > 100 || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= MAX_PROVIDERS) break;
+  }
+  return ids;
+}
 
 export const modelSwitchId = (provider, model) =>
   `${String(provider ?? "").trim().toLowerCase()}/${String(model ?? "").trim()}`;
@@ -44,6 +68,7 @@ export class ModelSwitchStore {
   constructor({ file = null } = {}) {
     this.file = file ? path.resolve(file) : null;
     this.disabled = new Map();
+    this.disabledProviders = new Set();
     this.listeners = new Set();
     this.load();
   }
@@ -55,6 +80,9 @@ export class ModelSwitchStore {
       for (const entry of normalizeIds(parsed?.disabled)) {
         this.disabled.set(modelSwitchId(entry.provider, entry.model), entry);
       }
+      for (const id of normalizeProviders(parsed?.disabledProviders)) {
+        this.disabledProviders.add(id);
+      }
     } catch (error) {
       // A missing file is the normal first run; a corrupt one must not stop the
       // gateway, and is not overwritten until the operator's next change.
@@ -62,8 +90,18 @@ export class ModelSwitchStore {
     }
   }
 
+  /** True when the model is off on its own OR its whole provider is off. */
   isDisabled(provider, model) {
+    return this.isProviderDisabled(provider) || this.isModelDisabled(provider, model);
+  }
+
+  /** The model's own switch only, ignoring its provider's. */
+  isModelDisabled(provider, model) {
     return this.disabled.has(modelSwitchId(provider, model));
+  }
+
+  isProviderDisabled(provider) {
+    return this.disabledProviders.has(providerId(provider));
   }
 
   /** The disabled models, as plain { provider, model } objects. */
@@ -71,7 +109,16 @@ export class ModelSwitchStore {
     return [...this.disabled.values()].map((entry) => ({ ...entry }));
   }
 
-  /** Called with ({ provider, model, disabled }) after every real change. */
+  /** The disabled providers, as plain { provider } objects. */
+  listProviders() {
+    return [...this.disabledProviders].map((provider) => ({ provider }));
+  }
+
+  /**
+   * Called after every real change, with ({ provider, model, disabled }) for a
+   * model and ({ provider, model: null, disabled, scope: "provider" }) for a
+   * whole provider.
+   */
   onChange(listener) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -92,21 +139,51 @@ export class ModelSwitchStore {
     const next = new Map(this.disabled);
     if (disabled) next.set(id, entry);
     else next.delete(id);
-    this.persist(next);
+    this.persist(next, this.disabledProviders);
     this.disabled = next;
 
-    for (const listener of this.listeners) {
-      try { listener({ ...entry, disabled: Boolean(disabled) }); }
-      catch (error) { console.warn(`model switch: listener failed (${error?.message || error})`); }
-    }
+    this.emit({ ...entry, disabled: Boolean(disabled) });
     return true;
   }
 
-  persist(map = this.disabled) {
+  /**
+   * Turns a whole provider off or on and persists it. While a provider is off
+   * every one of its models is out of routing and fallback; its models' own
+   * switches and all health data are left exactly as they were, so enabling it
+   * again restores the previous behaviour. Returns false when nothing changed.
+   */
+  setProvider(provider, disabled) {
+    const id = providerId(provider);
+    if (!id || id.length > 100) throw new Error("provider is required");
+    const wasDisabled = this.disabledProviders.has(id);
+    if (wasDisabled === Boolean(disabled)) return false;
+
+    const next = new Set(this.disabledProviders);
+    if (disabled) next.add(id);
+    else next.delete(id);
+    this.persist(this.disabled, next);
+    this.disabledProviders = next;
+
+    this.emit({ provider: id, model: null, disabled: Boolean(disabled), scope: "provider" });
+    return true;
+  }
+
+  emit(event) {
+    for (const listener of this.listeners) {
+      try { listener(event); }
+      catch (error) { console.warn(`model switch: listener failed (${error?.message || error})`); }
+    }
+  }
+
+  persist(map = this.disabled, providers = this.disabledProviders) {
     if (!this.file) return;
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, disabled: [...map.values()] }, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify({
+      version: 1,
+      disabled: [...map.values()],
+      disabledProviders: [...providers]
+    }, null, 2));
     fs.renameSync(tmp, this.file);
   }
 }

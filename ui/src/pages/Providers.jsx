@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { getProviders } from "../api/providers.js";
+import { getProviders, setProviderDisabled } from "../api/providers.js";
 import { useApi } from "../hooks/useApi.js";
 import { useConnection } from "../context/ConnectionContext.jsx";
 import { PageHeader } from "../components/layout/PageHeader.jsx";
@@ -30,6 +30,29 @@ import { formatRelativeTime, providerLabel } from "../lib/format.js";
  * keys. There is no code path that reads key material into the browser, so
  * nothing here can leak one.
  */
+
+/**
+ * On/Off for a whole provider: every model, every key, both pools together.
+ * The click must not open the row's drawer.
+ */
+function ProviderSwitchButton({ row, busy, onToggle }) {
+  if (!row.configured) return <span className="dim tiny">—</span>;
+  const off = row.disabled === true;
+  return (
+    <button
+      type="button"
+      className={`btn btn--sm ${off ? "" : "btn--ghost"}`}
+      aria-pressed={!off}
+      disabled={busy}
+      title={off
+        ? "Switched off — click to enable this provider and all its models"
+        : "Click to disable this provider (removes all its models from routing and fallback)"}
+      onClick={(event) => { event.stopPropagation(); onToggle(row); }}
+    >
+      {busy ? "…" : off ? "Off" : "On"}
+    </button>
+  );
+}
 
 export default function Providers() {
   const { generation } = useConnection();
@@ -68,6 +91,23 @@ export default function Providers() {
   // rows describe different configuration.
   const [selection, setSelection] = useState(null);
   const [sort, setSort] = useState({ key: "provider", direction: "asc" });
+  const [pendingProvider, setPendingProvider] = useState(null);
+  const [switchError, setSwitchError] = useState(null);
+
+  // Applies at once on the gateway: none of the provider's models is routed or
+  // fallen back to while it is off, and enabling it restores them as they were.
+  const toggleProvider = async (row) => {
+    setPendingProvider(row.id);
+    setSwitchError(null);
+    try {
+      await setProviderDisabled(row.id, !row.disabled);
+      reload();
+    } catch (switchFailure) {
+      setSwitchError(switchFailure);
+    } finally {
+      setPendingProvider(null);
+    }
+  };
 
   const selected = useMemo(() => {
     if (!selection) return null;
@@ -100,9 +140,14 @@ export default function Providers() {
       header: "Status",
       sortable: true,
       get: (row) => row.health.status,
-      render: (row) => row.configured
-        ? <HealthBadge status={row.health.status} />
-        : <StatusBadge tone="neutral">not configured</StatusBadge>
+      render: (row) => {
+        if (!row.configured) return <StatusBadge tone="neutral">not configured</StatusBadge>;
+        // A switched-off provider is not a health problem, so it says so rather
+        // than showing a health state it is no longer being measured by.
+        return row.disabled
+          ? <StatusBadge tone="neutral">switched off</StatusBadge>
+          : <HealthBadge status={row.health.status} />;
+      }
     },
     {
       key: "models",
@@ -164,8 +209,18 @@ export default function Providers() {
       sortable: true,
       get: (row) => row.health.lastUpdatedAt,
       render: (row) => <span className="dim tiny nowrap">{formatRelativeTime(row.health.lastUpdatedAt)}</span>
+    },
+    {
+      key: "switch",
+      header: "Switch",
+      align: "right",
+      sortable: true,
+      get: (row) => (row.disabled ? 1 : 0),
+      render: (row) => (
+        <ProviderSwitchButton row={row} busy={pendingProvider === row.id} onToggle={toggleProvider} />
+      )
     }
-  ], []);
+  ], [pendingProvider]);
 
   if (loading && !providerData) {
     return (
@@ -187,6 +242,7 @@ export default function Providers() {
       />
 
       {error ? <ErrorState error={error} onRetry={reload} compact /> : null}
+      {switchError ? <ErrorState error={switchError} compact /> : null}
 
       {groups.map((group) => (
         <section className="section" key={group.pool}>

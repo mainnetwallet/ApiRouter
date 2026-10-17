@@ -101,11 +101,16 @@ const modelSwitch = new ModelSwitchStore({ file: config.disabledModelsFile });
 // Upstream attempts that are still waiting for a response, so switching a model
 // off can abort them and let their request fall back to the next model.
 const pendingAttempts = new Set();
-modelSwitch.onChange(({ provider, model, disabled }) => {
+modelSwitch.onChange(({ provider, model, disabled, scope }) => {
   resetAutomaticOrderCache();
   if (!disabled) return;
   for (const attempt of [...pendingAttempts]) {
-    if (modelSwitchId(attempt.provider, attempt.model) === modelSwitchId(provider, model)) attempt.abortForSwitch();
+    // A provider switch aborts every pending attempt on that provider; a model
+    // switch only the attempts on that model.
+    const hit = scope === "provider"
+      ? String(attempt.provider ?? "").trim().toLowerCase() === provider
+      : modelSwitchId(attempt.provider, attempt.model) === modelSwitchId(provider, model);
+    if (hit) attempt.abortForSwitch();
   }
 });
 if (fallbackChain.migrated) {
@@ -1182,6 +1187,7 @@ async function handleRequest(req, res) {
         })
       },
       disabledModels: modelSwitch.list(),
+      disabledProviders: modelSwitch.listProviders(),
       retryableStatus: [...config.retryableStatus]
     });
   }

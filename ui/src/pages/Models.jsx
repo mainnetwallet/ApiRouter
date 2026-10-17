@@ -385,13 +385,18 @@ function makeColumns({ onToggle, pendingKey }) {
  */
 function ModelSwitchButton({ row, busy, onToggle }) {
   const off = row.disabled === true;
+  // The provider is off, so the model's own switch cannot bring it back: the
+  // provider has to be enabled on the Providers page first.
+  const providerOff = row.providerDisabled === true;
   return (
     <button
       type="button"
       className={`btn btn--sm ${off ? "" : "btn--ghost"}`}
       aria-pressed={!off}
-      disabled={busy}
-      title={off ? "Switched off — click to enable this model" : "Click to disable this model (removes it from routing and fallback)"}
+      disabled={busy || providerOff}
+      title={providerOff
+        ? "The whole provider is switched off — enable it on the Providers page"
+        : off ? "Switched off — click to enable this model" : "Click to disable this model (removes it from routing and fallback)"}
       onClick={(event) => { event.stopPropagation(); onToggle(row); }}
     >
       {busy ? "…" : off ? "Off" : "On"}
