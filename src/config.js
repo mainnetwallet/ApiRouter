@@ -179,7 +179,7 @@ export function loadConfig(env = process.env) {
     // Models the operator switched OFF from the control panel (ids only). A
     // disabled model is removed from routing in every mode until switched on.
     disabledModelsFile: String(env.DISABLED_MODELS_FILE || "").trim() || "data/disabled-models.json",
-    // One Model Fallback: the chosen model, its on/off flag and the per-key
+    // One Provider Fallback: the chosen provider and its models, its on/off flag and the per-key
     // cooldowns the operator set (numbers and ids only), plus how long a request
     // may wait when every key it has left is cooling.
     oneModelFile: String(env.ONE_MODEL_FILE || "").trim() || "data/one-model.json",

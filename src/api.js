@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
-import { ONE_MODEL_MAX_COOLDOWN_MS } from "./one-model.js";
+import { ONE_MODEL_MAX_COOLDOWN_MS, ONE_PROVIDER_MAX_MODELS, oneModelKeyId } from "./one-model.js";
 import { modelLatency, resetAutomaticOrderCache, routeOrderByPool } from "./fallback-plan.js";
 import {
   FALLBACK_MODE_INFO,
@@ -184,8 +184,9 @@ export function createApi({
   // True when the model is off on its own OR its whole provider is off.
   const isSwitchedOff = (target) => Boolean(modelSwitch?.isDisabled?.(target.provider, target.model));
   const isProviderSwitchedOff = (provider) => Boolean(modelSwitch?.isProviderDisabled?.(provider));
-  // With One Model Fallback on, only the chosen model's keys are ever routed, so
-  // every order the API shows is limited to them, as the proxy path is.
+  // With One Provider Fallback on, only the chosen provider's listed models are
+  // ever routed, so every order the API shows is limited to them, as the proxy
+  // path is.
   const oneModelActive = () => oneModel?.active?.() ?? null;
   const routableTargets = () => {
     const live = modelSwitch ? targets.filter((target) => !isSwitchedOff(target)) : targets;
@@ -344,7 +345,7 @@ export function createApi({
     };
   }
 
-  // --- /api/one-model ----------------------------------------------------
+  // --- /api/one-model (One Provider Fallback) -----------------------------
   function oneModelPayload(now = Date.now()) {
     const state = oneModel.get();
     const healthById = new Map(describeAll(now).map((entry) => [entry.id, entry]));
@@ -364,19 +365,28 @@ export function createApi({
     }
     const candidates = [...groups.values()]
       .sort((a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model))
-      .map((group) => ({ ...group, selected: group.provider === state.provider && group.model === state.model }));
+      .map((group) => {
+        const rank = group.provider === state.provider ? state.models.indexOf(group.model) : -1;
+        // `selected` = in the chosen provider's list; `rank` is its place (1 = leads).
+        return { ...group, selected: rank >= 0, rank: rank >= 0 ? rank + 1 : null };
+      });
 
     const keys = targets
       .filter((target) => oneModel.matches(target))
-      .sort((a, b) => (a.pool ?? "text").localeCompare(b.pool ?? "text") || a.keyIndex - b.keyIndex)
+      .sort((a, b) => oneModel.modelRank(a) - oneModel.modelRank(b)
+        || (a.pool ?? "text").localeCompare(b.pool ?? "text") || a.keyIndex - b.keyIndex)
       .map((target) => {
         const entry = healthById.get(health.key(target));
         const pacing = keyPacer ? keyPacer.describe(target, now) : { cooldownUntil: 0, ready: true };
         return {
           provider: target.provider,
           model: target.model,
+          // 1 = the model that leads; the next model is used when this one's keys all fail or cool.
+          rank: oneModel.modelRank(target) + 1,
           pool: target.pool ?? "text",
           keyIndex: target.keyIndex,
+          // Id to use in `cooldowns`: "model::pool:keyIndex".
+          keyId: oneModelKeyId(target),
           // The cooldown the operator set on this key, in ms (0 = none).
           cooldownMs: oneModel.cooldownFor(target),
           ready: pacing.ready,
@@ -393,11 +403,14 @@ export function createApi({
       generatedAt: new Date(now).toISOString(),
       enabled: state.enabled,
       provider: state.provider || null,
-      model: state.model || null,
+      // The chosen models in priority order: the first leads.
+      models: state.models,
       // True when requests are really being routed this way right now.
       active: Boolean(oneModel.active()),
       maxWaitMs: config.oneModelMaxWaitMs ?? null,
-      switchedOff: Boolean(state.model) && Boolean(modelSwitch?.isDisabled?.(state.provider, state.model)),
+      // True when every listed model is switched off in the Control Panel.
+      switchedOff: state.models.length > 0
+        && state.models.every((model) => Boolean(modelSwitch?.isDisabled?.(state.provider, model))),
       candidates,
       keys
     };
@@ -580,8 +593,9 @@ export function createApi({
       };
     }
 
-    // One Model Fallback: only the chosen model's keys are routed, and a pool it
-    // has no key in cannot be served at all (nothing else is ever tried).
+    // One Provider Fallback: only the chosen provider's listed models are routed,
+    // and a pool none of them has a key in cannot be served at all (nothing else
+    // is ever tried).
     const activeOneModel = oneModelActive();
     const poolTargets = activeOneModel
       ? switchedOnTargets.filter((target) => oneModel.matches(target))
@@ -591,7 +605,7 @@ export function createApi({
       return {
         status: 503,
         type: "one_model_unavailable",
-        error: `One Model Fallback is on and ${activeOneModel.provider}/${activeOneModel.model} has no usable key in the ${pool} pool`
+        error: `One Provider Fallback is on and ${activeOneModel.provider} has no usable key in the ${pool} pool for its chosen models`
       };
     }
 
@@ -958,9 +972,10 @@ export function createApi({
     }
 
     /*
-     * One Model Fallback: serve every request from ONE chosen provider/model and
-     * nothing else. Each of its keys cools for a fixed time the moment it is
-     * called (see one-model.js). Takes effect immediately and changes no saved
+     * One Provider Fallback: serve every request from ONE chosen provider and
+     * nothing else, trying its listed models in order (see one-model.js). A key
+     * with a cooldown cools for that long the moment it is called. Takes effect
+     * immediately and changes no saved
      * chain, health measurement or model switch, so switching it off restores
      * the previous routing exactly.
      */
@@ -976,22 +991,40 @@ export function createApi({
           return fail(req, res, 400, "enabled must be true or false", "invalid_request");
         }
         const hasProvider = body?.provider !== undefined;
-        const hasModel = body?.model !== undefined;
-        if (hasProvider !== hasModel) return fail(req, res, 400, "provider and model must be sent together", "invalid_request");
-        if (hasProvider && (typeof body.provider !== "string" || typeof body.model !== "string")) {
-          return fail(req, res, 400, "provider and model must be strings", "invalid_request");
+        if (hasProvider && typeof body.provider !== "string") {
+          return fail(req, res, 400, "provider must be a string", "invalid_request");
+        }
+        // The ordered model list. `model` (one name) is still accepted as a list of one.
+        if (body?.models !== undefined && body?.model !== undefined) {
+          return fail(req, res, 400, "send models or model, not both", "invalid_request");
+        }
+        let nextModels = null;
+        if (body?.models !== undefined) {
+          if (!Array.isArray(body.models) || body.models.some((entry) => typeof entry !== "string")) {
+            return fail(req, res, 400, "models must be a list of model names", "invalid_request");
+          }
+          nextModels = [...new Set(body.models.map((entry) => entry.trim()).filter(Boolean))];
+        } else if (body?.model !== undefined) {
+          if (typeof body.model !== "string") return fail(req, res, 400, "model must be a string", "invalid_request");
+          nextModels = body.model.trim() ? [body.model.trim()] : [];
+        }
+        if (nextModels && nextModels.length > ONE_PROVIDER_MAX_MODELS) {
+          return fail(req, res, 400, `at most ${ONE_PROVIDER_MAX_MODELS} models`, "invalid_request");
+        }
+        if ((hasProvider || nextModels !== null) && !(hasProvider && nextModels !== null)) {
+          return fail(req, res, 400, "provider and models must be sent together", "invalid_request");
         }
 
-        // Per-key cooldowns: { "text:0": 60000, "text:1": null }. A number sets a
+        // Per-key cooldowns: { "model::text:0": 60000, "model::text:1": null }. A number sets a
         // key's cooldown in ms, null (or 0) removes it, a key left out is kept.
         let cooldowns = {};
         if (body?.cooldowns !== undefined) {
           if (body.cooldowns === null || typeof body.cooldowns !== "object" || Array.isArray(body.cooldowns)) {
-            return fail(req, res, 400, "cooldowns must be an object of \"pool:keyIndex\" to milliseconds", "invalid_request");
+            return fail(req, res, 400, "cooldowns must be an object of \"model::pool:keyIndex\" to milliseconds", "invalid_request");
           }
           for (const [id, ms] of Object.entries(body.cooldowns)) {
-            if (!/^(text|vision):\d{1,4}$/.test(id)) {
-              return fail(req, res, 400, `invalid key id "${id.slice(0, 20)}": use "text:0" or "vision:0"`, "invalid_request");
+            if (!/^(.{1,300}::)?(text|vision):\d{1,4}$/.test(id)) {
+              return fail(req, res, 400, `invalid key id "${id.slice(0, 20)}": use "model::text:0" or "model::vision:0"`, "invalid_request");
             }
             const ok = ms === null || ms === 0
               || (Number.isSafeInteger(ms) && ms >= 1 && ms <= ONE_MODEL_MAX_COOLDOWN_MS);
@@ -1006,32 +1039,41 @@ export function createApi({
         const next = {
           enabled: body?.enabled ?? current.enabled,
           provider: hasProvider ? body.provider.trim().toLowerCase() : current.provider,
-          model: hasModel ? body.model.trim() : current.model
+          models: nextModels ?? current.models
         };
-        if (next.enabled && (!next.provider || !next.model)) {
-          return fail(req, res, 400, "choose a provider and a model first", "invalid_request");
+        if (next.enabled && (!next.provider || next.models.length === 0)) {
+          return fail(req, res, 400, "choose a provider and at least one model first", "invalid_request");
         }
-        // Only a configured model can be chosen; a typo must not leave the
-        // gateway routing everything to a model that does not exist. Switching
-        // the mode OFF is always allowed.
-        const known = targets.some((target) => target.provider === next.provider && target.model === next.model);
-        if ((next.enabled || hasProvider) && next.provider && !known) {
-          return fail(req, res, 404, `no configured model "${next.provider}/${next.model}"`, "not_found");
+        // Only configured models can be chosen; a typo must not leave the gateway
+        // routing everything to a model that does not exist. Switching the mode
+        // OFF is always allowed.
+        if ((next.enabled || hasProvider) && next.provider) {
+          const unknownModel = next.models.find((model) =>
+            !targets.some((target) => target.provider === next.provider && target.model === model));
+          if (unknownModel !== undefined) {
+            return fail(req, res, 404, `no configured model "${next.provider}/${unknownModel}"`, "not_found");
+          }
         }
 
-        // Cooldowns are for the chosen model's keys; one for a key it does not
-        // have would sit in the file doing nothing and nobody could see it.
+        // Cooldowns are for the chosen models' keys; one for a key that is not
+        // there would sit in the file doing nothing and nobody could see it. An
+        // old-style "text:0" means that key of the first model.
+        const resolvedCooldowns = {};
+        for (const [id, ms] of Object.entries(cooldowns)) {
+          resolvedCooldowns[/^(text|vision):\d{1,4}$/.test(id) && next.models.length > 0 ? `${next.models[0]}::${id}` : id] = ms;
+        }
+        cooldowns = resolvedCooldowns;
         if (Object.keys(cooldowns).length > 0) {
           const keyIds = new Set(targets
-            .filter((target) => target.provider === next.provider && target.model === next.model)
-            .map((target) => `${target.pool ?? "text"}:${target.keyIndex}`));
+            .filter((target) => target.provider === next.provider && next.models.includes(target.model))
+            .map((target) => oneModelKeyId(target)));
           const unknownKey = Object.entries(cooldowns).find(([id, ms]) => ms !== null && ms !== 0 && !keyIds.has(id));
-          if (unknownKey) return fail(req, res, 404, `the chosen model has no key "${unknownKey[0]}"`, "not_found");
+          if (unknownKey) return fail(req, res, 404, `the chosen models have no key "${unknownKey[0]}"`, "not_found");
         }
 
         let changed;
         try { changed = oneModel.set({ ...next, cooldowns }); }
-        catch { return fail(req, res, 500, "Could not save the One Model Fallback setting", "server_error"); }
+        catch { return fail(req, res, 500, "Could not save the One Provider Fallback setting", "server_error"); }
         resetAutomaticOrderCache();
         return sendJson(req, res, 200, { ok: true, changed, ...oneModelPayload(Date.now()) });
       }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { getOneModel, setOneModel, keyIdOf } from "../api/oneModel.js";
+import { getOneProvider, setOneProvider, keyIdOf } from "../api/oneProvider.js";
 import { useApi } from "../hooks/useApi.js";
 import { useConnection } from "../context/ConnectionContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
@@ -15,24 +15,25 @@ import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { formatCountdown, formatNumber, providerLabel, EMPTY } from "../lib/format.js";
 
 /**
- * One Model Fallback.
+ * One Provider Fallback.
  *
- * Serves every request from ONE chosen provider/model and nothing else: no other
- * provider or model is ever used as a fallback. Within that model the keys work
- * like this:
+ * Serves every request from ONE chosen provider and nothing else: no other
+ * provider is ever used as a fallback. The operator lists any number of that
+ * provider's models in order (model 1, 2, 3, ...), and each model has its own
+ * keys:
  *
- *   - by default a key has no cooldown and nothing waits: the key that answered
- *     is called again for the next request, and if a call fails the next key is
- *     tried
- *   - a cooldown can be set per key: that key then cools for that long the
- *     moment a call is made with it, whether the call succeeds or fails
- *   - only when every key that is left is cooling does a request wait
+ *   - model 1's keys are tried first; when every one of them has failed or is
+ *     cooling, model 2 is tried, then model 3, and so on
+ *   - every request starts from model 1 again, so a key that is out of its
+ *     cooldown is used again straight away
+ *   - by default a key has no cooldown and nothing waits; a cooldown can be set
+ *     per key, and it starts the moment a call is made with that key
+ *   - when every key of every model has failed or is cooling, the request waits
+ *     for the first cooldown to end and tries again
  *
  * The switch applies at once on the gateway and changes no saved chain, model
  * switch or health data, so turning it off restores the previous routing.
  */
-
-const idOf = (provider, model) => `${provider}/${model}`;
 
 const secondsOf = (ms) => (ms > 0 ? String(Math.round(ms / 1000)) : "");
 
@@ -76,7 +77,7 @@ function CooldownInput({ keyRow, disabled, onCommit }) {
         placeholder="none"
         value={text}
         disabled={disabled}
-        aria-label={`Cooldown in seconds for key ${keyRow.keyIndex} (empty for none)`}
+        aria-label={`Cooldown in seconds for ${keyRow.model} key ${keyRow.keyIndex} (empty for none)`}
         aria-invalid={invalid || undefined}
         title="Seconds this key cools after each call. Empty = no cooldown. 60 = 1 minute."
         onFocus={() => setEditing(true)}
@@ -89,18 +90,21 @@ function CooldownInput({ keyRow, disabled, onCommit }) {
   );
 }
 
-export default function OneModelFallback() {
+const sameList = (a, b) => a.length === b.length && a.every((entry, index) => entry === b[index]);
+
+export default function OneProviderFallback() {
   const { generation } = useConnection();
   const toast = useToast();
-  const state = useApi(getOneModel, { intervalMs: 5_000, deps: [generation] });
+  const state = useApi(getOneProvider, { intervalMs: 5_000, deps: [generation] });
   const data = state.data;
 
-  // The model picked in the list but not applied yet. `null` means "whatever the
-  // gateway has", so a poll never overwrites what the operator is choosing.
+  // The provider and model list being edited but not applied yet. `null` means
+  // "whatever the gateway has", so a poll never overwrites what the operator is
+  // choosing.
   const [draft, setDraft] = useState(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState(null);
-  const [sort, setSort] = useState({ key: "key", direction: "asc" });
+  const [sort, setSort] = useState({ key: "model", direction: "asc" });
   const [allText, setAllText] = useState("");
 
   // One tick a second so every cooldown counts down between polls.
@@ -111,17 +115,36 @@ export default function OneModelFallback() {
   }, []);
 
   const candidates = data?.candidates ?? [];
-  const savedId = data?.provider && data?.model ? idOf(data.provider, data.model) : "";
-  const chosenId = draft ?? savedId;
-  const chosen = candidates.find((candidate) => idOf(candidate.provider, candidate.model) === chosenId) ?? null;
+  const providers = useMemo(() => [...new Set(candidates.map((candidate) => candidate.provider))].sort(), [candidates]);
+  const savedProvider = data?.provider ?? "";
+  const savedModels = data?.models ?? [];
+  const chosenProvider = draft?.provider ?? savedProvider;
+  const chosenModels = draft?.models ?? savedModels;
   const enabled = data?.enabled === true;
-  const changedSelection = enabled && chosenId !== "" && chosenId !== savedId;
+  const dirty = chosenProvider !== savedProvider || !sameList(chosenModels, savedModels);
+  const changedSelection = enabled && chosenProvider !== "" && chosenModels.length > 0 && dirty;
+
+  const providerModels = candidates.filter((candidate) => candidate.provider === chosenProvider);
+  const modelInfo = (model) => providerModels.find((candidate) => candidate.model === model) ?? null;
+  const addable = providerModels.filter((candidate) => !chosenModels.includes(candidate.model));
+
+  const edit = (provider, models) => setDraft({ provider, models });
+  const pickProvider = (provider) => edit(provider, provider === savedProvider ? savedModels : []);
+  const addModel = (model) => model && edit(chosenProvider, [...chosenModels, model]);
+  const removeModel = (index) => edit(chosenProvider, chosenModels.filter((_, at) => at !== index));
+  const moveModel = (index, delta) => {
+    const to = index + delta;
+    if (to < 0 || to >= chosenModels.length) return;
+    const next = [...chosenModels];
+    [next[index], next[to]] = [next[to], next[index]];
+    edit(chosenProvider, next);
+  };
 
   const apply = async (payload, successMessage) => {
     setBusy(true);
     setActionError(null);
     try {
-      await setOneModel(payload);
+      await setOneProvider(payload);
       setDraft(null);
       state.reload();
       toast.success(successMessage);
@@ -132,24 +155,27 @@ export default function OneModelFallback() {
     }
   };
 
-  const turnOn = () => chosen && apply(
-    { enabled: true, provider: chosen.provider, model: chosen.model },
-    `One Model Fallback is on: ${chosen.provider} / ${chosen.model}`
+  const canApply = chosenProvider !== "" && chosenModels.length > 0;
+  const turnOn = () => canApply && apply(
+    { enabled: true, provider: chosenProvider, models: chosenModels },
+    `One Provider Fallback is on: ${chosenProvider} (${chosenModels.length} model${chosenModels.length === 1 ? "" : "s"})`
   );
-  const switchModel = () => chosen && apply(
-    { enabled: true, provider: chosen.provider, model: chosen.model },
-    `Now using only ${chosen.provider} / ${chosen.model}`
+  const saveChanges = () => canApply && apply(
+    { enabled: true, provider: chosenProvider, models: chosenModels },
+    `Now using only ${chosenProvider}: ${chosenModels.join(" → ")}`
   );
-  const turnOff = () => apply({ enabled: false }, "One Model Fallback is off — normal fallback restored");
+  const turnOff = () => apply({ enabled: false }, "One Provider Fallback is off — normal fallback restored");
 
-  // Cooldowns belong to the keys of the model the gateway is using, so they can
-  // only be edited for the saved model, not for one that is merely picked.
+  // Cooldowns belong to the keys of the models the gateway is using, so they can
+  // only be edited for the saved selection, not for one that is merely picked.
   const keys = data?.keys ?? [];
-  const canEditKeys = chosenId === savedId && savedId !== "" && keys.length > 0;
+  const canEditKeys = !dirty && savedProvider !== "" && keys.length > 0;
 
   const setKeyCooldown = (keyRow, ms) => apply(
     { cooldowns: { [keyIdOf(keyRow)]: ms } },
-    ms === null ? `Key #${keyRow.keyIndex}: no cooldown` : `Key #${keyRow.keyIndex}: ${Math.round(ms / 1000)}s cooldown`
+    ms === null
+      ? `${keyRow.model} key #${keyRow.keyIndex}: no cooldown`
+      : `${keyRow.model} key #${keyRow.keyIndex}: ${Math.round(ms / 1000)}s cooldown`
   );
 
   const allMs = parseCooldownSeconds(allText);
@@ -162,6 +188,16 @@ export default function OneModelFallback() {
   };
 
   const columns = useMemo(() => [
+    {
+      key: "model", header: "Model", sortable: true,
+      get: (row) => row.rank,
+      render: (row) => (
+        <span>
+          <span className="tiny dim">#{row.rank}</span>{" "}
+          <span className="mono">{row.model}</span>
+        </span>
+      )
+    },
     {
       key: "pool", header: "Pool", sortable: true,
       get: (row) => row.pool,
@@ -221,8 +257,8 @@ export default function OneModelFallback() {
   if (state.loading && !data) {
     return (
       <div className="page">
-        <PageHeader title="One Model Fallback" description="Serve every request from one model and nothing else" />
-        <div className="panel"><div className="panel__body"><TableSkeleton rows={4} label="Loading One Model Fallback" /></div></div>
+        <PageHeader title="One Provider Fallback" description="Serve every request from one provider and nothing else" />
+        <div className="panel"><div className="panel__body"><TableSkeleton rows={4} label="Loading One Provider Fallback" /></div></div>
       </div>
     );
   }
@@ -230,8 +266,8 @@ export default function OneModelFallback() {
   return (
     <div className="page">
       <PageHeader
-        title="One Model Fallback"
-        description="Serve every request from one model and nothing else"
+        title="One Provider Fallback"
+        description="Serve every request from one provider and nothing else"
         lastUpdatedAt={state.lastUpdatedAt}
         refreshing={state.refreshing}
         actions={<button type="button" className="btn" onClick={state.reload} disabled={state.refreshing}>Refresh</button>}
@@ -249,31 +285,47 @@ export default function OneModelFallback() {
               </StatusBadge>
               <span>
                 {data?.active
-                  ? <>Every request uses only <strong>{providerLabel(data.provider)} / <span className="mono">{data.model}</span></strong>. No other provider or model is used as a fallback.</>
-                  : "Normal fallback is in use. Turn this on to serve every request from a single model."}
+                  ? <>Every request uses only <strong>{providerLabel(data.provider)}</strong>, trying its models in the order below. No other provider is used as a fallback.</>
+                  : "Normal fallback is in use. Turn this on to serve every request from a single provider."}
               </span>
             </div>
 
             {data?.switchedOff ? (
               <p className="tiny" style={{ color: "var(--warn)", marginTop: "var(--sp-2)" }}>
-                The selected model is switched off in the Control Panel, so requests fail until it is switched on again.
+                Every chosen model is switched off in the Control Panel, so requests fail until one is switched on again.
               </p>
             ) : null}
 
             <div style={{ display: "flex", alignItems: "flex-end", gap: "var(--sp-3)", flexWrap: "wrap", marginTop: "var(--sp-3)" }}>
-              <label style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)", minWidth: 280 }}>
-                <span className="tiny dim">Model to use</span>
+              <label style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)", minWidth: 220 }}>
+                <span className="tiny dim">Provider to use</span>
                 <select
                   className="select"
-                  value={chosenId}
-                  disabled={busy || candidates.length === 0}
-                  onChange={(event) => setDraft(event.target.value)}
-                  aria-label="Model to use"
+                  value={chosenProvider}
+                  disabled={busy || providers.length === 0}
+                  onChange={(event) => pickProvider(event.target.value)}
+                  aria-label="Provider to use"
                 >
-                  <option value="" disabled>Choose a model…</option>
-                  {candidates.map((candidate) => (
-                    <option key={idOf(candidate.provider, candidate.model)} value={idOf(candidate.provider, candidate.model)}>
-                      {providerLabel(candidate.provider)} / {candidate.model} — {candidate.keyCount} key{candidate.keyCount === 1 ? "" : "s"} · {candidate.pools.join("+")}
+                  <option value="" disabled>Choose a provider…</option>
+                  {providers.map((provider) => (
+                    <option key={provider} value={provider}>{providerLabel(provider)}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)", minWidth: 280 }}>
+                <span className="tiny dim">Add a model (as many as you like)</span>
+                <select
+                  className="select"
+                  value=""
+                  disabled={busy || chosenProvider === "" || addable.length === 0}
+                  onChange={(event) => addModel(event.target.value)}
+                  aria-label="Add a model"
+                >
+                  <option value="" disabled>{chosenProvider === "" ? "Choose a provider first" : addable.length === 0 ? "Every model is already added" : "Add a model…"}</option>
+                  {addable.map((candidate) => (
+                    <option key={candidate.model} value={candidate.model}>
+                      {candidate.model} — {candidate.keyCount} key{candidate.keyCount === 1 ? "" : "s"} · {candidate.pools.join("+")}
                       {candidate.disabled ? " (switched off)" : ""}
                     </option>
                   ))}
@@ -283,20 +335,51 @@ export default function OneModelFallback() {
               {enabled ? (
                 <>
                   {changedSelection ? (
-                    <button type="button" className="btn btn--primary" onClick={switchModel} disabled={busy}>
-                      {busy ? "…" : "Switch to this model"}
+                    <button type="button" className="btn btn--primary" onClick={saveChanges} disabled={busy}>
+                      {busy ? "…" : "Save changes"}
                     </button>
+                  ) : null}
+                  {dirty ? (
+                    <button type="button" className="btn" onClick={() => setDraft(null)} disabled={busy}>Undo changes</button>
                   ) : null}
                   <button type="button" className="btn" onClick={turnOff} disabled={busy}>
                     {busy ? "…" : "Turn off"}
                   </button>
                 </>
               ) : (
-                <button type="button" className="btn btn--primary" onClick={turnOn} disabled={busy || !chosen}>
+                <button type="button" className="btn btn--primary" onClick={turnOn} disabled={busy || !canApply}>
                   {busy ? "…" : "Turn on"}
                 </button>
               )}
             </div>
+
+            <div className="tiny dim" style={{ marginTop: "var(--sp-3)", marginBottom: "var(--sp-1)" }}>
+              Models in order — model 1 leads, the next one is used when every key of the one before has failed or is cooling
+            </div>
+            {chosenModels.length === 0 ? (
+              <p className="tiny dim" style={{ margin: 0 }}>No model added yet.</p>
+            ) : (
+              <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: "var(--sp-1)" }} aria-label="Models in order">
+                {chosenModels.map((model, index) => {
+                  const info = modelInfo(model);
+                  return (
+                    <li key={model} style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", flexWrap: "wrap" }}>
+                      <span className="tiny dim" style={{ width: 28 }}>#{index + 1}</span>
+                      <span className="mono">{model}</span>
+                      <span className="tiny dim">
+                        {info ? `${info.keyCount} key${info.keyCount === 1 ? "" : "s"} · ${info.pools.join("+")}${info.disabled ? " · switched off" : ""}` : "not configured"}
+                      </span>
+                      <button type="button" className="btn btn--sm" disabled={busy || index === 0}
+                        aria-label={`Move ${model} up`} onClick={() => moveModel(index, -1)}>↑</button>
+                      <button type="button" className="btn btn--sm" disabled={busy || index === chosenModels.length - 1}
+                        aria-label={`Move ${model} down`} onClick={() => moveModel(index, 1)}>↓</button>
+                      <button type="button" className="btn btn--sm" disabled={busy}
+                        aria-label={`Remove ${model}`} onClick={() => removeModel(index)}>Remove</button>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
           </div>
         </div>
       </section>
@@ -306,11 +389,13 @@ export default function OneModelFallback() {
         <div className="panel">
           <div className="panel__body">
             <ul className="tiny" style={{ margin: 0, paddingLeft: "var(--sp-4)", display: "grid", gap: "var(--sp-1)" }}>
-              <li>Only the chosen model is called. No other provider or model is ever tried, even when it fails.</li>
+              <li>Only the chosen provider is called. No other provider is ever tried, even when all of its models fail.</li>
+              <li><strong>Models in order:</strong> model 1's keys are tried first. When every key of model 1 has failed or is cooling, model 2 is tried, then model 3, and so on.</li>
+              <li><strong>Back to model 1:</strong> every request starts from model 1 again, so a key that is out of its cooldown is used again at once.</li>
               <li><strong>No cooldown by default:</strong> nothing waits. The key that answered is called again for the next request, and if a call fails the next key is tried.</li>
               <li><strong>Cooldown per key (optional):</strong> set seconds on a key below and, the moment one call is made with it, that key cools for that long — success or failure — then is called again. Keys with no cooldown are never paced.</li>
-              <li>Only if every key that is left is cooling does a request wait for the first one to be ready (up to {Math.round((data?.maxWaitMs ?? 120_000) / 1000)}s), then it fails with a 503 that says when a key is ready.</li>
-              <li>An image request needs this model to have a key in the vision pool; otherwise it fails instead of falling back to another model.</li>
+              <li>If every key of every model has failed or is cooling, the request waits for the first cooldown to end (up to {Math.round((data?.maxWaitMs ?? 120_000) / 1000)}s) and tries again, then fails with a 503 that says when a key is ready.</li>
+              <li>An image request needs a model of this provider with a key in the vision pool; otherwise it fails instead of falling back to another provider.</li>
             </ul>
           </div>
         </div>
@@ -320,7 +405,7 @@ export default function OneModelFallback() {
         <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>
           Keys
           <span className="tiny dim" style={{ marginLeft: "var(--sp-2)", fontWeight: 400 }}>
-            {chosen ? `${providerLabel(chosen.provider)} / ${chosen.model}` : "Choose a model to see its keys"}
+            {savedProvider ? `${providerLabel(savedProvider)} · ${savedModels.length} model${savedModels.length === 1 ? "" : "s"}` : "Turn on a provider to see its keys"}
           </span>
         </div>
         {canEditKeys ? (
@@ -352,11 +437,11 @@ export default function OneModelFallback() {
             rows={keys}
             sort={sort}
             onSortChange={setSort}
-            rowKey={(row) => `${row.pool}:${row.keyIndex}`}
-            caption="Keys of the selected model and their cooldown"
+            rowKey={(row) => `${row.model}::${row.pool}:${row.keyIndex}`}
+            caption="Keys of the chosen models and their cooldown"
             emptyState={(
               <EmptyState title="No keys to show" icon="key">
-                {savedId ? "The selected model has no configured key." : "No model is selected yet."}
+                {savedProvider ? "The chosen models have no configured key." : "No provider is selected yet."}
               </EmptyState>
             )}
           />

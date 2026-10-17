@@ -99,16 +99,24 @@ const fallbackChain = new FallbackChainStore({
 // is applied to the candidate targets before any plan is built, so it works in
 // the automatic order and in Manual Model Selection alike.
 const modelSwitch = new ModelSwitchStore({ file: config.disabledModelsFile });
-// One Model Fallback: when on, every request is served from ONE chosen model
-// (all of its keys, nothing else). A key the operator gave a cooldown cools for
-// that long the moment it is called; see one-model.js.
+// One Provider Fallback: when on, every request is served from ONE chosen
+// provider (its listed models in priority order, all of their keys, nothing
+// else). A key the operator gave a cooldown cools for that long the moment it is
+// called; see one-model.js.
 const oneModelStore = new OneModelStore({ file: config.oneModelFile });
 const keyPacer = new KeyPacer();
-oneModelStore.onChange(({ scope, changedKeys }) => {
+oneModelStore.onChange(({ scope, reset, changedKeys }) => {
   resetAutomaticOrderCache();
-  if (scope === "selection") {
-    // A different model (or mode) starts from a clean slate.
+  if (reset) {
+    // The mode was turned on or off, or another provider was chosen: start from a clean slate.
     keyPacer.clear();
+    return;
+  }
+  if (scope === "selection") {
+    // Only the model list changed: a model that was dropped keeps no cooldown.
+    for (const target of targets) {
+      if (!oneModelStore.matches(target)) keyPacer.release(target);
+    }
     return;
   }
   // Only a key's cooldown was edited: that key is ready again at once, so a
@@ -571,9 +579,10 @@ async function proxy(req, res, protocol, pathname) {
   const selectable = pinned.pinned
     ? selection.selected
     : selection.selected.filter((target) => !modelSwitch.isDisabled(target.provider, target.model));
-  // One Model Fallback overrides the saved chain and the automatic order: only
-  // the chosen model's keys are candidates, and nothing else is ever tried. A
-  // pinned request is an explicit one-off and ignores it, like the switch.
+  // One Provider Fallback overrides the saved chain and the automatic order: only
+  // the chosen provider's listed models (and their keys) are candidates, and
+  // nothing else is ever tried. A pinned request is an explicit one-off and
+  // ignores it, like the switch.
   const oneModel = pinned.pinned ? null : oneModelStore.active();
   const oneModelTargets = oneModel
     ? selectable.filter((target) => oneModelStore.matches(target))
@@ -619,14 +628,15 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, 503, { error: { message: offMessage, type: "models_disabled" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  // One Model Fallback is on but the chosen model cannot serve THIS request (it
-  // has no key in this pool, or does not speak this client's protocol). The mode
-  // never falls back to another model, so say so plainly.
+  // One Provider Fallback is on but none of the chosen provider's models can
+  // serve THIS request (no key in this pool, or none speaks this client's
+  // protocol). The mode never falls back to another provider, so say so plainly.
   if (oneModel && oneModelTargets.length === 0) {
-    const label = `${oneModel.provider}/${oneModel.model}`;
-    const oneMessage = modelSwitch.isDisabled(oneModel.provider, oneModel.model)
-      ? `One Model Fallback is on and ${sanitizeMessage(label)} is switched off in the Control Panel`
-      : `One Model Fallback is on and ${sanitizeMessage(label)} cannot serve this request (no key for the ${pool} pool or this protocol)`;
+    const label = sanitizeMessage(`${oneModel.provider} (${oneModel.models.join(", ")})`);
+    const allOff = oneModel.models.every((model) => modelSwitch.isDisabled(oneModel.provider, model));
+    const oneMessage = allOff
+      ? `One Provider Fallback is on and every chosen model of ${label} is switched off in the Control Panel`
+      : `One Provider Fallback is on and ${label} cannot serve this request (no key for the ${pool} pool or this protocol)`;
     recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
@@ -885,15 +895,20 @@ async function proxy(req, res, protocol, pathname) {
         paused.errorType = "gateway_paused";
         throw paused;
       }
-      if (!oneModelStore.active() || !oneModelStore.matches(oneModel)) {
-        const changed = new Error("One Model Fallback was changed in the Control Panel while this request was waiting");
+      const nowActive = oneModelStore.active();
+      if (!nowActive || nowActive.provider !== oneModel.provider) {
+        const changed = new Error("One Provider Fallback was changed in the Control Panel while this request was waiting");
         changed.status = 503;
         changed.retryable = false;
         changed.errorType = "one_model_changed";
         throw changed;
       }
-      if (modelSwitch.isDisabled(oneModel.provider, oneModel.model)) {
-        const off = new Error("The selected model was switched off in the Control Panel while this request was waiting");
+      // A model that was switched off, or dropped from the list, is skipped by
+      // the walk (see invokeTarget); only when none is left does the request end.
+      const stillUsable = oneModelTargets.some((target) =>
+        oneModelStore.matches(target) && !modelSwitch.isDisabled(target.provider, target.model));
+      if (!stillUsable) {
+        const off = new Error("Every chosen model was switched off or removed in the Control Panel while this request was waiting");
         off.status = 503;
         off.retryable = false;
         off.errorType = "model_disabled";
@@ -904,6 +919,7 @@ async function proxy(req, res, protocol, pathname) {
     const result = oneModel
       ? await withOneModel(oneModelTargets, invokeTarget, {
         pacer: keyPacer,
+        models: oneModel.models,
         cooldownFor: (target) => oneModelStore.cooldownFor(target),
         health: healthRegistry,
         checkpoint: oneModelCheckpoint,
