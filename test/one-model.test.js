@@ -7,7 +7,6 @@ import { startMockUpstream } from "../test-helpers/mock-upstream.js";
 import { startRouter, postJson } from "../test-helpers/router-harness.js";
 import { OneModelStore, KeyPacer, withOneModel } from "../src/one-model.js";
 import { HealthRegistry } from "../src/health.js";
-import { cooldownOptions } from "../src/router.js";
 
 const ok = (model) => ({
   status: 200,
@@ -547,7 +546,7 @@ test("withOneModel: every failing status cools the key, so the next request does
       if (target.model === "m1") { const e = new Error("fail"); e.status = status; throw e; }
       return "done";
     };
-    const options = { pacer, health, models: ["m1", "m2"], failureCooldown: cooldownOptions };
+    const options = { pacer, health, models: ["m1", "m2"] };
     await withOneModel(targets, invoke, options);
     used.length = 0;
     await withOneModel(targets, invoke, options);
@@ -561,10 +560,48 @@ test("withOneModel: every key cooling means waiting for the first cooldown and t
   const targets = [0, 1].map((keyIndex) => ({ provider: "p", model: "m1", keyIndex, pool: "text" }));
   let calls = 0;
   const invoke = async () => { calls += 1; if (calls <= 4) { const e = new Error("down"); e.status = 503; throw e; } return "ok"; };
-  // a short cooldown per failure, so several rounds fit in the test
-  const failureCooldown = () => ({ cooldownMs: 120 });
+  // a short pacing cooldown, so several rounds fit in the test
+  const cooldownFor = () => 100;
   const startedAt = Date.now();
-  assert.equal(await withOneModel(targets, invoke, { pacer, health, models: ["m1"], failureCooldown }), "ok");
+  assert.equal(await withOneModel(targets, invoke, { pacer, health, models: ["m1"], cooldownFor }), "ok");
   assert.equal(calls, 5, "two keys, two rounds of failures, then an answer: it never gave up");
   assert.ok(Date.now() - startedAt >= 200, "it waited for the cooldowns");
+});
+
+test("withOneModel: a cooldown is the operator's time plus 1%, after a success and after a failure alike", async () => {
+  const pacer = new KeyPacer();
+  const health = new HealthRegistry();
+  const ok1 = { provider: "p", model: "m1", keyIndex: 0, pool: "text" };
+  const bad = { provider: "p", model: "m2", keyIndex: 0, pool: "text" };
+  const invoke = async (target) => { if (target === bad) { const e = new Error("x"); e.status = 500; throw e; } return "ok"; };
+  const before = Date.now();
+  await withOneModel([ok1], invoke, { pacer, health, cooldownFor: () => 60_000 });
+  const okLeft = pacer.readyAt(ok1) - before;
+  assert.ok(okLeft >= 60_600 && okLeft < 60_700, `success: 1 minute set cools 1.01 minutes (${okLeft} ms)`);
+  assert.equal(health.isAvailable(ok1), true, "a success adds no health cooldown");
+
+  const before2 = Date.now();
+  const blocked = withOneModel([bad], invoke, { pacer, health, cooldownFor: () => 60_000, checkpoint: () => { if (Date.now() - before2 > 150) { const e = new Error("gone"); e.retryable = false; throw e; } } });
+  await assert.rejects(blocked, /gone/);
+  const badLeft = pacer.readyAt(bad) - before2;
+  assert.ok(badLeft >= 60_600 && badLeft < 60_700, `failure: the same 1.01 minutes (${badLeft} ms)`);
+  assert.equal(health.isAvailable(bad), true, "with a cooldown set the failure adds no second one");
+});
+
+test("withOneModel: with no cooldown set a success is not paced and a failure cools the key for 5 minutes", async () => {
+  const pacer = new KeyPacer();
+  const health = new HealthRegistry();
+  const bad = { provider: "p", model: "m1", keyIndex: 0, pool: "text" };
+  const good = { provider: "p", model: "m1", keyIndex: 1, pool: "text" };
+  let failBad = true;
+  const invoke = async (target) => { if (target === bad && failBad) { const e = new Error("x"); e.status = 429; throw e; } return `k${target.keyIndex}`; };
+  const run = () => withOneModel([bad, good], invoke, { pacer, health, models: ["m1"] });
+
+  assert.equal(await run(), "k1", "key 0 fails, key 1 answers");
+  const left = health.get(health.key(bad)).cooldownUntil - Date.now();
+  assert.ok(left > 299_000 && left <= 300_000, `the failed key cools 5 minutes (${left} ms)`);
+  assert.equal(pacer.isReady(good), true, "the key that answered is not paced");
+  assert.equal(await run(), "k1", "the key that answered leads the next request");
+  failBad = false;
+  assert.equal(await run(), "k1", "the cooling key is not called even though it would work now");
 });

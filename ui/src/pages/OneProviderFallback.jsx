@@ -35,34 +35,38 @@ import { formatCountdown, formatNumber, providerLabel, EMPTY } from "../lib/form
  * switch or health data, so turning it off restores the previous routing.
  */
 
-const secondsOf = (ms) => (ms > 0 ? String(Math.round(ms / 1000)) : "");
+const minutesOf = (ms) => (ms > 0 ? String(Math.round(ms / 600) / 100) : "");
 
-/** "" -> null (no cooldown); a whole number of seconds -> ms; anything else -> undefined (invalid). */
-export function parseCooldownSeconds(text) {
+/**
+ * "" -> null (no cooldown); minutes (1, 2, 0.5, 1.25) -> ms; anything else ->
+ * undefined (invalid). The gateway adds 1% when it applies it (1 = 1.01 minutes).
+ */
+export function parseCooldownMinutes(text) {
   const trimmed = String(text ?? "").trim();
   if (trimmed === "") return null;
-  if (!/^\d+$/.test(trimmed)) return undefined;
-  const seconds = Number(trimmed);
-  if (seconds === 0) return null;
-  return seconds <= 86_400 ? seconds * 1000 : undefined;
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return undefined;
+  const minutes = Number(trimmed);
+  if (minutes === 0) return null;
+  const ms = Math.round(minutes * 60_000);
+  return ms >= 1 && ms <= 86_400_000 ? ms : undefined;
 }
 
 /**
- * One key's cooldown, in seconds. Empty means "no cooldown": the key is never
+ * One key's cooldown, in minutes. Empty means "no cooldown": the key is never
  * paced. Saved when the field loses focus or Enter is pressed.
  */
 function CooldownInput({ keyRow, disabled, onCommit }) {
-  const saved = secondsOf(keyRow.cooldownMs);
+  const saved = minutesOf(keyRow.cooldownMs);
   const [text, setText] = useState(saved);
   const [editing, setEditing] = useState(false);
-  const invalid = parseCooldownSeconds(text) === undefined;
+  const invalid = parseCooldownMinutes(text) === undefined;
 
   // Follow the gateway's value, but never while the operator is typing.
   useEffect(() => { if (!editing) setText(saved); }, [saved, editing]);
 
   const commit = () => {
     setEditing(false);
-    const ms = parseCooldownSeconds(text);
+    const ms = parseCooldownMinutes(text);
     if (ms === undefined) { setText(saved); return; }
     if ((ms ?? 0) !== keyRow.cooldownMs) onCommit(keyRow, ms);
   };
@@ -77,15 +81,15 @@ function CooldownInput({ keyRow, disabled, onCommit }) {
         placeholder="none"
         value={text}
         disabled={disabled}
-        aria-label={`Cooldown in seconds for ${keyRow.model} key ${keyRow.keyIndex} (empty for none)`}
+        aria-label={`Cooldown in minutes for ${keyRow.model} key ${keyRow.keyIndex} (empty for none)`}
         aria-invalid={invalid || undefined}
-        title="Seconds this key cools after each call. Empty = no cooldown. 60 = 1 minute."
+        title="Minutes this key cools after each call, success or failure (1 = 1.01 minutes). Empty = no cooldown: only a failed call cools it, for 5 minutes."
         onFocus={() => setEditing(true)}
         onChange={(event) => setText(event.target.value)}
         onBlur={commit}
         onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
       />
-      <span className="tiny dim">s</span>
+      <span className="tiny dim">m</span>
     </span>
   );
 }
@@ -194,15 +198,15 @@ export default function OneProviderFallback() {
     { cooldowns: { [keyIdOf(keyRow)]: ms } },
     ms === null
       ? `${keyRow.model} key #${keyRow.keyIndex}: no cooldown`
-      : `${keyRow.model} key #${keyRow.keyIndex}: ${Math.round(ms / 1000)}s cooldown`
+      : `${keyRow.model} key #${keyRow.keyIndex}: ${minutesOf(ms)} min cooldown`
   );
 
-  const allMs = parseCooldownSeconds(allText);
+  const allMs = parseCooldownMinutes(allText);
   const applyToAll = () => {
     if (allMs === undefined) return;
     apply(
       { cooldowns: Object.fromEntries(keys.map((keyRow) => [keyIdOf(keyRow), allMs])) },
-      allMs === null ? "No cooldown on any key" : `Every key: ${Math.round(allMs / 1000)}s cooldown`
+      allMs === null ? "No cooldown on any key (a failed key cools 5 minutes)" : `Every key: ${minutesOf(allMs)} min cooldown`
     );
   };
 
@@ -470,9 +474,8 @@ export default function OneProviderFallback() {
               <li>Only the chosen provider is called. No other provider is ever tried, even when all of its models fail.</li>
               <li><strong>Models in order:</strong> model 1's keys are tried first. When every key of model 1 has failed or is cooling, model 2 is tried, then model 3, and so on.</li>
               <li><strong>Back to model 1:</strong> every request starts from model 1 again, so a key that is out of its cooldown is used again at once.</li>
-              <li><strong>No pacing cooldown by default:</strong> a key that answers is called again for the next request.</li>
-              <li><strong>Failed keys cool down:</strong> a key whose call fails (429, 503, timeout, any error) goes into cooldown and is not called again until it ends. The next key or model is used meanwhile.</li>
-              <li><strong>Cooldown per key (optional):</strong> set seconds on a key below and, the moment one call is made with it, that key cools for that long — success or failure — then is called again. Keys with no cooldown are never paced.</li>
+              <li><strong>Same cooldown for every key (minutes):</strong> enter 1, 2, 5 … and Apply. From then on every call, success or failure, puts that key and model into cooldown for that long (1 minute = 1.01 minutes) and it is called again only after it ends. You can also set a different value per key.</li>
+              <li><strong>Empty (none):</strong> nothing is paced. A key that answers is called again for the next request, and only a key whose call fails (any error) cools, for 5 minutes. The next key or model is used meanwhile.</li>
               <li>If every key of every model has failed or is cooling, the request waits for the first cooldown to end and tries again, and keeps going until a key answers.</li>
               <li>An image request needs a model of this provider with a key in the vision pool; otherwise it fails instead of falling back to another provider.</li>
             </ul>
@@ -498,16 +501,16 @@ export default function OneProviderFallback() {
               placeholder="none"
               value={allText}
               disabled={busy}
-              aria-label="Cooldown in seconds for every key (empty for none)"
+              aria-label="Cooldown in minutes for every key (empty for none)"
               aria-invalid={allMs === undefined || undefined}
               onChange={(event) => setAllText(event.target.value)}
               onKeyDown={(event) => { if (event.key === "Enter") applyToAll(); }}
             />
-            <span className="tiny dim">s</span>
+            <span className="tiny dim">m</span>
             <button type="button" className="btn btn--sm" onClick={applyToAll} disabled={busy || allMs === undefined}>
               Apply to all
             </button>
-            <span className="tiny dim">60 = 1 minute · empty = no cooldown</span>
+            <span className="tiny dim">1, 2, 5 … minutes, every call (success or fail) · empty = only a failed key cools, 5 minutes</span>
           </div>
         ) : null}
         <div className="panel">

@@ -6,7 +6,7 @@ vi.mock("../../context/ToastContext.jsx", () => ({ useToast: () => ({ success() 
 vi.mock("../../context/ConnectionContext.jsx", () => ({ useConnection: () => ({ generation: 0 }) }));
 
 import { useApi } from "../../hooks/useApi.js";
-import OneProviderFallback, { parseCooldownSeconds } from "../OneProviderFallback.jsx";
+import OneProviderFallback, { parseCooldownMinutes } from "../OneProviderFallback.jsx";
 
 const candidate = (provider, model, extra = {}) => ({
   provider, model, pools: ["text"], keyCount: 2, disabled: false, selected: false, rank: null, ...extra
@@ -109,42 +109,44 @@ describe("One Provider Fallback page", () => {
     const markup = render(base);
     expect(markup).toContain("Models in order");
     expect(markup).toContain("Back to model 1");
-    expect(markup).toContain("No pacing cooldown by default");
-    expect(markup).toContain("Failed keys cool down");
-    expect(markup).toContain("Cooldown per key");
+    expect(markup).toContain("Same cooldown for every key (minutes)");
+    expect(markup).toContain("only a key whose call fails (any error) cools, for 5 minutes");
+    expect(markup).toContain("a different value per key");
     expect(markup).toContain("keeps going until a key answers");
   });
 
-  it("shows one cooldown input per key, naming its model, empty when none is set and in seconds when set", () => {
+  it("shows one cooldown input per key, naming its model, empty when none is set and in minutes when set", () => {
     const markup = on([key(0), key(1, { cooldownMs: 60_000 }), key(0, { model: "m3", rank: 2 })]);
-    expect(markup).toContain('aria-label="Cooldown in seconds for m1 key 0 (empty for none)"');
-    expect(markup).toContain('aria-label="Cooldown in seconds for m1 key 1 (empty for none)"');
-    expect(markup).toContain('aria-label="Cooldown in seconds for m3 key 0 (empty for none)"');
+    expect(markup).toContain('aria-label="Cooldown in minutes for m1 key 0 (empty for none)"');
+    expect(markup).toContain('aria-label="Cooldown in minutes for m1 key 1 (empty for none)"');
+    expect(markup).toContain('aria-label="Cooldown in minutes for m3 key 0 (empty for none)"');
     expect(markup).toContain('placeholder="none"');
-    expect(markup).toMatch(/value="60"/);
+    expect(markup).toMatch(/value="1"/);
     expect(markup).toContain("Apply to all");
   });
 
   it("offers no cooldown editing before the mode has models to edit", () => {
     const markup = render(base);
     expect(markup).not.toContain("Apply to all");
-    expect(markup).not.toContain("Cooldown in seconds for");
+    expect(markup).not.toContain("Cooldown in minutes for");
   });
 });
 
-describe("parseCooldownSeconds", () => {
-  it("maps empty and zero to no cooldown, whole seconds to milliseconds", () => {
-    expect(parseCooldownSeconds("")).toBeNull();
-    expect(parseCooldownSeconds("   ")).toBeNull();
-    expect(parseCooldownSeconds("0")).toBeNull();
-    expect(parseCooldownSeconds("60")).toBe(60_000);
-    expect(parseCooldownSeconds(" 5 ")).toBe(5_000);
-    expect(parseCooldownSeconds("86400")).toBe(86_400_000);
+describe("parseCooldownMinutes", () => {
+  it("maps empty and zero to no cooldown, minutes to milliseconds", () => {
+    expect(parseCooldownMinutes("")).toBeNull();
+    expect(parseCooldownMinutes("   ")).toBeNull();
+    expect(parseCooldownMinutes("0")).toBeNull();
+    expect(parseCooldownMinutes("1")).toBe(60_000);
+    expect(parseCooldownMinutes(" 5 ")).toBe(300_000);
+    expect(parseCooldownMinutes("0.5")).toBe(30_000);
+    expect(parseCooldownMinutes("1.25")).toBe(75_000);
+    expect(parseCooldownMinutes("1440")).toBe(86_400_000);
   });
 
-  it("rejects anything that is not a whole number of seconds up to a day", () => {
-    for (const bad of ["abc", "-5", "1.5", "1e3", "86401", "6 0"]) {
-      expect(parseCooldownSeconds(bad)).toBeUndefined();
+  it("rejects anything that is not a number of minutes up to a day", () => {
+    for (const bad of ["abc", "-5", "1e3", "1441", "6 0", "1.234", "1,5"]) {
+      expect(parseCooldownMinutes(bad)).toBeUndefined();
     }
   });
 });

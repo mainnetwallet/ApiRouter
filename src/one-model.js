@@ -16,28 +16,35 @@ import { targetId } from "./health.js";
  *     model 2 is tried, then model 3, and so on in the saved order.
  *   - Every request starts again from model 1, so as soon as a key of an earlier
  *     model is out of its cooldown it is used again.
- *   - A key that fails is cooled by the health registry and passed over until
- *     then. The key of a model that answered last leads the next request.
- *   - The operator can set a cooldown on a key. Then, the moment a call is made
- *     with that key, it goes into that cooldown (success or failure) and is
- *     called again once it is over. A key with no cooldown set is never paced.
- *   - When every key of every model has failed or is cooling, the request waits
- *     for the first cooldown to end and tries again, and keeps doing so with no
- *     limit until a key answers, the client goes away, or the mode is changed.
- *     Only a request-level 4xx (the request itself is bad) is not retried.
+ *   - The operator can set ONE cooldown for every key (or one per key), in
+ *     minutes. Then, the moment a call is made with a key, it goes into that
+ *     cooldown (+1%: 1 minute = 1.01 minutes) whether the call succeeds or
+ *     fails, and is called again once it is over.
+ *   - With NO cooldown set nothing is paced: the key that answered last leads the
+ *     next request. Only a key that FAILS (any error) cools, for 5 minutes, and
+ *     is passed over until then.
+ *   - A cooling key is never called. When every key of every model is cooling,
+ *     the request waits for the first cooldown to end and tries again, and keeps
+ *     doing so with no limit until a key answers, the client goes away, or the
+ *     mode is changed. Only a request-level 4xx (the request itself is bad) is
+ *     not retried.
  *
- * Two cooldowns apply. The operator's per-key pacing cooldown lives in `KeyPacer`
- * (it is this mode's own rule and is dropped when the mode is switched off). On
- * top of that, EVERY failed call puts its key in the health registry's cooldown
- * (status rules of the normal walk: 429 by retry-after or quota, 408 and 400 and
- * 413 short ones, 503/5xx/network the default), and a cooling key is never
- * called until it is over. A success clears it.
+ * The operator's pacing cooldown lives in `KeyPacer` (this mode's own rule, gone
+ * when the mode is switched off). The 5 minute failure cooldown is recorded in
+ * the health registry, so a key that failed is not called by any mode until then.
  *
  * The file holds ids, a flag, the model order and per-key cooldown numbers,
  * never credentials.
  */
 
 // A cooldown is a pacing rule, not a ban: a day is the most it can be set to.
+// A key the operator gave a cooldown cools for that time plus 1% after every
+// call, success or failure (1 minute set = 1.01 minutes), so the upstream's own
+// window is certainly over when the key is called again.
+export const ONE_MODEL_COOLDOWN_MARGIN = 1.01;
+// A key with NO cooldown set is not paced: it is called again at once after a
+// success. After a failure it cools for this long (any error, any status).
+export const ONE_MODEL_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 export const ONE_MODEL_MAX_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 export const ONE_PROVIDER_MAX_MODELS = 50;
 
@@ -334,10 +341,7 @@ export async function withOneModel(
     cooldownFor = () => 0,
     health = null,
     checkpoint = () => {},
-    onSkip = null,
-    // (status, error) -> markFailure options. The default is the health
-    // registry's own cooldown, so every failed key is parked.
-    failureCooldown = () => ({})
+    onSkip = null
   } = {}
 ) {
   const list = [...(Array.isArray(targets) ? targets : [])];
@@ -408,8 +412,10 @@ export async function withOneModel(
     }
 
     const id = targetId(target);
-    // A key with a cooldown set cools the moment the call is made, success or not.
-    pacer.claim(target, now, cooldownFor(target));
+    // A key with a cooldown set cools the moment the call is made, success or not
+    // (the operator's time plus 1%).
+    const pacing = cooldownFor(target);
+    pacer.claim(target, now, pacing > 0 ? Math.round(pacing * ONE_MODEL_COOLDOWN_MARGIN) : 0);
     const startedAt = Date.now();
 
     try {
@@ -436,14 +442,14 @@ export async function withOneModel(
       // The request itself is at fault: asking again after a cooldown cannot help.
       if (isRequestFault(status)) blocked.add(id);
 
-      // Every failed key goes into the health registry's cooldown (the same
-      // status rules as the normal walk), so it is not called again until that
-      // ends: the next request passes it over and uses the next key or model.
-      const { quotaKind, ...cooldown } = failureCooldown(status, error) ?? {};
-      health?.markFailure(target, status, cooldown);
+      // A key with a cooldown set is already cooling for exactly that time, so a
+      // failure adds nothing to it. A key with none cools for 5 minutes after ANY
+      // failure, and is not called again until then: the next request passes it
+      // over to the next key or model. A success never cools an unpaced key.
+      health?.markFailure(target, status, { cooldownMs: pacing > 0 ? 0 : ONE_MODEL_FAILURE_COOLDOWN_MS });
       // With nothing to cool the key (no health registry, no pacing cooldown) it
       // would be called again at once: it counts as used for this request.
-      if (!health && cooldownFor(target) <= 0) blocked.add(id);
+      if (!health && pacing <= 0) blocked.add(id);
     }
   }
 

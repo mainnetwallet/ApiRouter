@@ -226,7 +226,7 @@ export function parseRetryAfterMs(value, now = Date.now()) {
 }
 
 /** `markFailure` options for a failed attempt: short cooldowns for transient statuses. */
-export function cooldownOptions(status, error = null) {
+function cooldownOptions(status, error = null) {
   if (status === 400) return { cooldownMs: BAD_REQUEST_COOLDOWN_MS };
   if (status === 413) return { cooldownMs: SIZE_LIMIT_COOLDOWN_MS };
   if (status === 408) return { cooldownMs: TIMEOUT_COOLDOWN_MS };
