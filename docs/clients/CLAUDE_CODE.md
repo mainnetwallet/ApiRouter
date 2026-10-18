@@ -27,10 +27,10 @@ nano ~/.claude/settings.json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "https://apirouter-tdgs.onrender.com",
-    "ANTHROPIC_AUTH_TOKEN": "YOUR_APIROUTER_KEY",
+    "ANTHROPIC_AUTH_TOKEN": "YOUR_NEW_ROUTER_TOKEN",
     "ANTHROPIC_MODEL": "ApiRouter"
   },
-  "model": "Opus 5.5",
+  "model": "ApiRouter",
   "theme": "dark-daltonized",
   "skipDangerousModePermissionPrompt": true,
   "permissions": {
