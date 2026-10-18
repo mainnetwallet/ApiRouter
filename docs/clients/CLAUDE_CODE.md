@@ -30,7 +30,7 @@ nano ~/.claude/settings.json
     "ANTHROPIC_AUTH_TOKEN": "YOUR_APIROUTER_KEY",
     "ANTHROPIC_MODEL": "ApiRouter"
   },
-  "model": "fable",
+  "model": "Opus 5.5",
   "theme": "dark-daltonized",
   "skipDangerousModePermissionPrompt": true,
   "permissions": {
