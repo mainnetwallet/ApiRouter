@@ -23,11 +23,18 @@ nano ~/.claude/settings.json
 ### With ApiRouter API key
 
 ```json
+
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:8788",
+    "ANTHROPIC_BASE_URL": "https://apirouter-tdgs.onrender.com",
     "ANTHROPIC_AUTH_TOKEN": "YOUR_APIROUTER_KEY",
-    "ANTHROPIC_MODEL": "router"
+    "ANTHROPIC_MODEL": "ApiRouter"
+  },
+  "model": "fable",
+  "theme": "dark-daltonized",
+  "skipDangerousModePermissionPrompt": true,
+  "permissions": {
+    "defaultMode": "bypassPermissions"
   }
 }
 ```
