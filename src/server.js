@@ -28,6 +28,7 @@ import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { createCustomPlayground } from "./custom-playground.js";
 import { CustomEndpointStore, applyCustomEndpoints, isCustomProviderId } from "./custom-endpoints.js";
+import { createRemoteStorage } from "./remote-storage.js";
 import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
 import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
 import { OneModelStore, KeyPacer, withOneModel, oneModelKeyId } from "./one-model.js";
@@ -84,11 +85,23 @@ catch (error) {
 // Custom endpoints the operator saved permanently from the control panel. Each
 // one is merged into `config.providers` as a provider of its own (`custom-<name>`),
 // so everything below treats it exactly like a provider configured in the env.
+// With CUSTOM_ENDPOINTS_GITHUB_REPO set they are kept (encrypted) in a GitHub
+// branch instead of only on the local disk, so a redeploy cannot lose them.
+let customEndpointsRemote;
+try { customEndpointsRemote = createRemoteStorage(config.customEndpointsRemote); }
+catch (error) {
+  console.error(`Configuration error: ${error.message}`);
+  process.exit(1);
+}
 const customEndpoints = new CustomEndpointStore({
   file: config.customEndpointsFile,
+  remote: customEndpointsRemote,
   allowPrivateHosts: config.playgroundAllowPrivateHosts
 });
+await customEndpoints.init();
+customEndpoints.startRetry();
 applyCustomEndpoints(config, customEndpoints.list());
+if (customEndpointsRemote) console.log(`custom endpoints: stored in ${customEndpointsRemote.location} (encrypted)`);
 
 // Everything the router holds that must never be echoed back: provider keys
 // (both pools, saved custom endpoints included), Cloudflare account ids (they
@@ -97,6 +110,8 @@ applyCustomEndpoints(config, customEndpoints.list());
 function registerSecrets() {
   registerConfiguredSecrets([
     ...(config.routerApiKeys || []),
+    config.customEndpointsRemote?.token,
+    config.customEndpointsRemote?.secret,
     ...[config.providers, config.visionProviders].flatMap((group) => Object.values(group || {}).flatMap((p) => p?.apiKeys || [])),
     ...[config.providers, config.visionProviders].flatMap((group) => group?.cloudflare?.accountIds || [])
   ]);

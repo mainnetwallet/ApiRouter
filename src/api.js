@@ -776,7 +776,7 @@ export function createApi({
       };
 
       if (!id && req.method === "GET") {
-        return sendJson(req, res, 200, { endpoints: customEndpoints.describeAll(), protocols: [...CUSTOM_PROTOCOLS] });
+        return sendJson(req, res, 200, { endpoints: customEndpoints.describeAll(), protocols: [...CUSTOM_PROTOCOLS], storage: customEndpoints.storageInfo() });
       }
 
       if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
@@ -792,7 +792,7 @@ export function createApi({
 
       if (id && req.method === "DELETE") {
         try {
-          const removed = customEndpoints.remove(id);
+          const removed = await customEndpoints.remove(id);
           return sendJson(req, res, 200, { ok: true, removed, endpoints: customEndpoints.describeAll() });
         } catch (error) { return respond(error); }
       }

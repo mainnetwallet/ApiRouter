@@ -23,6 +23,7 @@ export function CustomEndpoints({ onChanged }) {
   const { generation } = useConnection();
   const { data, error, loading, reload } = useApi(listCustomEndpoints, { deps: [generation] });
   const endpoints = data?.endpoints ?? [];
+  const storage = data?.storage ?? null;
 
   // `editing` is null (closed), "new", or the id of the endpoint being edited.
   const [editing, setEditing] = useState(null);
@@ -88,6 +89,16 @@ export function CustomEndpoints({ onChanged }) {
       </div>
 
       {error ? <ErrorState error={error} onRetry={reload} compact /> : null}
+
+      {storage ? (
+        <div className="tiny" role="status" style={{ marginBottom: "var(--sp-2)", color: storage.mode === "file" || !storage.ready ? "var(--warn)" : "var(--text-dim)" }}>
+          {storage.mode === "file"
+            ? "Saved on this server's disk only. On a host that wipes its disk on redeploy (free Render) these endpoints are lost; set CUSTOM_ENDPOINTS_GITHUB_REPO to keep them (see README)."
+            : storage.ready
+              ? "Saved encrypted in GitHub, so a redeploy keeps them."
+              : `GitHub storage is not reachable${storage.error ? ` (${storage.error})` : ""}. Saved endpoints load as soon as it is, and changes are refused until then.`}
+        </div>
+      ) : null}
 
       <div className="panel">
         <div className="panel__body">

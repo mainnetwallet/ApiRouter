@@ -78,10 +78,10 @@ test("remove deletes the endpoint and the file entry", async () => {
   const file = tmpFile();
   const store = new CustomEndpointStore({ file, lookup: publicLookup });
   const { id } = await store.create(sample());
-  store.remove(id);
+  await store.remove(id);
   assert.equal(store.get(id), null);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).endpoints, []);
-  assert.throws(() => store.remove(id), (error) => error instanceof CustomEndpointError && error.status === 404);
+  await assert.rejects(() => store.remove(id), (error) => error instanceof CustomEndpointError && error.status === 404);
 });
 
 test("validation: URL shape, protocol, models, keys", async () => {
@@ -128,7 +128,7 @@ test("onChange fires after every create, update and remove", async () => {
   store.onChange(() => { calls += 1; });
   const { id } = await store.create(sample());
   await store.update(id, { name: "Renamed" });
-  store.remove(id);
+  await store.remove(id);
   assert.equal(calls, 3);
 });
 
@@ -160,7 +160,7 @@ test("applyCustomEndpoints replaces earlier custom providers instead of piling t
   const { id } = await store.create(sample());
   const config = loadConfig({});
   applyCustomEndpoints(config, store.list());
-  store.remove(id);
+  await store.remove(id);
   applyCustomEndpoints(config, store.list());
   assert.equal(Object.keys(config.providers).some(isCustomProviderId), false);
 });

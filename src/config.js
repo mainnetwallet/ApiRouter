@@ -190,6 +190,17 @@ export function loadConfig(env = process.env) {
     // Custom endpoints the operator saved permanently from the control panel:
     // each becomes a provider (id `custom-<name>`) with its own models and keys.
     customEndpointsFile: String(env.CUSTOM_ENDPOINTS_FILE || "").trim() || "data/custom-endpoints.json",
+    // Where saved custom endpoints are kept when the disk is wiped on every
+    // redeploy (a free Render service). Empty repo = disk only. Keys are
+    // encrypted with the secret before they are written; see remote-storage.js.
+    customEndpointsRemote: {
+      repo: String(env.CUSTOM_ENDPOINTS_GITHUB_REPO || "").trim(),
+      token: String(env.CUSTOM_ENDPOINTS_GITHUB_TOKEN || "").trim(),
+      branch: String(env.CUSTOM_ENDPOINTS_GITHUB_BRANCH || "").trim() || "apirouter-data",
+      path: String(env.CUSTOM_ENDPOINTS_GITHUB_PATH || "").trim() || "custom-endpoints.enc.json",
+      apiBase: String(env.CUSTOM_ENDPOINTS_GITHUB_API || "").trim() || "https://api.github.com",
+      secret: String(env.CUSTOM_ENDPOINTS_SECRET || "").trim()
+    },
     // Legacy, read ONCE to seed the chain above when no chain has been saved
     // yet. Never consulted again afterwards: the old systems cannot override
     // the configured chain.

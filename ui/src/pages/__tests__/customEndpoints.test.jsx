@@ -8,8 +8,8 @@ vi.mock("../../context/ConnectionContext.jsx", () => ({ useConnection: () => ({ 
 import { useApi } from "../../hooks/useApi.js";
 import { CustomEndpoints } from "../../components/domain/CustomEndpoints.jsx";
 
-const render = (endpoints, { loading = false } = {}) => {
-  useApi.mockReturnValue({ data: { endpoints }, error: null, loading, reload() {} });
+const render = (endpoints, { loading = false, storage = { mode: "file", ready: true } } = {}) => {
+  useApi.mockReturnValue({ data: { endpoints, storage }, error: null, loading, reload() {} });
   return renderToStaticMarkup(<CustomEndpoints />);
 };
 
@@ -31,5 +31,16 @@ describe("Custom endpoints manager", () => {
     expect(markup).toContain("m-a, m-b");
     expect(markup).toContain(">Edit<");
     expect(markup).toContain(">Remove<");
+  });
+
+  it("warns when saved endpoints live only on a disk a redeploy can wipe", () => {
+    expect(render([], { storage: { mode: "file", ready: true } })).toContain("CUSTOM_ENDPOINTS_GITHUB_REPO");
+  });
+
+  it("says so when they are stored encrypted in GitHub, and when GitHub is unreachable", () => {
+    expect(render([], { storage: { mode: "github", ready: true } })).toContain("Saved encrypted in GitHub");
+    const down = render([], { storage: { mode: "github", ready: false, error: "Could not reach GitHub" } });
+    expect(down).toContain("GitHub storage is not reachable");
+    expect(down).toContain("Could not reach GitHub");
   });
 });
