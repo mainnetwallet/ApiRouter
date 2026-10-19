@@ -1079,9 +1079,6 @@
 }
 .pg-route__edit { display: none; flex: none; }
 
-.chips.chips--source { grid-template-columns: repeat(2, auto); width: auto; }
-.chips.chips--source .chip { padding: 6px 14px; white-space: nowrap; }
-
 .pg-rail { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--sp-3); }
 .pg-rail__sheet { display: flex; flex-direction: column; gap: var(--sp-3); }
 .pg-rail__scrim,
@@ -1089,6 +1086,11 @@
 
 .chips.chips--segmented { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
 .chips.chips--segmented .chip { padding: 6px 4px; text-align: center; }
+
+/* Declared after --segmented so the Router / Custom toggle keeps its own size
+   instead of stretching to the full row and pushing "New chat" onto a new line. */
+.chips.chips--segmented.chips--source { grid-template-columns: repeat(2, auto); width: auto; }
+.chips.chips--segmented.chips--source .chip { padding: 6px 14px; white-space: nowrap; }
 
 .pg-advanced > summary {
   cursor: pointer;
@@ -1160,12 +1162,12 @@
 }
 
 @media (max-width: 720px) {
-  .playground { height: calc(100dvh - 112px); }
+  .playground { height: calc(100dvh - 124px); }
   .page--playground .page__header { margin-bottom: var(--sp-2); flex-wrap: nowrap; align-items: center; }
   .page--playground .page__subtitle,
   .page--playground .page__heading { display: none; }
-  .page--playground .page__actions { flex: 1 1 auto; justify-content: space-between; }
-  .chips.chips--source .chip { padding: 6px 12px; font-size: var(--fs-xs); }
+  .page--playground .page__actions { flex: 1 1 auto; flex-wrap: nowrap; justify-content: space-between; }
+  .chips.chips--segmented.chips--source .chip { padding: 6px 12px; font-size: var(--fs-xs); }
   .pg-transcript { padding: var(--sp-3) var(--sp-3) var(--sp-1); }
   .transcript { gap: var(--sp-5); }
   .msg__avatar { display: none; }
