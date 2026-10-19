@@ -93,7 +93,7 @@ function guardedLookup(allowPrivateHosts) {
 // Input validation
 // ---------------------------------------------------------------------------
 
-class PlaygroundError extends Error {
+export class PlaygroundError extends Error {
   constructor(status, type, message) {
     super(message);
     this.status = status;
@@ -104,17 +104,14 @@ class PlaygroundError extends Error {
 const hasControlChars = (text) => /[\u0000-\u001F\u007F]/.test(text);
 
 /**
- * Validate the caller-supplied target. Returns the normalized target, or throws
- * a PlaygroundError (400) describing exactly which field is wrong.
+ * Validate a base URL typed by the operator and return it normalized (origin +
+ * path, no trailing slash). Throws a PlaygroundError (400) naming the problem.
+ * Shared by the one-shot playground and by saved custom endpoints, so both
+ * refuse exactly the same URLs.
  */
-export function validateCustomRequest(input, { allowPrivateHosts = false } = {}) {
+export function validateEndpointBaseUrl(value, { allowPrivateHosts = false } = {}) {
   const bad = (message) => new PlaygroundError(400, "invalid_request_error", message);
-  if (!input || typeof input !== "object") throw bad("Request body must be a JSON object");
-
-  const protocol = String(input.protocol ?? "openai-chat");
-  if (!CUSTOM_PROTOCOLS.includes(protocol)) throw bad(`protocol must be one of: ${CUSTOM_PROTOCOLS.join(", ")}`);
-
-  const rawBase = String(input.baseUrl ?? "").trim();
+  const rawBase = String(value ?? "").trim();
   if (!rawBase) throw bad("Base URL is required");
   if (rawBase.length > MAX_URL_LENGTH) throw bad("Base URL is too long");
 
@@ -131,6 +128,23 @@ export function validateCustomRequest(input, { allowPrivateHosts = false } = {})
     throw new PlaygroundError(400, "blocked_host", "That address is private or reserved. Set PLAYGROUND_ALLOW_PRIVATE_HOSTS=1 on the gateway to test a local endpoint.");
   }
 
+  return url.origin + url.pathname.replace(/\/+$/, "");
+}
+
+/**
+ * Validate the caller-supplied target. Returns the normalized target, or throws
+ * a PlaygroundError (400) describing exactly which field is wrong.
+ */
+export function validateCustomRequest(input, { allowPrivateHosts = false } = {}) {
+  const bad = (message) => new PlaygroundError(400, "invalid_request_error", message);
+  if (!input || typeof input !== "object") throw bad("Request body must be a JSON object");
+
+  const protocol = String(input.protocol ?? "openai-chat");
+  if (!CUSTOM_PROTOCOLS.includes(protocol)) throw bad(`protocol must be one of: ${CUSTOM_PROTOCOLS.join(", ")}`);
+
+  const baseUrl = validateEndpointBaseUrl(input.baseUrl, { allowPrivateHosts });
+  const url = new URL(baseUrl);
+
   const model = String(input.model ?? "").trim();
   if (!model) throw bad("Model is required");
   if (model.length > MAX_MODEL_LENGTH || hasControlChars(model)) throw bad("Model id is not valid");
@@ -143,7 +157,7 @@ export function validateCustomRequest(input, { allowPrivateHosts = false } = {})
 
   return {
     protocol,
-    baseUrl: url.origin + url.pathname.replace(/\/+$/, ""),
+    baseUrl,
     host: url.host,
     apiKey,
     model,

@@ -14,6 +14,7 @@ import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { HealthDistribution } from "../components/charts/Charts.jsx";
 import { CapabilityBadges } from "../components/domain/CapabilityBadges.jsx";
 import { ProviderDrawer } from "../components/domain/ProviderDrawer.jsx";
+import { CustomEndpoints } from "../components/domain/CustomEndpoints.jsx";
 import { formatRelativeTime, providerLabel } from "../lib/format.js";
 
 /**
@@ -284,6 +285,8 @@ export default function Providers() {
           </div>
         </section>
       ))}
+
+      <CustomEndpoints onChanged={reload} />
 
       <ProviderDrawer
         open={Boolean(selected)}

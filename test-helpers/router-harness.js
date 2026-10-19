@@ -29,6 +29,7 @@ export async function startRouter(env = {}) {
       MANUAL_SELECTION_FILE: path.join(configDir, "manual-selection.json"),
       GATEWAY_STATE_FILE: path.join(configDir, "gateway-state.json"),
       DISABLED_MODELS_FILE: path.join(configDir, "disabled-models.json"),
+      CUSTOM_ENDPOINTS_FILE: path.join(configDir, "custom-endpoints.json"),
       ...env
     },
     stdio: ["ignore", "pipe", "pipe"]

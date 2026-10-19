@@ -39,6 +39,9 @@ export function buildUpstreamRequest(target, protocol, body, incomingHeaders = {
     url = joinUrl(anthropicBase, "v1/messages");
     payload.model = target.model;
     headers.authorization = "Bearer " + target.apiKey;
+    // Anthropic itself wants x-api-key; gateways in front of it want Bearer. A
+    // saved custom endpoint may be either, so it sends both.
+    if (String(target.provider ?? "").startsWith("custom-")) headers["x-api-key"] = target.apiKey;
     headers["anthropic-version"] = incomingHeaders["anthropic-version"] || "2023-06-01";
     if (incomingHeaders["anthropic-beta"]) headers["anthropic-beta"] = incomingHeaders["anthropic-beta"];
   } else if (protocol === "openai-responses") {

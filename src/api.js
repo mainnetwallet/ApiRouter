@@ -1,3 +1,4 @@
+import { CUSTOM_PROTOCOLS } from "./custom-playground.js";
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
 import { ONE_MODEL_MAX_COOLDOWN_MS, ONE_PROVIDER_MAX_MODELS, oneModelKeyId } from "./one-model.js";
@@ -120,7 +121,8 @@ export function createApi({
   resetFallbackState = null,
   describeFallbackState = null,
   clearRememberedTargets = null,
-  customPlayground = null
+  customPlayground = null,
+  customEndpoints = null
 }) {
   const liveStreams = new Set();
 
@@ -758,6 +760,44 @@ export function createApi({
         return sendJson(req, res, 409, { error: { message: result.reason, type: "conflict" }, ...result });
       }
       return sendJson(req, res, 200, { ok: true, cycle: result, health: healthPayload(Date.now()) });
+    }
+
+    /*
+     * Saved custom endpoints: a base URL + API style + any number of models and
+     * keys that the operator keeps permanently. Each becomes a normal provider
+     * (`custom-<name>`) in the Fallback Chain. Keys go in, never out: the panel
+     * only gets a key COUNT back.
+     */
+    if (customEndpoints && (pathname === "/api/custom-endpoints" || pathname.startsWith("/api/custom-endpoints/"))) {
+      const id = pathname === "/api/custom-endpoints" ? "" : decodeURIComponent(pathname.slice("/api/custom-endpoints/".length));
+      const respond = (error) => {
+        if (error?.status && error.status < 500) return fail(req, res, error.status, error.message, error.type || "invalid_request");
+        return fail(req, res, 500, "Could not save the custom endpoint", "server_error");
+      };
+
+      if (!id && req.method === "GET") {
+        return sendJson(req, res, 200, { endpoints: customEndpoints.describeAll(), protocols: [...CUSTOM_PROTOCOLS] });
+      }
+
+      if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
+        if ((req.method === "POST") !== !id) return fail(req, res, 405, "Use POST /api/custom-endpoints to create and PUT /api/custom-endpoints/:id to change", "method_not_allowed");
+        let body;
+        try { body = await readJsonBody(req, config.maxBodyBytes); }
+        catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
+        try {
+          const endpoint = id ? await customEndpoints.update(id, body) : await customEndpoints.create(body);
+          return sendJson(req, res, id ? 200 : 201, { ok: true, endpoint, endpoints: customEndpoints.describeAll() });
+        } catch (error) { return respond(error); }
+      }
+
+      if (id && req.method === "DELETE") {
+        try {
+          const removed = customEndpoints.remove(id);
+          return sendJson(req, res, 200, { ok: true, removed, endpoints: customEndpoints.describeAll() });
+        } catch (error) { return respond(error); }
+      }
+
+      return fail(req, res, 405, "Method not allowed", "method_not_allowed");
     }
 
     if (pathname === "/api/providers" && req.method === "GET") {

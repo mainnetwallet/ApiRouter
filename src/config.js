@@ -78,7 +78,7 @@ export function buildTargets(providers, pool = "text") {
           model,
           baseUrl,
           apiKey: provider.apiKeys[keyIndex],
-          protocols: providerProtocols(providerId),
+          protocols: Array.isArray(provider.protocols) && provider.protocols.length > 0 ? [...provider.protocols] : providerProtocols(providerId),
           clientHeaders: provider.clientHeaders || {},
           keyIndex
         });
@@ -187,6 +187,9 @@ export function loadConfig(env = process.env) {
     // cooldowns the operator set (numbers and ids only), plus how long a request
     // may wait when every key it has left is cooling.
     oneModelFile: String(env.ONE_MODEL_FILE || "").trim() || "data/one-model.json",
+    // Custom endpoints the operator saved permanently from the control panel:
+    // each becomes a provider (id `custom-<name>`) with its own models and keys.
+    customEndpointsFile: String(env.CUSTOM_ENDPOINTS_FILE || "").trim() || "data/custom-endpoints.json",
     // Legacy, read ONCE to seed the chain above when no chain has been saved
     // yet. Never consulted again afterwards: the old systems cannot override
     // the configured chain.

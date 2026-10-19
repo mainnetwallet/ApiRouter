@@ -293,6 +293,8 @@ outright, and that wins over the status code.
 | GET | `/api/gateway` | Gateway on/off state (`running` or `paused`) |
 | POST | `/api/gateway/shutdown` | Shut the gateway down: no proxy request or health probe reaches an upstream |
 | POST | `/api/gateway/resume` | Turn the gateway back on |
+| GET / POST | `/api/custom-endpoints` | List / create a saved custom endpoint (see [Saved custom endpoints](#saved-custom-endpoints)); keys are accepted but never returned |
+| PUT / DELETE | `/api/custom-endpoints/:id` | Change (name, base URL, API style, models, `addApiKeys` / `apiKeys`) or remove a saved custom endpoint |
 | POST | `/api/playground/custom` | Forward ONE request to a base URL, API key and model typed in the Playground (see [Custom endpoint playground](#custom-endpoint-playground)) |
 
 ### Shutdown and resume
@@ -365,6 +367,19 @@ Health probes are provider-aware and never generate text, so they do not consume
 Health reports the key and the endpoint. Whether the configured model is actually offered is reported separately, as `modelListed`, because a valid key and a reachable provider do not prove the model is usable. That signal is tri-state — `true` listed, `false` absent from a catalogue read to the end, `null` could not be verified — and it is reported alongside the last confirmed value and its timestamp, so an unreadable catalogue is never shown as a fresh result. A paginated catalogue is walked before absence is claimed; if it cannot be read to the end, the answer is "not verified" rather than "missing".
 
 The `/health` endpoint exposes target status, score, latency, success/failure counters, and cooldown information without returning API keys or upstream response bodies.
+
+### Saved custom endpoints
+
+A Playground test forgets everything. To keep a custom endpoint, press **Save permanently** in the Playground's Custom endpoint mode, or add one under **Providers → Custom endpoints**. A saved endpoint becomes a provider named `custom-<name>` and behaves like any provider configured through the environment: it appears in the Fallback Chain, is health-checked, cools down on failures, supports sticky routing, and can be switched off.
+
+- **One base URL, one API style** (OpenAI Chat, OpenAI Responses, Anthropic Messages or Gemini) per endpoint.
+- **Any number of models** (one per line) and **any number of keys** (one per line). Every model is tried with every key, in the order you set in the Fallback Chain.
+- Saving the same base URL and API style again from the Playground **adds** the model and key to the endpoint already saved.
+- Changes take effect immediately, with no restart. Removing an endpoint removes it from routing at once.
+- Keys are stored in `data/custom-endpoints.json` (override with `CUSTOM_ENDPOINTS_FILE`), like the other `data/` state. They are sent to the gateway but never returned: the control panel only shows how many keys an endpoint has, and the keys are redacted from any error text.
+- Text pool only; there is no separate vision pool for custom endpoints.
+- The same address rules as the Playground apply: private, loopback and metadata addresses are refused (hostnames are resolved when you save) unless `PLAYGROUND_ALLOW_PRIVATE_HOSTS=1`. A local model with no key needs a placeholder key such as `none`.
+- On hosts with an ephemeral disk (for example a free Render web service) the data file is lost on redeploy or restart, so saved endpoints disappear with it. Mount a persistent disk and point `CUSTOM_ENDPOINTS_FILE` at it, or re-add the endpoints.
 
 ### Custom endpoint playground
 

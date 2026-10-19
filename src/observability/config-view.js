@@ -76,8 +76,12 @@ function describeProvider(id, provider, targets, pool = "text", capabilities = n
     clientHeaderNames: configuredHeaderNames(provider),
     targetCount: providerTargets.length,
 
+    // A custom endpoint saved from the control panel (edited there, not in env).
+    custom: provider.custom === true,
+    label: provider.label || null,
+
     // The env var names an operator would edit for this provider.
-    envPrefix: provider.envPrefix || id.toUpperCase()
+    envPrefix: provider.custom ? null : provider.envPrefix || id.toUpperCase()
   };
 }
 
@@ -136,7 +140,8 @@ export function describeConfig(config, targets = []) {
  * Grouped the way `.env.example` presents them so the UI can mirror that file.
  */
 function providerEnvVars(providers, { vision }) {
-  return Object.entries(providers).map(([id, provider]) => {
+  // A saved custom endpoint is not environment configuration: no env var names.
+  return Object.entries(providers).filter(([, provider]) => !provider.custom).map(([id, provider]) => {
     const prefix = id.toUpperCase() + (vision ? "_VISION" : "");
     return {
       provider: id,

@@ -27,6 +27,7 @@ import { createSseUsageTap, createJsonUsageTap, tapBytes, tapEvents, usageFrom }
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { createCustomPlayground } from "./custom-playground.js";
+import { CustomEndpointStore, applyCustomEndpoints, isCustomProviderId } from "./custom-endpoints.js";
 import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
 import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
 import { OneModelStore, KeyPacer, withOneModel, oneModelKeyId } from "./one-model.js";
@@ -80,14 +81,27 @@ catch (error) {
   process.exit(1);
 }
 
+// Custom endpoints the operator saved permanently from the control panel. Each
+// one is merged into `config.providers` as a provider of its own (`custom-<name>`),
+// so everything below treats it exactly like a provider configured in the env.
+const customEndpoints = new CustomEndpointStore({
+  file: config.customEndpointsFile,
+  allowPrivateHosts: config.playgroundAllowPrivateHosts
+});
+applyCustomEndpoints(config, customEndpoints.list());
+
 // Everything the router holds that must never be echoed back: provider keys
-// (both pools), Cloudflare account ids (they sit in the upstream URL path) and
-// the router's own client keys. Registered once, before any request is served.
-registerConfiguredSecrets([
-  ...(config.routerApiKeys || []),
-  ...[config.providers, config.visionProviders].flatMap((group) => Object.values(group || {}).flatMap((p) => p?.apiKeys || [])),
-  ...[config.providers, config.visionProviders].flatMap((group) => group?.cloudflare?.accountIds || [])
-]);
+// (both pools, saved custom endpoints included), Cloudflare account ids (they
+// sit in the upstream URL path) and the router's own client keys. Registered
+// before any request is served and again whenever a custom endpoint changes.
+function registerSecrets() {
+  registerConfiguredSecrets([
+    ...(config.routerApiKeys || []),
+    ...[config.providers, config.visionProviders].flatMap((group) => Object.values(group || {}).flatMap((p) => p?.apiKeys || [])),
+    ...[config.providers, config.visionProviders].flatMap((group) => group?.cloudflare?.accountIds || [])
+  ]);
+}
+registerSecrets();
 // The Fallback Chain: the single source of truth for routing order, per pool.
 // On first run it is seeded from the legacy manual-selection file and priority
 // env vars, so an upgrade keeps the operator's routing; after that the legacy
@@ -156,7 +170,7 @@ const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
 const targets = [...textTargets, ...visionTargets];
 // Which pools each configured model id belongs to. Static for the process
 // lifetime (it comes from the environment), so it is built once.
-const modelCapabilities = modelPoolIndex(config);
+let modelCapabilities = modelPoolIndex(config);
 const sessions = new SessionStore();
 
 /**
@@ -1161,9 +1175,34 @@ const customPlayground = createCustomPlayground({
   isPaused: () => gateway.paused
 });
 
+// A saved custom endpoint takes effect at once, with no restart: its old targets
+// are dropped, the new ones are added to the live target lists (the health
+// monitor, the router and the control panel all read these same arrays), and
+// the new targets are probed straight away.
+customEndpoints.onChange((endpoints) => {
+  for (const list of [textTargets, targets]) {
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      if (isCustomProviderId(list[index].provider)) list.splice(index, 1);
+    }
+  }
+  applyCustomEndpoints(config, endpoints);
+  const customProviders = Object.fromEntries(Object.entries(config.providers).filter(([id]) => isCustomProviderId(id)));
+  const fresh = buildTargets(customProviders);
+  textTargets.push(...fresh);
+  targets.push(...fresh);
+  modelCapabilities = modelPoolIndex(config);
+  monitor.targetCount = targets.length;
+  registerSecrets();
+  resetAutomaticOrderCache();
+  if (fresh.length > 0 && !gateway.paused) {
+    refreshAllHealth(fresh, trackedCheckTargetHealth).catch(() => {});
+  }
+});
+
 const handleApi = createApi({
   config,
   customPlayground,
+  customEndpoints,
   fallbackChain,
   modelSwitch,
   oneModel: oneModelStore,
@@ -1287,7 +1326,7 @@ async function handleRequest(req, res) {
       ok: true,
       service: "apirouter",
       gateway: gateway.snapshot(),
-      providers: PROVIDERS,
+      providers: [...PROVIDERS, ...Object.keys(config.providers).filter(isCustomProviderId)],
       configuredTargets: targets.length,
       configuredTextTargets: textTargets.length,
       configuredVisionTargets: visionTargets.length,
