@@ -26,26 +26,3 @@ export function deleteCustomEndpoint(id) {
 export function splitList(text) {
   return [...new Set(String(text ?? "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
 }
-
-const sameBase = (a, b) => String(a ?? "").trim().replace(/\/+$/, "").toLowerCase() === String(b ?? "").trim().replace(/\/+$/, "").toLowerCase();
-
-/**
- * The Playground's "Save permanently" button. Saving the same base URL and API
- * style again ADDS the model and key to the endpoint already saved, instead of
- * creating a duplicate, so an endpoint grows one model / key at a time.
- * A blank key (a local model) is saved as the placeholder "none", because every
- * provider needs at least one key.
- */
-export async function saveCustomEndpoint({ name, baseUrl, protocol, model, apiKey }) {
-  const key = String(apiKey ?? "").trim() || "none";
-  const modelId = String(model ?? "").trim();
-  const existing = (await listCustomEndpoints())?.endpoints ?? [];
-  const match = existing.find((endpoint) => endpoint.protocol === protocol && sameBase(endpoint.baseUrl, baseUrl));
-  if (match) {
-    const models = [...new Set([...match.models, modelId])];
-    const result = await updateCustomEndpoint(match.id, { models, addApiKeys: [key] });
-    return { ...result, created: false };
-  }
-  const result = await createCustomEndpoint({ name, baseUrl, protocol, models: [modelId], apiKeys: [key] });
-  return { ...result, created: true };
-}

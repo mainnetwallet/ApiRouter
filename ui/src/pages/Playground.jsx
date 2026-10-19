@@ -8,7 +8,6 @@ import { Icon } from "../components/ui/Icon.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
 import { getModels } from "../api/models.js";
-import { saveCustomEndpoint } from "../api/customEndpoints.js";
 import {
   sendPlaygroundRequest, sendCustomRequest, buildRequestBody, buildPinHeaders, parseMaxTokens,
   customProblem, customMaxTokens, PROTOCOL_ENDPOINTS
@@ -117,32 +116,7 @@ export default function Playground() {
   }, [customBase, customModelName, activeProtocol]);
 
   const customHost = hostOf(customBase);
-  const [savingEndpoint, setSavingEndpoint] = useState(false);
   const customBlock = custom ? customProblem({ baseUrl: customBase, model: customModelName }) : null;
-
-  // "Save permanently": keep this endpoint as a provider in the fallback chain.
-  // The same base URL + API style saved again adds the model and key to the one
-  // already saved. The key goes to the gateway's own data file, nowhere else.
-  const saveEndpointPermanently = async () => {
-    if (customBlock !== null || savingEndpoint) return;
-    setSavingEndpoint(true);
-    try {
-      const result = await saveCustomEndpoint({
-        name: hostOf(customBase) || "Custom endpoint",
-        baseUrl: customBase,
-        protocol: activeProtocol,
-        model: customModelName,
-        apiKey: customKey
-      });
-      toast.success(result.created ? "Saved as a permanent endpoint" : "Added to the saved endpoint", {
-        detail: "It is now a provider in the fallback chain. Manage its models and keys under Providers → Custom endpoints."
-      });
-    } catch (failure) {
-      toast.error(failure?.message || "Could not save the endpoint");
-    } finally {
-      setSavingEndpoint(false);
-    }
-  };
 
   const hasImages = images.length > 0;
 
@@ -713,7 +687,7 @@ export default function Playground() {
                       </button>
                     </div>
                     <span className="field__hint">
-                      A test sends it once to your gateway for that call and never saves or logs it. Only “Save permanently” stores it.
+                      A test sends it once to your gateway for that call and never saves or logs it. To keep an endpoint, add it on the Custom Endpoints page.
                     </span>
                   </div>
 
@@ -747,21 +721,6 @@ export default function Playground() {
                     </span>
                   </div>
 
-                  <div className="field">
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={saveEndpointPermanently}
-                      disabled={busy || savingEndpoint || customBlock !== null}
-                      title={customBlock ?? "Keep this endpoint, model and key as a provider in the fallback chain"}
-                    >
-                      {savingEndpoint ? "Saving…" : "Save permanently"}
-                    </button>
-                    <span className="field__hint">
-                      Adds this base URL, model and key to the fallback chain like any other provider. Saving the same
-                      base URL again adds more models and keys to it. Unlike a test, this stores the key in the gateway&apos;s data file.
-                    </span>
-                  </div>
                 </>
               ) : (
               <>

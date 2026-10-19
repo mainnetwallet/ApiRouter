@@ -13,6 +13,7 @@ import { lazy } from "react";
  */
 const Dashboard = lazy(() => import("./pages/Dashboard.jsx"));
 const Providers = lazy(() => import("./pages/Providers.jsx"));
+const CustomEndpointsPage = lazy(() => import("./pages/CustomEndpoints.jsx"));
 const Models = lazy(() => import("./pages/Models.jsx"));
 const HealthMonitor = lazy(() => import("./pages/HealthMonitor.jsx"));
 const RouterControl = lazy(() => import("./pages/RouterControl.jsx"));
@@ -32,6 +33,8 @@ export const ROUTES = [
 
   { path: "/providers", label: "Providers", icon: "server", group: "Configure", element: Providers,
     description: "Configured providers, credentials and per-provider health" },
+  { path: "/custom-endpoints", label: "Custom Endpoints", icon: "globe", group: "Configure", element: CustomEndpointsPage,
+    description: "Your own base URL, models and keys, saved permanently as a fallback provider" },
   { path: "/models", label: "Models", icon: "box", group: "Configure", element: Models,
     description: "Model catalogue with health, protocol and usage" },
 

@@ -61,3 +61,13 @@ describe("Playground custom endpoint mode", () => {
     expect(markup).not.toContain('id="pg-c-base"');
   });
 });
+
+describe("Playground does not save endpoints", () => {
+  beforeEach(() => useApi.mockReset());
+
+  it("offers no Save permanently button, only a pointer to the Custom Endpoints page", () => {
+    const markup = render([]);
+    expect(markup).not.toContain("Save permanently");
+    expect(markup).toContain("Custom Endpoints page");
+  });
+});

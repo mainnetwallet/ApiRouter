@@ -191,7 +191,7 @@ This allows one failed API key to enter cooldown while sibling keys remain avail
 
 ### Saved custom endpoints
 
-Providers normally come from the environment (`PROVIDER_IDS` in `src/config.js`). A **saved custom endpoint** is a provider the operator adds at runtime from the control panel (Providers → Custom endpoints, or Playground → Save permanently). It is stored as one record:
+Providers normally come from the environment (`PROVIDER_IDS` in `src/config.js`). A **saved custom endpoint** is a provider the operator adds at runtime from the control panel (the Custom Endpoints page, `/custom-endpoints`). The Playground only tests an endpoint once and never saves it. It is stored as one record:
 
 ```text
 id (custom-<name>) + name + baseUrl + protocol + models[] + apiKeys[]

@@ -18,7 +18,7 @@ const EMPTY_FORM = { name: "", baseUrl: "", protocol: "openai-chat", models: "",
  * (one per line) and ANY number of keys (one per line). Keys are only ever sent
  * to the gateway; the list shows how many each endpoint has, never the keys.
  */
-export function CustomEndpoints({ onChanged }) {
+export function CustomEndpoints({ onChanged, showHeading = true }) {
   const toast = useToast();
   const { generation } = useConnection();
   const { data, error, loading, reload } = useApi(listCustomEndpoints, { deps: [generation] });
@@ -81,12 +81,14 @@ export function CustomEndpoints({ onChanged }) {
 
   return (
     <section className="section" id="custom-endpoints">
-      <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>
-        Custom endpoints
-        <span className="tiny dim" style={{ marginLeft: "var(--sp-2)", fontWeight: 400 }}>
-          Your own base URL, saved permanently. Works in the fallback chain like any other provider.
-        </span>
-      </div>
+      {showHeading ? (
+        <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>
+          Custom endpoints
+          <span className="tiny dim" style={{ marginLeft: "var(--sp-2)", fontWeight: 400 }}>
+            Your own base URL, saved permanently. Works in the fallback chain like any other provider.
+          </span>
+        </div>
+      ) : null}
 
       {error ? <ErrorState error={error} onRetry={reload} compact /> : null}
 
@@ -106,7 +108,7 @@ export function CustomEndpoints({ onChanged }) {
             {loading ? <span className="dim tiny">Loading…</span> : null}
             {!loading && endpoints.length === 0 && editing !== "new" ? (
               <span className="dim tiny">
-                No custom endpoints yet. Add one here, or test one in the Playground and press &quot;Save permanently&quot;.
+                No custom endpoints yet. Add one here. To try an endpoint first without saving it, use the Playground.
               </span>
             ) : null}
 

@@ -370,11 +370,11 @@ The `/health` endpoint exposes target status, score, latency, success/failure co
 
 ### Saved custom endpoints
 
-A Playground test forgets everything. To keep a custom endpoint, press **Save permanently** in the Playground's Custom endpoint mode, or add one under **Providers → Custom endpoints**. A saved endpoint becomes a provider named `custom-<name>` and behaves like any provider configured through the environment: it appears in the Fallback Chain, is health-checked, cools down on failures, supports sticky routing, and can be switched off.
+A Playground test forgets everything. To keep a custom endpoint, add it on the **Custom Endpoints** page of the control panel (`/custom-endpoints`, under Configure). A saved endpoint becomes a provider named `custom-<name>` and behaves like any provider configured through the environment: it appears in the Fallback Chain, is health-checked, cools down on failures, supports sticky routing, and can be switched off.
 
 - **One base URL, one API style** (OpenAI Chat, OpenAI Responses, Anthropic Messages or Gemini) per endpoint.
 - **Any number of models** (one per line) and **any number of keys** (one per line). Every model is tried with every key, in the order you set in the Fallback Chain.
-- Saving the same base URL and API style again from the Playground **adds** the model and key to the endpoint already saved.
+- The Playground never saves anything: use it to test an endpoint first, then add it on the Custom Endpoints page.
 - Changes take effect immediately, with no restart. Removing an endpoint removes it from routing at once.
 - Keys are stored in `data/custom-endpoints.json` (override with `CUSTOM_ENDPOINTS_FILE`), like the other `data/` state. They are sent to the gateway but never returned: the control panel only shows how many keys an endpoint has, and the keys are redacted from any error text.
 - Text pool only; there is no separate vision pool for custom endpoints.
