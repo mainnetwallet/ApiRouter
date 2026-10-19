@@ -189,6 +189,29 @@ Groq / model-b / key-1
 
 This allows one failed API key to enter cooldown while sibling keys remain available.
 
+### Saved custom endpoints
+
+Providers normally come from the environment (`PROVIDER_IDS` in `src/config.js`). A **saved custom endpoint** is a provider the operator adds at runtime from the control panel (Providers → Custom endpoints, or Playground → Save permanently). It is stored as one record:
+
+```text
+id (custom-<name>) + name + baseUrl + protocol + models[] + apiKeys[]
+```
+
+`applyCustomEndpoints` (`src/custom-endpoints.js`) merges each record into `config.providers` as a normal provider (`custom: true`, one protocol), so `buildTargets` produces the usual `provider + model + keyIndex` targets and everything downstream (Fallback Chain, health probes, cooldowns, sticky routing, the model switch) treats it like any other provider. Text pool only.
+
+Changes apply without a restart. `server.js` listens to the store, removes the old `custom-*` targets from the live `textTargets` / `targets` arrays in place, adds the new ones, rebuilds the model capability index, re-registers secrets for redaction, resets the automatic-order cache and probes the new targets at once. The health monitor, the router and the API all read those same arrays and the same `config` object, which is why in-place mutation is enough.
+
+`/api/custom-endpoints` accepts keys but never returns them: the panel only gets a key count. The base URL passes the same checks as the Playground (http(s) only, no credentials, query or fragment, no private or reserved address, hostnames resolved at save time).
+
+**Persistence.** The store writes a local file (`CUSTOM_ENDPOINTS_FILE`, default `data/custom-endpoints.json`). On a host that wipes its disk on every redeploy that is not enough, so with `CUSTOM_ENDPOINTS_GITHUB_REPO` set the source of truth is an **encrypted blob in a dedicated GitHub branch** (`src/remote-storage.js`, Contents API):
+
+- Everything is encrypted with AES-256-GCM (key derived with scrypt from `CUSTOM_ENDPOINTS_SECRET`) before it leaves the process; the repository only holds ciphertext.
+- The branch (`apirouter-data` by default, never `main`/`master`) is created from the default branch when missing, so saving never triggers a deploy of the service.
+- Startup: the remote wins over the local file; if the remote is empty, existing local endpoints are uploaded once.
+- Safety: while the remote cannot be read (or decrypted with the current secret) every create, update and remove is refused with 503, so a stale list can never overwrite the saved one. A background retry loads the endpoints as soon as the remote answers.
+- A change is written to the remote first; if that fails the in-memory change is rolled back. Changes are serialized, and a stale blob sha is retried once.
+- A half-set configuration (repo without token or secret) stops startup.
+
 ## Protocol Mapping
 
 ```text

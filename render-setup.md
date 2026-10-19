@@ -283,6 +283,9 @@ ekbar Down dekhate pare, deploy shesh hole nijei Up hoye jay.
 | Service sleep kore | UptimeRobot add koro (step 7) |
 | Deploy fail kintu ager kaj korto | Logs e error dekho: Dashboard → service → **Logs** |
 | `Port scan timeout` | `PORT` env nijer hate dio na, Render er-ta e chalte dao |
+| Save kora Custom endpoint redeploy e muche jay | `CUSTOM_ENDPOINTS_GITHUB_REPO`, `CUSTOM_ENDPOINTS_GITHUB_TOKEN`, `CUSTOM_ENDPOINTS_SECRET` teen tai dao (step 4). Providers page e "Saved encrypted in GitHub" likha dekhabe |
+| Providers page e "GitHub storage is not reachable" | Token thik ache kina (oi repo te Contents: Read and write), repo naam `owner/name`, ar `CUSTOM_ENDPOINTS_SECRET` ager ta-i ache kina dekho. Thik na hole save/edit refuse hoy, purono data overwrite hoy na |
+| Startup e `CUSTOM_ENDPOINTS_SECRET is required` | Repo dile token ar secret (12+ character) dutoi lagbe |
 
 Logs dekhte: Dashboard → tomar service → **Logs** tab.
 
