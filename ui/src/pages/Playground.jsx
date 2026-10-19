@@ -7,6 +7,7 @@ import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { Icon } from "../components/ui/Icon.jsx";
 import { writeClipboard } from "../components/ui/CopyButton.jsx";
 import { Markdown } from "../lib/markdown.jsx";
+import { createSmoothStream } from "../lib/smoothStream.js";
 import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
 import { getModels } from "../api/models.js";
@@ -402,6 +403,7 @@ export default function Playground() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let smoother = null;
 
     try {
       const body = buildRequestBody({
@@ -417,15 +419,18 @@ export default function Playground() {
         stream: true
       });
 
-      const onDelta = (delta) => {
+      // Text is revealed a few characters per frame instead of per network
+      // chunk, so the reply flows smoothly rather than arriving in jumps.
+      smoother = createSmoothStream((visible) => {
         setMessages((current) =>
           current.map((message) =>
             message.id === assistantId
-              ? { ...message, text: message.text + delta, pending: true }
+              ? { ...message, text: visible, pending: true }
               : message
           )
         );
-      };
+      });
+      const onDelta = (delta) => smoother.push(delta);
 
       const result = custom
         ? await sendCustomRequest({
@@ -447,6 +452,9 @@ export default function Playground() {
           signal: controller.signal,
           onDelta
         });
+
+      // Let the reveal catch up with what the network already delivered.
+      await smoother.drain();
 
       setMessages((current) =>
         current.map((message) =>
@@ -470,6 +478,8 @@ export default function Playground() {
       });
     } catch (error) {
       const cancelled = error?.kind === "abort";
+      // Show everything received so far before the error / stop state.
+      smoother?.flush();
 
       setMessages((current) =>
         current.map((message) =>

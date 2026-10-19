@@ -1119,14 +1119,20 @@ async function proxy(req, res, protocol, pathname) {
       outcome: "success"
     });
 
+    const sse = contentType.includes("text/event-stream");
+    if (sse) res.socket?.setNoDelay?.(true);
     res.writeHead(result.upstream.status, {
       "content-type": contentType,
-      "cache-control": "no-cache",
+      // `no-transform` and `x-accel-buffering` stop proxies in front of the
+      // gateway from compressing or buffering the stream into big chunks.
+      "cache-control": sse ? "no-cache, no-transform" : "no-cache",
+      ...(sse ? { "x-accel-buffering": "no" } : {}),
       "x-multi-ai-provider": result.target.provider,
       "x-multi-ai-model": result.target.model,
       "x-multi-ai-key-index": String(result.target.keyIndex),
       "x-multi-ai-session-id": sessionId
     });
+    if (sse) res.flushHeaders?.();
 
     if (buffered) {
       res.end(buffered);
