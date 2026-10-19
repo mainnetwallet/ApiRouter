@@ -39,9 +39,13 @@ export class CustomEndpointError extends Error {
 }
 const bad = (message) => new CustomEndpointError(400, message);
 
-/** Accepts an array or a newline / comma separated string; trims and de-duplicates. */
+/**
+ * Accepts an array or a string separated by commas, semicolons, spaces or new
+ * lines ("key1,key2", "key1, key2", one per line, or any mix); trims and
+ * de-duplicates. API keys and model ids never contain whitespace.
+ */
 function toList(value) {
-  const raw = Array.isArray(value) ? value : String(value ?? "").split(/[\n,]/);
+  const raw = Array.isArray(value) ? value : String(value ?? "").split(/[\s,;]+/);
   return [...new Set(raw.map((item) => String(item ?? "").trim()).filter(Boolean))];
 }
 

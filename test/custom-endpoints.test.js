@@ -49,6 +49,14 @@ test("models and keys accept newline / comma separated text and are de-duplicate
   assert.equal(created.keyCount, 2);
 });
 
+test("keys and models also accept comma-joined text with or without spaces", async () => {
+  const store = new CustomEndpointStore({ lookup: publicLookup });
+  const created = await store.create(sample({ models: "m1,m2, m3;m4", apiKeys: "sk-key1,sk-key2, sk-key3 sk-key4" }));
+  assert.deepEqual(created.models, ["m1", "m2", "m3", "m4"]);
+  assert.equal(created.keyCount, 4);
+  assert.deepEqual(store.get(created.id).apiKeys, ["sk-key1", "sk-key2", "sk-key3", "sk-key4"]);
+});
+
 test("two endpoints with the same name get distinct ids", async () => {
   const store = new CustomEndpointStore({ lookup: publicLookup });
   const first = await store.create(sample());

@@ -22,7 +22,7 @@ export function deleteCustomEndpoint(id) {
   return apiRequest(`/api/custom-endpoints/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-/** One entry per line or comma: the shape the model and key boxes accept. */
+/** Commas, semicolons, spaces or new lines (any mix): what the model and key boxes accept. */
 export function splitList(text) {
-  return [...new Set(String(text ?? "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
+  return [...new Set(String(text ?? "").split(/[\s,;]+/).map((item) => item.trim()).filter(Boolean))];
 }

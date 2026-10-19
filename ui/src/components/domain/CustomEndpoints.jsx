@@ -15,7 +15,7 @@ const EMPTY_FORM = { name: "", baseUrl: "", protocol: "openai-chat", models: "",
 /**
  * Custom endpoints the operator keeps permanently. Each one is a provider in
  * the Fallback Chain with its own base URL, one API style, ANY number of models
- * (one per line) and ANY number of keys (one per line). Keys are only ever sent
+ * (comma separated or one per line) and ANY number of keys (same). Keys are only ever sent
  * to the gateway; the list shows how many each endpoint has, never the keys.
  */
 export function CustomEndpoints({ onChanged, showHeading = true }) {
@@ -159,21 +159,21 @@ export function CustomEndpoints({ onChanged, showHeading = true }) {
                   <label className="field__label" htmlFor="ce-models">Models</label>
                   <textarea
                     id="ce-models" className="textarea mono" rows={4} value={form.models}
-                    placeholder={"model-a\nmodel-b"} autoCapitalize="off" autoCorrect="off" spellCheck={false}
+                    placeholder={"model-a, model-b"} autoCapitalize="off" autoCorrect="off" spellCheck={false}
                     onChange={(event) => set({ models: event.target.value })}
                   />
-                  <span className="field__hint">One model per line (or comma separated). {models.length} entered.</span>
+                  <span className="field__hint">Separate with commas or put one per line. {models.length} entered.</span>
                 </div>
 
                 <div className="field">
                   <label className="field__label" htmlFor="ce-keys">{editing === "new" ? "API keys" : "Add API keys"}</label>
                   <textarea
                     id="ce-keys" className="textarea mono" rows={3} value={form.keys}
-                    placeholder={"sk-…\nsk-…"} autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false}
+                    placeholder={"sk-key1, sk-key2"} autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false}
                     onChange={(event) => set({ keys: event.target.value })}
                   />
                   <span className="field__hint">
-                    One key per line. Every key is tried like any provider&apos;s keys. For a local model with no key, enter any placeholder such as &quot;none&quot;.
+                    Separate with commas (sk-key1,sk-key2) or put one per line. {keys.length} entered. Every key is tried like any provider&apos;s keys. For a local model with no key, enter any placeholder such as &quot;none&quot;.
                     {editing !== "new" ? ` The ${current?.keyCount ?? 0} saved key(s) are kept and never shown.` : ""}
                   </span>
                   {editing !== "new" ? (
