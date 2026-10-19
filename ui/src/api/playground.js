@@ -97,6 +97,35 @@ export function parseMaxTokens(value) {
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
 }
 
+/**
+ * Turn the on-screen transcript into the earlier turns of a conversation.
+ *
+ * Only complete question/answer pairs are sent: a turn whose reply failed, was
+ * cancelled or came back empty is left out, so the history always alternates
+ * user / assistant and starts with a user turn (Anthropic and Gemini both
+ * require that). Earlier images are not re-sent — they would be uploaded again
+ * on every message and would force every later request into the vision pool —
+ * so a turn that had images carries a short "[image attached]" note instead.
+ * There is deliberately no length cap: the whole conversation is sent.
+ */
+export function buildHistory(messages = []) {
+  const history = [];
+  for (let i = 0; i < messages.length - 1; i += 1) {
+    const question = messages[i];
+    const answer = messages[i + 1];
+    if (question?.role !== "user" || answer?.role !== "assistant") continue;
+    if (answer.error || answer.pending || !answer.text) continue;
+
+    const imageCount = question.images?.length ?? question.imageCount ?? 0;
+    const text = [question.text, imageCount > 0 ? "[image attached]" : ""].filter(Boolean).join(" ");
+    if (!text) continue;
+
+    history.push({ role: "user", text }, { role: "assistant", text: answer.text });
+    i += 1;
+  }
+  return history;
+}
+
 export function buildRequestBody({
   protocol,
   model,
@@ -106,6 +135,7 @@ export function buildRequestBody({
   temperature,
   maxTokens,
   images = [],
+  history = [],
   stream = true
 }) {
   const text = String(prompt ?? "");
@@ -114,6 +144,7 @@ export function buildRequestBody({
   // Blank means "no limit": the field is simply not sent, so the provider's own
   // default applies. (`Number("")` is 0, which must never reach the wire.)
   const limited = Number.isFinite(maxTokens) && maxTokens > 0;
+  const earlier = Array.isArray(history) ? history.filter((turn) => turn && turn.text) : [];
 
   if (protocol === "anthropic") {
     return {
@@ -121,18 +152,21 @@ export function buildRequestBody({
       ...(limited ? { max_tokens: maxTokens } : {}),
       ...(system ? { system } : {}),
       ...(Number.isFinite(temperature) ? { temperature } : {}),
-      messages: [{
-        role: "user",
-        content: pictures.length === 0
-          ? text
-          : [
-            ...pictures.map((image) => ({
-              type: "image",
-              source: { type: "base64", media_type: image.mimeType, data: image.data }
-            })),
-            ...(text ? [{ type: "text", text }] : [])
-          ]
-      }],
+      messages: [
+        ...earlier.map((turn) => ({ role: turn.role, content: turn.text })),
+        {
+          role: "user",
+          content: pictures.length === 0
+            ? text
+            : [
+              ...pictures.map((image) => ({
+                type: "image",
+                source: { type: "base64", media_type: image.mimeType, data: image.data }
+              })),
+              ...(text ? [{ type: "text", text }] : [])
+            ]
+        }
+      ],
       stream
     };
   }
@@ -140,18 +174,23 @@ export function buildRequestBody({
   if (protocol === "openai-responses") {
     return {
       ...(includeModel ? { model } : {}),
-      input: pictures.length === 0
+      input: pictures.length === 0 && earlier.length === 0
         ? text
-        : [{
-          role: "user",
-          content: [
-            ...(text ? [{ type: "input_text", text }] : []),
-            ...pictures.map((image) => ({
-              type: "input_image",
-              image_url: `data:${image.mimeType};base64,${image.data}`
-            }))
-          ]
-        }],
+        : [
+          ...earlier.map((turn) => ({ role: turn.role, content: turn.text })),
+          pictures.length === 0
+            ? { role: "user", content: text }
+            : {
+              role: "user",
+              content: [
+                ...(text ? [{ type: "input_text", text }] : []),
+                ...pictures.map((image) => ({
+                  type: "input_image",
+                  image_url: `data:${image.mimeType};base64,${image.data}`
+                }))
+              ]
+            }
+        ],
       ...(system ? { instructions: system } : {}),
       ...(Number.isFinite(temperature) ? { temperature } : {}),
       ...(limited ? { max_output_tokens: maxTokens } : {}),
@@ -165,13 +204,16 @@ export function buildRequestBody({
     if (limited) generationConfig.maxOutputTokens = maxTokens;
 
     return {
-      contents: [{
-        role: "user",
-        parts: [
-          ...(text || pictures.length === 0 ? [{ text }] : []),
-          ...pictures.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } }))
-        ]
-      }],
+      contents: [
+        ...earlier.map((turn) => ({ role: turn.role === "assistant" ? "model" : "user", parts: [{ text: turn.text }] })),
+        {
+          role: "user",
+          parts: [
+            ...(text || pictures.length === 0 ? [{ text }] : []),
+            ...pictures.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } }))
+          ]
+        }
+      ],
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       ...(Object.keys(generationConfig).length ? { generationConfig } : {})
     };
@@ -181,6 +223,7 @@ export function buildRequestBody({
     ...(includeModel ? { model } : {}),
     messages: [
       ...(system ? [{ role: "system", content: system }] : []),
+      ...earlier.map((turn) => ({ role: turn.role, content: turn.text })),
       {
         role: "user",
         content: pictures.length === 0

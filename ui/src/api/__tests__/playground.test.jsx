@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  buildCustomPayload, buildPinHeaders, buildRequestBody, customMaxTokens, customProblem, endpointFor,
+  buildCustomPayload, buildHistory, buildPinHeaders, buildRequestBody, customMaxTokens, customProblem, endpointFor,
   extractDelta, extractStreamMeta, extractText, parseMaxTokens, sendCustomRequest, CUSTOM_ENDPOINT
 } from "../playground.js";
 
@@ -323,5 +323,59 @@ describe("custom endpoint playground", () => {
       protocol: "openai-chat", baseUrl: "https://api.example.com/v1", apiKey: "bad", model: "m",
       body: buildRequestBody({ protocol: "openai-chat", model: "m", autoRoute: false, prompt: "hi" })
     })).rejects.toMatchObject({ message: expect.stringContaining("Incorrect API key") });
+  });
+});
+
+describe("playground conversation history", () => {
+  const messages = [
+    { id: "u1", role: "user", text: "my name is Rafi" },
+    { id: "a1", role: "assistant", text: "Nice to meet you, Rafi." },
+    { id: "u2", role: "user", text: "broken one" },
+    { id: "a2", role: "assistant", text: "", error: { label: "Request failed" } },
+    { id: "u3", role: "user", text: "", images: [{ id: "i" }] },
+    { id: "a3", role: "assistant", text: "A cat." }
+  ];
+
+  it("keeps complete pairs, drops failed turns and notes earlier images", () => {
+    expect(buildHistory(messages)).toEqual([
+      { role: "user", text: "my name is Rafi" },
+      { role: "assistant", text: "Nice to meet you, Rafi." },
+      { role: "user", text: "[image attached]" },
+      { role: "assistant", text: "A cat." }
+    ]);
+  });
+
+  it("has no length cap", () => {
+    const long = Array.from({ length: 500 }, (_, i) => [
+      { id: `u${i}`, role: "user", text: `q${i}` },
+      { id: `a${i}`, role: "assistant", text: `r${i}` }
+    ]).flat();
+    expect(buildHistory(long)).toHaveLength(1000);
+  });
+
+  it("sends earlier turns before the new prompt in every protocol", () => {
+    const history = buildHistory(messages.slice(0, 2));
+    const common = { model: "m", autoRoute: true, prompt: "what is my name?", history };
+
+    const chat = buildRequestBody({ ...common, protocol: "openai-chat" });
+    expect(chat.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(chat.messages[0].content).toBe("my name is Rafi");
+    expect(chat.messages.at(-1).content).toBe("what is my name?");
+
+    const anthropic = buildRequestBody({ ...common, protocol: "anthropic" });
+    expect(anthropic.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+
+    const responses = buildRequestBody({ ...common, protocol: "openai-responses" });
+    expect(responses.input.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(responses.input.at(-1).content).toBe("what is my name?");
+
+    const gemini = buildRequestBody({ ...common, protocol: "gemini" });
+    expect(gemini.contents.map((c) => c.role)).toEqual(["user", "model", "user"]);
+    expect(gemini.contents.at(-1).parts[0].text).toBe("what is my name?");
+  });
+
+  it("keeps the old single-turn shape when there is no history", () => {
+    const body = buildRequestBody({ protocol: "openai-responses", model: "m", autoRoute: true, prompt: "hi" });
+    expect(body.input).toBe("hi");
   });
 });

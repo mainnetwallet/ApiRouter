@@ -11,11 +11,12 @@ import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
 import { getModels } from "../api/models.js";
 import {
-  sendPlaygroundRequest, sendCustomRequest, buildRequestBody, buildPinHeaders, parseMaxTokens,
+  sendPlaygroundRequest, sendCustomRequest, buildRequestBody, buildHistory, buildPinHeaders, parseMaxTokens,
   customProblem, customMaxTokens, PROTOCOL_ENDPOINTS
 } from "../api/playground.js";
 import { formatLatency, formatTokens, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 import { sanitizeText } from "../lib/sanitize.js";
+import { loadChat, saveChat } from "../lib/chatStore.js";
 import { MAX_IMAGES, ACCEPTED_IMAGE_TYPES, imageProblem, readImageFile } from "../lib/images.js";
 
 /**
@@ -251,7 +252,25 @@ export default function Playground() {
     }
   };
 
-  const [messages, setMessages] = useState([]);
+  // The conversation survives a refresh: it is restored from this browser's
+  // storage and saved again whenever a reply finishes. Clearing it (New chat)
+  // removes the saved copy too.
+  const [messages, setMessages] = useState(() => loadChat());
+  const saveWarnedRef = useRef(false);
+
+  useEffect(() => {
+    if (messages.some((message) => message.pending)) return;
+    const result = saveChat(messages);
+    if (result !== "saved" && !saveWarnedRef.current) {
+      saveWarnedRef.current = true;
+      toast.error(
+        result === "failed" ? "Chat not saved" : "Images not saved",
+        { detail: result === "failed"
+          ? "This browser's storage is full or blocked, so the chat will be lost on refresh."
+          : "Storage is nearly full, so the text is kept but attached images are not." }
+      );
+    }
+  }, [messages, toast]);
   const [busy, setBusy] = useState(false);
   const [meta, setMeta] = useState(null);
   const abortRef = useRef(null);
@@ -361,6 +380,10 @@ export default function Playground() {
     if (sendBlocked) return;
     stickRef.current = true;
 
+    // Everything said so far goes along with the new prompt, so the model
+    // remembers the conversation. No limit on how far back it reaches.
+    const history = override?.history ?? buildHistory(messages);
+
     const startedAt = Date.now();
     setBusy(true);
     setMeta(null);
@@ -387,6 +410,7 @@ export default function Playground() {
         autoRoute: custom ? false : autoRoute,
         prompt: text,
         images: attached,
+        history,
         system: systemPrompt.trim() || null,
         temperature: Number(temperature),
         maxTokens: custom ? customMaxTokens(activeProtocol, maxTokens) : parseMaxTokens(maxTokens),
@@ -463,7 +487,7 @@ export default function Playground() {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [prompt, images, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, sendBlocked, effectivePool, custom, customBase, customKey, customModelName, toast]);
+  }, [prompt, images, messages, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, sendBlocked, effectivePool, custom, customBase, customKey, customModelName, toast]);
 
   const cancel = () => abortRef.current?.abort();
 
@@ -479,9 +503,13 @@ export default function Playground() {
     if (busy) return;
     const lastUser = [...messages].reverse().find((message) => message.role === "user");
     if (!lastUser) return;
+    // Images restored from storage no longer carry their upload data, so only
+    // images still held in memory can be sent again.
+    const resend = (lastUser.images ?? []).filter((image) => image.data && image.mimeType);
+    if (!lastUser.text && resend.length === 0) return;
     const cut = messages.lastIndexOf(lastUser);
     setMessages((current) => current.slice(0, cut));
-    void send({ text: lastUser.text, images: lastUser.images ?? [] });
+    void send({ text: lastUser.text, images: resend, history: buildHistory(messages.slice(0, cut)) });
   };
 
   const pickSuggestion = (text) => {
@@ -586,6 +614,9 @@ export default function Playground() {
                               <img key={image.id} className="msg__image" src={image.dataUrl} alt={image.name} />
                             ))}
                           </div>
+                        ) : null}
+                        {!message.images?.length && message.imageCount ? (
+                          <div className="msg__body dim">{message.imageCount} image{message.imageCount === 1 ? "" : "s"} not saved</div>
                         ) : null}
                         {message.text ? <div className="msg__body">{message.text}</div> : null}
                       </article>
