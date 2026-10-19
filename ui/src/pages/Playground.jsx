@@ -9,7 +9,8 @@ import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
 import { getModels } from "../api/models.js";
 import {
-  sendPlaygroundRequest, buildRequestBody, buildPinHeaders, parseMaxTokens, PROTOCOL_ENDPOINTS
+  sendPlaygroundRequest, sendCustomRequest, buildRequestBody, buildPinHeaders, parseMaxTokens,
+  customProblem, customMaxTokens, PROTOCOL_ENDPOINTS
 } from "../api/playground.js";
 import { formatLatency, formatTokens, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 import { sanitizeText } from "../lib/sanitize.js";
@@ -33,6 +34,38 @@ import { MAX_IMAGES, ACCEPTED_IMAGE_TYPES, imageProblem, readImageFile } from ".
  * Every protocol can reach every configured model — the gateway translates —
  * so the lists are not narrowed by protocol.
  */
+const PROTOCOLS = Object.keys(PROTOCOL_ENDPOINTS);
+
+// Custom-endpoint form values that are worth keeping between visits. The API key
+// is deliberately NOT among them: it lives in component state only.
+const SAVED_KEY = "apirouter.playground.custom";
+
+function readSaved(field) {
+  try {
+    const raw = window.localStorage.getItem(SAVED_KEY);
+    const value = raw ? JSON.parse(raw)?.[field] : "";
+    return typeof value === "string" ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSaved(values) {
+  try {
+    window.localStorage.setItem(SAVED_KEY, JSON.stringify(values));
+  } catch {
+    // Private mode or a full quota: the form just starts empty next time.
+  }
+}
+
+function hostOf(baseUrl) {
+  try {
+    return new URL(String(baseUrl ?? "").trim()).host;
+  } catch {
+    return "";
+  }
+}
+
 const POOL_MODES = Object.freeze([
   { key: "auto", label: "Auto" },
   { key: "text", label: "Text" },
@@ -46,13 +79,12 @@ export default function Playground() {
   const models = catalog.data?.models ?? [];
 
   // Every configured target is reachable from every client protocol through the
-  // gateway's bridges, so the protocol list is fixed rather than derived.
-  const protocols = useMemo(
-    () => (models.length > 0 ? Object.keys(PROTOCOL_ENDPOINTS) : []),
-    [models.length]
-  );
+  // gateway's bridges, so the protocol list is fixed rather than derived. A
+  // custom endpoint speaks exactly one of them, so it needs the list even when
+  // nothing is configured.
+  const protocols = PROTOCOLS;
 
-  const [protocol, setProtocol] = useState("");
+  const [protocol, setProtocol] = useState(() => readSaved("protocol"));
   const [poolMode, setPoolMode] = useState("auto");
   const [providerPick, setProvider] = useState("");
   const [model, setModel] = useState("");
@@ -66,7 +98,25 @@ export default function Playground() {
   const [images, setImages] = useState([]);
   const fileInputRef = useRef(null);
 
-  const activeProtocol = protocol || protocols[0] || "";
+  const activeProtocol = protocols.includes(protocol) ? protocol : protocols[0];
+
+  // "Router" sends through the gateway's own routing. "Custom" sends one request
+  // to a base URL / key / model typed in here. With nothing configured there is
+  // nothing to route, so the page opens on Custom instead of an empty state.
+  const [sourcePick, setSourcePick] = useState(null);
+  const source = sourcePick ?? (!catalog.loading && models.length === 0 ? "custom" : "gateway");
+  const custom = source === "custom";
+  const [customBase, setCustomBase] = useState(() => readSaved("baseUrl"));
+  const [customModelName, setCustomModelName] = useState(() => readSaved("model"));
+  const [customKey, setCustomKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
+
+  useEffect(() => {
+    writeSaved({ baseUrl: customBase, model: customModelName, protocol: activeProtocol });
+  }, [customBase, customModelName, activeProtocol]);
+
+  const customHost = hostOf(customBase);
+  const customBlock = custom ? customProblem({ baseUrl: customBase, model: customModelName }) : null;
 
   const hasImages = images.length > 0;
 
@@ -139,7 +189,7 @@ export default function Playground() {
         : poolCounts[effectivePool] === 0
           ? `No ${effectivePool} targets are configured${effectivePool === "vision" ? "; image requests will fail with 503" : ""}.`
           : null;
-  const sendBlocked = poolMode !== "auto" && poolProblem !== null;
+  const sendBlocked = custom ? customBlock !== null : poolMode !== "auto" && poolProblem !== null;
 
   const pickProvider = (value) => {
     setProvider(value);
@@ -205,7 +255,7 @@ export default function Playground() {
   }, [settingsOpen]);
 
   const addImages = useCallback(async (fileList) => {
-    if (poolMode === "text") {
+    if (!custom && poolMode === "text") {
       toast.error("Image not attached", { detail: "The Text pool takes no images. Switch to Auto or Vision." });
       return;
     }
@@ -226,7 +276,7 @@ export default function Playground() {
       }
     }
     if (added.length > 0) setImages((current) => [...current, ...added].slice(0, MAX_IMAGES));
-  }, [images.length, poolMode, toast]);
+  }, [images.length, poolMode, custom, toast]);
 
   const removeImage = (id) => setImages((current) => current.filter((image) => image.id !== id));
 
@@ -270,34 +320,46 @@ export default function Playground() {
     try {
       const body = buildRequestBody({
         protocol: activeProtocol,
-        model: selectedModel,
-        autoRoute,
+        model: custom ? customModelName.trim() : selectedModel,
+        autoRoute: custom ? false : autoRoute,
         prompt: text,
         images: attached,
         system: systemPrompt.trim() || null,
         temperature: Number(temperature),
-        maxTokens: parseMaxTokens(maxTokens),
+        maxTokens: custom ? customMaxTokens(activeProtocol, maxTokens) : parseMaxTokens(maxTokens),
         stream: true
       });
 
-      const result = await sendPlaygroundRequest({
-        protocol: activeProtocol,
-        // Gemini carries the model in the URL, not the body, so it is passed
-        // explicitly; otherwise a pinned or custom model would never be sent.
-        model: !autoRoute && selectedModel ? selectedModel : undefined,
-        body,
-        headers: buildPinHeaders({ autoRoute, provider, keyIndex: pinnedKey, customModel: customId !== "" }),
-        signal: controller.signal,
-        onDelta: (delta) => {
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantId
-                ? { ...message, text: message.text + delta, pending: true }
-                : message
-            )
-          );
-        }
-      });
+      const onDelta = (delta) => {
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === assistantId
+              ? { ...message, text: message.text + delta, pending: true }
+              : message
+          )
+        );
+      };
+
+      const result = custom
+        ? await sendCustomRequest({
+          protocol: activeProtocol,
+          baseUrl: customBase,
+          apiKey: customKey,
+          model: customModelName,
+          body,
+          signal: controller.signal,
+          onDelta
+        })
+        : await sendPlaygroundRequest({
+          protocol: activeProtocol,
+          // Gemini carries the model in the URL, not the body, so it is passed
+          // explicitly; otherwise a pinned or custom model would never be sent.
+          model: !autoRoute && selectedModel ? selectedModel : undefined,
+          body,
+          headers: buildPinHeaders({ autoRoute, provider, keyIndex: pinnedKey, customModel: customId !== "" }),
+          signal: controller.signal,
+          onDelta
+        });
 
       setMessages((current) =>
         current.map((message) =>
@@ -312,11 +374,12 @@ export default function Playground() {
         latencyMs: Date.now() - startedAt,
         tokens: result.tokens ?? null,
         finishReason: result.finishReason ?? null,
-        requestedModel: autoRoute ? null : selectedModel || null,
-        pinnedProvider: !autoRoute && provider ? provider : null,
-        pinnedKey: !autoRoute && provider ? pinnedKey : null,
-        autoRouted: autoRoute,
-        pool: effectivePool
+        requestedModel: custom ? customModelName.trim() : autoRoute ? null : selectedModel || null,
+        pinnedProvider: !custom && !autoRoute && provider ? provider : null,
+        pinnedKey: !custom && !autoRoute && provider ? pinnedKey : null,
+        autoRouted: !custom && autoRoute,
+        pool: custom ? null : effectivePool,
+        custom
       });
     } catch (error) {
       const cancelled = error?.kind === "abort";
@@ -337,34 +400,43 @@ export default function Playground() {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [prompt, images, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, sendBlocked, effectivePool, toast]);
+  }, [prompt, images, activeProtocol, selectedModel, customId, provider, pinnedKey, autoRoute, systemPrompt, temperature, maxTokens, sendBlocked, effectivePool, custom, customBase, customKey, customModelName, toast]);
 
   const cancel = () => abortRef.current?.abort();
 
-  if (catalog.loading && models.length === 0) {
+  const sourceToggle = (
+    <div className="chips chips--segmented" role="group" aria-label="Where to send the request">
+      <button type="button" className={`chip${!custom ? " is-active" : ""}`} aria-pressed={!custom} onClick={() => setSourcePick("gateway")} disabled={busy}>Router</button>
+      <button type="button" className={`chip${custom ? " is-active" : ""}`} aria-pressed={custom} onClick={() => setSourcePick("custom")} disabled={busy}>Custom endpoint</button>
+    </div>
+  );
+
+  if (!custom && catalog.loading && models.length === 0) {
     return (
       <div className="page">
-        <PageHeader title="Playground" description="Send a real request through the gateway router" />
+        <PageHeader title="Playground" description="Send a real request through the gateway router" actions={sourceToggle} />
         <div className="panel"><div className="panel__body"><div className="skeleton skeleton--title" /></div></div>
       </div>
     );
   }
 
-  if (protocols.length === 0) {
+  if (!custom && models.length === 0) {
     return (
       <div className="page">
-        <PageHeader title="Playground" description="Send a real request through the gateway router" />
+        <PageHeader title="Playground" description="Send a real request through the gateway router" actions={sourceToggle} />
         <div className="panel">
           <EmptyState title="No routable targets" icon="terminal">
             Configure at least one provider with an API key, models and a base URL before sending
-            requests.
+            requests, or switch to Custom endpoint to test any base URL, key and model directly.
           </EmptyState>
         </div>
       </div>
     );
   }
 
-  const routeSummary = autoRoute
+  const routeSummary = custom
+    ? `${customHost || "No base URL"} · ${customModelName.trim() || "no model"}`
+    : autoRoute
     ? "Auto route"
     : provider
       ? `${providerLabel(provider)}${pinnedKey !== null ? ` · key ${pinnedKey + 1}` : ""} · ${selectedModel}`
@@ -374,10 +446,12 @@ export default function Playground() {
     <div className="page page--playground">
       <PageHeader
         title="Playground"
-        description="Send a real request through the gateway router"
+        description={custom ? "Test any API key, base URL and model" : "Send a real request through the gateway router"}
         lastUpdatedAt={catalog.lastUpdatedAt}
         refreshing={catalog.refreshing}
         actions={
+          <>
+          {sourceToggle}
           <button
             type="button"
             className="btn"
@@ -388,6 +462,7 @@ export default function Playground() {
             <Icon name="trash" className="btn__icon" size={12} />
             <span className="btn__label">Clear transcript</span>
           </button>
+          </>
         }
       />
 
@@ -396,8 +471,9 @@ export default function Playground() {
           <div className="pg-transcript" ref={transcriptRef} role="log" aria-live="polite">
             {messages.length === 0 ? (
               <EmptyState title="Nothing sent yet" icon="terminal">
-                Write a prompt below and send it. The request travels through the gateway&apos;s own
-                router, so health ranking, cooldown and fallback all apply.
+                {custom
+                  ? "Fill in the base URL, API key and model in Settings, then send a prompt. One request goes straight to that endpoint — no routing, no fallback."
+                  : "Write a prompt below and send it. The request travels through the gateway's own router, so health ranking, cooldown and fallback all apply."}
               </EmptyState>
             ) : (
               <div className="transcript">
@@ -466,17 +542,20 @@ export default function Playground() {
                 ))}
               </div>
             ) : null}
-            {poolMode !== "auto" && poolProblem ? (
+            {custom && customBlock ? (
+              <span className="tiny" style={{ color: "var(--warn)" }}>{customBlock}</span>
+            ) : null}
+            {!custom && poolMode !== "auto" && poolProblem ? (
               <span className="tiny" style={{ color: "var(--warn)" }}>{poolProblem}</span>
             ) : null}
-            {hasImages && autoRoute && poolMode === "auto" ? (
+            {!custom && hasImages && autoRoute && poolMode === "auto" ? (
               <span className="tiny dim">
                 Image attached: Auto Route only uses the vision providers ({'<PROVIDER>_VISION_*'} settings).
               </span>
             ) : null}
 
             <div className="pg-route">
-              <PoolBadge pool={effectivePool} />
+              {custom ? <StatusBadge tone="info" dot={false}>Custom</StatusBadge> : <PoolBadge pool={effectivePool} />}
               <span className="pg-route__text" title={routeSummary}>{routeSummary}</span>
               <button
                 type="button"
@@ -505,7 +584,7 @@ export default function Playground() {
                 type="button"
                 className="btn pg-icon-btn"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={busy || poolMode === "text" || images.length >= MAX_IMAGES}
+                disabled={busy || (!custom && poolMode === "text") || images.length >= MAX_IMAGES}
                 aria-label={`Attach image (up to ${MAX_IMAGES})`}
                 title={`Attach up to ${MAX_IMAGES} images`}
               >
@@ -559,9 +638,91 @@ export default function Playground() {
               <button type="button" className="btn btn--sm" onClick={() => setSettingsOpen(false)}>Done</button>
             </div>
             <div className="panel pg-settings">
-          <div className="panel__header"><span className="panel__title">Routing</span></div>
+          <div className="panel__header"><span className="panel__title">{custom ? "Custom endpoint" : "Routing"}</span></div>
           <div className="panel__body">
             <div className="stack">
+              {custom ? (
+                <>
+                  <div className="field">
+                    <label className="field__label" htmlFor="pg-c-base">Base URL</label>
+                    <input
+                      id="pg-c-base"
+                      className="input mono"
+                      type="url"
+                      inputMode="url"
+                      value={customBase}
+                      placeholder="https://api.openai.com/v1"
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      onChange={(event) => setCustomBase(event.target.value)}
+                    />
+                    <span className="field__hint">
+                      The platform&apos;s API root. The endpoint path (/chat/completions, /messages …) is added for you.
+                    </span>
+                  </div>
+
+                  <div className="field">
+                    <label className="field__label" htmlFor="pg-c-key">API key</label>
+                    <div className="row" style={{ gap: "var(--sp-2)" }}>
+                      <input
+                        id="pg-c-key"
+                        className="input mono grow"
+                        type={showKey ? "text" : "password"}
+                        value={customKey}
+                        placeholder="sk-… (leave blank for a local model)"
+                        autoComplete="new-password"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        onChange={(event) => setCustomKey(event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        aria-pressed={showKey}
+                        onClick={() => setShowKey((current) => !current)}
+                      >
+                        {showKey ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                    <span className="field__hint">
+                      Kept in this tab only. It is sent once to your gateway to make the call — never saved or logged.
+                    </span>
+                  </div>
+
+                  <div className="field">
+                    <label className="field__label" htmlFor="pg-c-model">Model</label>
+                    <input
+                      id="pg-c-model"
+                      className="input mono"
+                      type="text"
+                      value={customModelName}
+                      placeholder="gpt-4o-mini"
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      onChange={(event) => setCustomModelName(event.target.value)}
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label className="field__label" htmlFor="pg-c-protocol">API style</label>
+                    <select
+                      id="pg-c-protocol"
+                      className="select"
+                      value={activeProtocol}
+                      onChange={(event) => setProtocol(event.target.value)}
+                    >
+                      {protocols.map((value) => <option key={value} value={value}>{protocolLabel(value)}</option>)}
+                    </select>
+                    <span className="field__hint">
+                      OpenAI Chat fits most platforms (OpenAI, OpenRouter, Groq, Together, DeepSeek, Ollama …).
+                    </span>
+                  </div>
+                </>
+              ) : (
+              <>
               <label className="checkbox">
                 <input type="checkbox" checked={autoRoute} onChange={(event) => toggleAutoRoute(event.target.checked)} />
                 Auto Route — let the gateway pick the target
@@ -677,10 +838,13 @@ export default function Playground() {
                   </span>
                 </div>
               ) : null}
+              </>
+              )}
 
               <details className="pg-advanced">
-                <summary>Advanced: protocol, temperature, system prompt</summary>
+                <summary>{custom ? "Advanced: temperature, max tokens, system prompt" : "Advanced: protocol, temperature, system prompt"}</summary>
                 <div className="stack">
+              {custom ? null : (
               <div className="field">
                 <label className="field__label" htmlFor="pg-protocol">Protocol</label>
                 <select
@@ -692,6 +856,7 @@ export default function Playground() {
                   {protocols.map((value) => <option key={value} value={value}>{protocolLabel(value)}</option>)}
                 </select>
               </div>
+              )}
 
               <div className="row" style={{ gap: "var(--sp-3)" }}>
                 <div className="field grow">
@@ -716,7 +881,7 @@ export default function Playground() {
                     className="input mono"
                     type="number"
                     min="1"
-                    placeholder="No limit"
+                    placeholder={custom && activeProtocol === "anthropic" ? "1024" : "No limit"}
                     value={maxTokens}
                     onChange={(event) => setMaxTokens(event.target.value)}
                   />
@@ -749,22 +914,32 @@ export default function Playground() {
                 <span className="dim small">Metadata appears here after the first request.</span>
               ) : (
                 <dl className="dl dl--tight">
-                  <dt className="dl__term">Pool</dt>
-                  <dd className="dl__desc">{meta.pool ? <PoolBadge pool={meta.pool} /> : <span className="dim">{EMPTY}</span>}</dd>
+                  {meta.custom ? null : (
+                    <>
+                      <dt className="dl__term">Pool</dt>
+                      <dd className="dl__desc">{meta.pool ? <PoolBadge pool={meta.pool} /> : <span className="dim">{EMPTY}</span>}</dd>
+                    </>
+                  )}
 
-                  <dt className="dl__term">Selected provider</dt>
+                  <dt className="dl__term">{meta.custom ? "Endpoint" : "Selected provider"}</dt>
                   <dd className="dl__desc">
-                    {meta.provider ? providerLabel(meta.provider) : <span className="dim">{EMPTY}</span>}
+                    {meta.custom
+                      ? <span className="mono">{meta.upstreamHost ?? customHost ?? EMPTY}</span>
+                      : meta.provider ? providerLabel(meta.provider) : <span className="dim">{EMPTY}</span>}
                   </dd>
 
                   <dt className="dl__term">Selected model</dt>
                   <dd className="dl__desc mono">{meta.model ?? EMPTY}</dd>
 
-                  <dt className="dl__term">Key index</dt>
-                  <dd className="dl__desc mono">{Number.isInteger(meta.keyIndex) ? meta.keyIndex : EMPTY}</dd>
+                  {meta.custom ? null : (
+                    <>
+                      <dt className="dl__term">Key index</dt>
+                      <dd className="dl__desc mono">{Number.isInteger(meta.keyIndex) ? meta.keyIndex : EMPTY}</dd>
 
-                  <dt className="dl__term">Request ID</dt>
-                  <dd className="dl__desc mono tiny">{meta.sessionId ?? EMPTY}</dd>
+                      <dt className="dl__term">Request ID</dt>
+                      <dd className="dl__desc mono tiny">{meta.sessionId ?? EMPTY}</dd>
+                    </>
+                  )}
 
                   <dt className="dl__term">HTTP status</dt>
                   <dd className="dl__desc">
@@ -790,7 +965,9 @@ export default function Playground() {
 
                   <dt className="dl__term">Routing</dt>
                   <dd className="dl__desc">
-                    {meta.autoRouted
+                    {meta.custom
+                      ? "custom endpoint — sent directly, no routing or fallback"
+                      : meta.autoRouted
                       ? "auto — the gateway selected the target"
                       : meta.pinnedProvider
                         ? `pinned to ${providerLabel(meta.pinnedProvider)}${Number.isInteger(meta.pinnedKey) ? ` · key ${meta.pinnedKey + 1}` : ""} · ${meta.requestedModel ?? EMPTY}`
@@ -815,6 +992,7 @@ export default function Playground() {
 
           <div className="notice">
             <span>
+              {custom ? "The call is made by your gateway, not the browser, and is not added to the request log. " : ""}
               Responses stream when the selected protocol supports it. Token usage and finish reason
               are shown only when the provider reports them — the gateway does not estimate.
             </span>

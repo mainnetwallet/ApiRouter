@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  buildPinHeaders, buildRequestBody, endpointFor, extractDelta, extractStreamMeta, extractText,
-  parseMaxTokens
+  buildCustomPayload, buildPinHeaders, buildRequestBody, customMaxTokens, customProblem, endpointFor,
+  extractDelta, extractStreamMeta, extractText, parseMaxTokens, sendCustomRequest, CUSTOM_ENDPOINT
 } from "../playground.js";
 
 /**
@@ -238,5 +238,90 @@ describe("playground image attachments", () => {
 describe("custom model reaches the gateway", () => {
   it("puts the chosen model in the gemini URL", () => {
     expect(endpointFor("gemini", "brand-new-model")).toBe("/v1beta/models/brand-new-model:generateContent");
+  });
+});
+
+
+/**
+ * Custom endpoint mode: the operator types a base URL, key and model. The call
+ * is made by the gateway, so the browser only ever talks to the gateway's own
+ * /api/playground/custom route.
+ */
+describe("custom endpoint playground", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("explains what is missing before a request can be sent", () => {
+    expect(customProblem({ baseUrl: "", model: "m" })).toMatch(/base URL/i);
+    expect(customProblem({ baseUrl: "api.example.com", model: "m" })).toMatch(/full URL/i);
+    expect(customProblem({ baseUrl: "ftp://api.example.com", model: "m" })).toMatch(/http/);
+    expect(customProblem({ baseUrl: "https://api.example.com/v1", model: "  " })).toMatch(/model/i);
+    expect(customProblem({ baseUrl: " https://api.example.com/v1 ", model: "gpt-x" })).toBeNull();
+    // A local model needs no key, so a blank key is never a blocker.
+    expect(customProblem({ baseUrl: "http://localhost:11434/v1", model: "llama3" })).toBeNull();
+  });
+
+  it("defaults max_tokens only for Anthropic, which rejects a request without it", () => {
+    expect(customMaxTokens("anthropic", "")).toBe(1024);
+    expect(customMaxTokens("anthropic", "256")).toBe(256);
+    expect(customMaxTokens("openai-chat", "")).toBeNull();
+    expect(customMaxTokens("gemini", "0")).toBeNull();
+  });
+
+  it("builds a payload with trimmed fields and the native request body", () => {
+    const request = buildRequestBody({ protocol: "openai-chat", model: "m", autoRoute: false, prompt: "hi", stream: true });
+    expect(buildCustomPayload({
+      protocol: "openai-chat", baseUrl: " https://api.example.com/v1 ", apiKey: " sk-abc ", model: " m ", request
+    })).toEqual({
+      protocol: "openai-chat", baseUrl: "https://api.example.com/v1", apiKey: "sk-abc", model: "m", request
+    });
+  });
+
+  it("posts to the gateway route, keeps the key out of the URL and headers, and streams the answer", async () => {
+    const calls = [];
+    const frames = `data: ${JSON.stringify({ choices: [{ delta: { content: "po" } }] })}\n\n`
+      + `data: ${JSON.stringify({ choices: [{ delta: { content: "ng" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`;
+    vi.stubGlobal("fetch", (url, options) => {
+      calls.push({ url, options });
+      return Promise.resolve(new Response(frames, {
+        status: 200,
+        headers: { "content-type": "text/event-stream", "x-multi-ai-provider": "custom", "x-multi-ai-model": "m", "x-multi-ai-upstream-host": "api.example.com" }
+      }));
+    });
+
+    const deltas = [];
+    const result = await sendCustomRequest({
+      protocol: "openai-chat",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "sk-live-SECRET-KEY-123",
+      model: "m",
+      body: buildRequestBody({ protocol: "openai-chat", model: "m", autoRoute: false, prompt: "ping", stream: true }),
+      onDelta: (delta) => deltas.push(delta)
+    });
+
+    expect(result.text).toBe("pong");
+    expect(deltas).toEqual(["po", "ng"]);
+    expect(result.finishReason).toBe("stop");
+    expect(result.routed.upstreamHost).toBe("api.example.com");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(CUSTOM_ENDPOINT);
+    const sent = JSON.parse(calls[0].options.body);
+    expect(sent.apiKey).toBe("sk-live-SECRET-KEY-123");
+    expect(sent.baseUrl).toBe("https://api.example.com/v1");
+    expect(sent.request.messages.at(-1)).toEqual({ role: "user", content: "ping" });
+    expect(calls[0].url).not.toContain("SECRET");
+    expect(JSON.stringify(calls[0].options.headers)).not.toContain("SECRET");
+  });
+
+  it("surfaces the gateway's upstream error message", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve(new Response(
+      JSON.stringify({ error: { type: "upstream_error", message: "Upstream returned HTTP 401: Incorrect API key provided", details: { upstreamStatus: 401 } } }),
+      { status: 502, headers: { "content-type": "application/json" } }
+    )));
+
+    await expect(sendCustomRequest({
+      protocol: "openai-chat", baseUrl: "https://api.example.com/v1", apiKey: "bad", model: "m",
+      body: buildRequestBody({ protocol: "openai-chat", model: "m", autoRoute: false, prompt: "hi" })
+    })).rejects.toMatchObject({ message: expect.stringContaining("Incorrect API key") });
   });
 });

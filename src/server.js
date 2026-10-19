@@ -26,6 +26,7 @@ import { createApi } from "./api.js";
 import { createSseUsageTap, createJsonUsageTap, tapBytes, tapEvents, usageFrom } from "./usage.js";
 import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
+import { createCustomPlayground } from "./custom-playground.js";
 import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
 import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
 import { OneModelStore, KeyPacer, withOneModel, oneModelKeyId } from "./one-model.js";
@@ -1153,8 +1154,16 @@ const PASSTHROUGH_ERROR_TYPES = new Set([
   "gateway_paused", "one_model_cooldown", "one_model_failed", "one_model_changed", "model_disabled"
 ]);
 
+const customPlayground = createCustomPlayground({
+  timeoutMs: config.timeoutMs,
+  maxBodyBytes: config.maxBodyBytes,
+  allowPrivateHosts: config.playgroundAllowPrivateHosts,
+  isPaused: () => gateway.paused
+});
+
 const handleApi = createApi({
   config,
+  customPlayground,
   fallbackChain,
   modelSwitch,
   oneModel: oneModelStore,

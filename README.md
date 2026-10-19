@@ -293,6 +293,7 @@ outright, and that wins over the status code.
 | GET | `/api/gateway` | Gateway on/off state (`running` or `paused`) |
 | POST | `/api/gateway/shutdown` | Shut the gateway down: no proxy request or health probe reaches an upstream |
 | POST | `/api/gateway/resume` | Turn the gateway back on |
+| POST | `/api/playground/custom` | Forward ONE request to a base URL, API key and model typed in the Playground (see [Custom endpoint playground](#custom-endpoint-playground)) |
 
 ### Shutdown and resume
 
@@ -365,6 +366,26 @@ Health reports the key and the endpoint. Whether the configured model is actuall
 
 The `/health` endpoint exposes target status, score, latency, success/failure counters, and cooldown information without returning API keys or upstream response bodies.
 
+### Custom endpoint playground
+
+The Playground has two modes, switched at the top of the page:
+
+- **Router** sends a request through the gateway's own routing, with the providers and keys you configured.
+- **Custom endpoint** tests any platform without configuring it: type a **base URL**, an **API key** and a **model**, pick the API style (OpenAI Chat, OpenAI Responses, Anthropic Messages or Gemini) and send a prompt. It answers "does this key, endpoint and model work?" and nothing more. The request bypasses routing, health, cooldown and fallback, and is not added to the request log. With no providers configured the Playground opens on this mode.
+
+The base URL is the API root (`https://api.openai.com/v1`); the endpoint path is added the same way the router adds it for a configured provider. The API key can be left blank for local models.
+
+The call is made by the gateway, not the browser, because most provider APIs send no CORS headers. The key travels in the request body to your own gateway, is held in memory for that one call, and is never stored or logged; the browser keeps only the base URL, model and API style (in local storage) between visits, never the key. Any upstream error text is scrubbed of the key before it is returned.
+
+Because the gateway fetches a URL chosen by the caller, this endpoint is restricted:
+
+- only `http://` and `https://` base URLs, with no embedded credentials, query string or fragment;
+- private, loopback, link-local, CGNAT and cloud-metadata addresses are refused, checked on the address the connection really uses, so a hostname that resolves to a private address is refused too;
+- redirects are reported, never followed;
+- it follows the same token rule as every other `/api/*` route, and the gateway shutdown switch.
+
+To test a model on the same machine or LAN (Ollama, LM Studio, another gateway), start the gateway with `PLAYGROUND_ALLOW_PRIVATE_HOSTS=1`. Leave it off on any gateway reachable by people you do not trust, and set `APIROUTER_API_KEYS` there: with no token set, anyone who can reach `/api/*` can use this endpoint.
+
 ## Security
 
 - Keep provider API keys in `.env`.
@@ -385,7 +406,7 @@ The `/health` endpoint exposes target status, score, latency, success/failure co
 | `POST /v1/messages`, `/v1/responses`, `/v1/chat/completions` | yes |
 | `POST /v1beta/models/{model}:generateContent` | yes |
 | `POST /v1/messages/count_tokens` | yes |
-| `GET/POST /api/*` (control panel) | yes |
+| `GET/POST /api/*` (control panel, including `POST /api/playground/custom`) | yes |
 
 `/health` and `/v1/models` are open on purpose: the first is a liveness/readiness probe meant for load balancers and container orchestrators, and the second is model discovery, which a client needs *before* it can name a model. Both are documented to exclude credentials — `/health` reports target status, scores and cooldowns, never API keys or upstream response bodies.
 
