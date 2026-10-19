@@ -262,6 +262,16 @@ export default function Playground() {
   const transcriptRef = useRef(null);
   const promptRef = useRef(null);
 
+  // Landing on Custom endpoint with nothing filled in (including the automatic
+  // switch when no provider is configured) opens the settings sheet straight
+  // away, so the operator is not left staring at a disabled Send button.
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (autoOpenedRef.current || !custom || !customBlock) return;
+    autoOpenedRef.current = true;
+    setSettingsOpen(true);
+  }, [custom, customBlock]);
+
   // Follow the reply as it streams in, but only while the reader is at the
   // bottom: scrolling up to re-read must not be yanked back down.
   const stickRef = useRef(true);
@@ -482,7 +492,7 @@ export default function Playground() {
   const sourceToggle = (
     <div className="chips chips--segmented chips--source" role="group" aria-label="Where to send the request">
       <button type="button" className={`chip${!custom ? " is-active" : ""}`} aria-pressed={!custom} onClick={() => setSourcePick("gateway")} disabled={busy}>Router</button>
-      <button type="button" className={`chip${custom ? " is-active" : ""}`} aria-pressed={custom} onClick={() => setSourcePick("custom")} disabled={busy}>Custom endpoint</button>
+      <button type="button" className={`chip${custom ? " is-active" : ""}`} aria-pressed={custom} onClick={() => { setSourcePick("custom"); if (customProblem({ baseUrl: customBase, model: customModelName })) setSettingsOpen(true); }} disabled={busy}>Custom endpoint</button>
     </div>
   );
 
