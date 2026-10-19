@@ -5,6 +5,8 @@ import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { Icon } from "../components/ui/Icon.jsx";
+import { writeClipboard } from "../components/ui/CopyButton.jsx";
+import { Markdown } from "../lib/markdown.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../context/ToastContext.jsx";
 import { getModels } from "../api/models.js";
@@ -64,6 +66,34 @@ function hostOf(baseUrl) {
   } catch {
     return "";
   }
+}
+
+const SUGGESTIONS = Object.freeze([
+  "Explain how this router picks a provider",
+  "Write a haiku about retries and fallbacks",
+  "Summarize the pros and cons of streaming APIs",
+  "Say hello in five languages"
+]);
+
+function MessageAction({ label, icon, onClick, disabled = false }) {
+  return (
+    <button type="button" className="msg-act" onClick={onClick} disabled={disabled} aria-label={label} title={label}>
+      <Icon name={icon} size={14} />
+    </button>
+  );
+}
+
+function CopyAction({ text }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const copy = async () => {
+    if (!(await writeClipboard(text))) return;
+    setCopied(true);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1500);
+  };
+  return <MessageAction label={copied ? "Copied" : "Copy reply"} icon={copied ? "check" : "copy"} onClick={copy} />;
 }
 
 const POOL_MODES = Object.freeze([
@@ -232,11 +262,31 @@ export default function Playground() {
   const transcriptRef = useRef(null);
   const promptRef = useRef(null);
 
-  // Keep the newest message in view as the response streams in.
+  // Follow the reply as it streams in, but only while the reader is at the
+  // bottom: scrolling up to re-read must not be yanked back down.
+  const stickRef = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+
   useEffect(() => {
     const el = transcriptRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
   }, [messages, meta]);
+
+  const onTranscriptScroll = () => {
+    const el = transcriptRef.current;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stickRef.current = near;
+    setAtBottom(near);
+  };
+
+  const jumpToBottom = () => {
+    const el = transcriptRef.current;
+    if (!el) return;
+    stickRef.current = true;
+    setAtBottom(true);
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  };
 
   // The prompt box grows with its content, up to a cap, instead of showing a
   // fixed three-row block that eats the phone screen.
@@ -294,11 +344,12 @@ export default function Playground() {
     void addImages(files);
   };
 
-  const send = useCallback(async () => {
-    const text = prompt.trim();
-    if (!text && images.length === 0) return;
+  const send = useCallback(async (override) => {
+    const text = (override?.text ?? prompt).trim();
+    const attached = override?.images ?? images;
+    if (!text && attached.length === 0) return;
     if (sendBlocked) return;
-    const attached = images;
+    stickRef.current = true;
 
     const startedAt = Date.now();
     setBusy(true);
@@ -311,8 +362,10 @@ export default function Playground() {
       userMessage,
       { id: assistantId, role: "assistant", text: "", pending: true }
     ]);
-    setPrompt("");
-    setImages([]);
+    if (!override) {
+      setPrompt("");
+      setImages([]);
+    }
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -404,8 +457,30 @@ export default function Playground() {
 
   const cancel = () => abortRef.current?.abort();
 
+  const newChat = () => {
+    setMessages([]);
+    setMeta(null);
+    stickRef.current = true;
+    setAtBottom(true);
+  };
+
+  // Regenerate re-sends the last prompt and replaces its reply.
+  const regenerate = () => {
+    if (busy) return;
+    const lastUser = [...messages].reverse().find((message) => message.role === "user");
+    if (!lastUser) return;
+    const cut = messages.lastIndexOf(lastUser);
+    setMessages((current) => current.slice(0, cut));
+    void send({ text: lastUser.text, images: lastUser.images ?? [] });
+  };
+
+  const pickSuggestion = (text) => {
+    setPrompt(text);
+    promptRef.current?.focus();
+  };
+
   const sourceToggle = (
-    <div className="chips chips--segmented" role="group" aria-label="Where to send the request">
+    <div className="chips chips--segmented chips--source" role="group" aria-label="Where to send the request">
       <button type="button" className={`chip${!custom ? " is-active" : ""}`} aria-pressed={!custom} onClick={() => setSourcePick("gateway")} disabled={busy}>Router</button>
       <button type="button" className={`chip${custom ? " is-active" : ""}`} aria-pressed={custom} onClick={() => setSourcePick("custom")} disabled={busy}>Custom endpoint</button>
     </div>
@@ -455,12 +530,12 @@ export default function Playground() {
           <button
             type="button"
             className="btn"
-            onClick={() => { setMessages([]); setMeta(null); }}
+            onClick={newChat}
             disabled={busy || messages.length === 0}
-            aria-label="Clear transcript"
+            aria-label="New chat"
           >
-            <Icon name="trash" className="btn__icon" size={12} />
-            <span className="btn__label">Clear transcript</span>
+            <Icon name="plus" className="btn__icon" size={12} />
+            <span className="btn__label">New chat</span>
           </button>
           </>
         }
@@ -468,64 +543,102 @@ export default function Playground() {
 
       <div className="playground">
         <section className="panel pg-chat" aria-label="Conversation">
-          <div className="pg-transcript" ref={transcriptRef} role="log" aria-live="polite">
+          <div className="pg-scroll">
+          <div className="pg-transcript" ref={transcriptRef} onScroll={onTranscriptScroll} role="log" aria-live="polite">
             {messages.length === 0 ? (
-              <EmptyState title="Nothing sent yet" icon="terminal">
-                {custom
-                  ? "Fill in the base URL, API key and model in Settings, then send a prompt. One request goes straight to that endpoint — no routing, no fallback."
-                  : "Write a prompt below and send it. The request travels through the gateway's own router, so health ranking, cooldown and fallback all apply."}
-              </EmptyState>
+              <div className="pg-hero">
+                <div className="pg-hero__mark"><Icon name="sparkles" size={22} /></div>
+                <h2 className="pg-hero__title">What can I help with?</h2>
+                <p className="pg-hero__hint">
+                  {custom
+                    ? "Fill in the base URL, API key and model in Settings, then send a prompt. One request goes straight to that endpoint — no routing, no fallback."
+                    : "Write a prompt below and send it. The request travels through the gateway's own router, so health ranking, cooldown and fallback all apply."}
+                </p>
+                <div className="pg-suggest">
+                  {SUGGESTIONS.map((suggestion) => (
+                    <button key={suggestion} type="button" className="pg-suggest__btn" onClick={() => pickSuggestion(suggestion)}>
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              </div>
             ) : (
               <div className="transcript">
-                {messages.map((message) => (
-                  <article
-                    key={message.id}
-                    className={`msg msg--${message.role}${message.error ? " msg--error" : ""}`}
-                  >
-                    {message.images?.length ? (
-                      <div className="msg__images">
-                        {message.images.map((image) => (
-                          <img key={image.id} className="msg__image" src={image.dataUrl} alt={image.name} />
-                        ))}
-                      </div>
-                    ) : null}
-                    {message.text || message.pending || (!message.error && !message.images?.length) ? (
-                      <div className="msg__body">
-                        {message.text}
-                        {message.pending ? <span className="stream-cursor" aria-label="streaming" /> : null}
-                        {!message.text && !message.pending && !message.error && !message.images?.length ? (
+                {messages.map((message, index) => {
+                  const isLast = index === messages.length - 1;
+
+                  if (message.role === "user") {
+                    return (
+                      <article key={message.id} className="msg msg--user">
+                        {message.images?.length ? (
+                          <div className="msg__images">
+                            {message.images.map((image) => (
+                              <img key={image.id} className="msg__image" src={image.dataUrl} alt={image.name} />
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.text ? <div className="msg__body">{message.text}</div> : null}
+                      </article>
+                    );
+                  }
+
+                  return (
+                    <article key={message.id} className={`msg msg--assistant${message.error ? " msg--error" : ""}`}>
+                      <div className="msg__avatar" aria-hidden="true"><Icon name="sparkles" size={14} /></div>
+                      <div className="msg__content">
+                        {message.text ? (
+                          <Markdown
+                            text={message.text}
+                            trailing={message.pending ? <span className="stream-cursor" aria-label="streaming" /> : null}
+                          />
+                        ) : message.pending ? (
+                          <span className="typing" role="status" aria-label="Thinking"><i /><i /><i /></span>
+                        ) : !message.error ? (
                           <span className="dim">Provider returned an empty response.</span>
                         ) : null}
+                        {message.error ? <ErrorState error={message.error} compact /> : null}
+                        {!message.pending && !message.error && message.text ? (
+                          <div className="msg__actions">
+                            <CopyAction text={message.text} />
+                            {isLast ? <MessageAction label="Regenerate" icon="refresh" onClick={regenerate} disabled={busy} /> : null}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : null}
-                    {message.error ? <ErrorState error={message.error} compact /> : null}
-                  </article>
-                ))}
+                    </article>
+                  );
+                })}
+
+                {meta && !busy ? (
+                  <div className="pg-meta">
+                    {meta.error ? (
+                      <StatusBadge tone="danger" dot={false}>{meta.error.label ?? "Request failed"}</StatusBadge>
+                    ) : (
+                      <>
+                        {meta.pool ? <PoolBadge pool={meta.pool} /> : null}
+                        <span className="mono pg-meta__target">
+                          {meta.provider ? providerLabel(meta.provider) : EMPTY} · {meta.model ?? EMPTY}
+                        </span>
+                        {meta.status ? (
+                          <StatusBadge tone={meta.status < 400 ? "ok" : "danger"} dot={false}>{meta.status}</StatusBadge>
+                        ) : null}
+                        <span>{formatLatency(meta.latencyMs)}</span>
+                        {Number.isFinite(meta.tokens) ? <span>{formatTokens(meta.tokens)}</span> : null}
+                      </>
+                    )}
+                  </div>
+                ) : null}
               </div>
             )}
-
-            {meta && !busy ? (
-              <div className="pg-meta">
-                {meta.error ? (
-                  <StatusBadge tone="danger" dot={false}>{meta.error.label ?? "Request failed"}</StatusBadge>
-                ) : (
-                  <>
-                    {meta.pool ? <PoolBadge pool={meta.pool} /> : null}
-                    <span className="mono pg-meta__target">
-                      {meta.provider ? providerLabel(meta.provider) : EMPTY} · {meta.model ?? EMPTY}
-                    </span>
-                    {meta.status ? (
-                      <StatusBadge tone={meta.status < 400 ? "ok" : "danger"} dot={false}>{meta.status}</StatusBadge>
-                    ) : null}
-                    <span>{formatLatency(meta.latencyMs)}</span>
-                    {Number.isFinite(meta.tokens) ? <span>{formatTokens(meta.tokens)}</span> : null}
-                  </>
-                )}
-              </div>
-            ) : null}
+          </div>
+          {!atBottom && messages.length > 0 ? (
+            <button type="button" className="pg-jump" onClick={jumpToBottom} aria-label="Jump to latest message">
+              <Icon name="arrowDown" size={16} />
+            </button>
+          ) : null}
           </div>
 
           <div className="pg-composer" onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
+            <div className="pg-composer__inner">
             {hasImages ? (
               <div className="attachments">
                 {images.map((image) => (
@@ -554,21 +667,7 @@ export default function Playground() {
               </span>
             ) : null}
 
-            <div className="pg-route">
-              {custom ? <StatusBadge tone="info" dot={false}>Custom</StatusBadge> : <PoolBadge pool={effectivePool} />}
-              <span className="pg-route__text" title={routeSummary}>{routeSummary}</span>
-              <button
-                type="button"
-                className="btn btn--ghost btn--sm pg-route__edit"
-                onClick={() => setSettingsOpen(true)}
-                aria-haspopup="dialog"
-              >
-                <Icon name="sliders" className="btn__icon" size={12} />
-                Settings
-              </button>
-            </div>
-
-            <div className="pg-input">
+            <div className="pg-box">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -582,13 +681,13 @@ export default function Playground() {
               />
               <button
                 type="button"
-                className="btn pg-icon-btn"
+                className="pg-circle"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={busy || (!custom && poolMode === "text") || images.length >= MAX_IMAGES}
                 aria-label={`Attach image (up to ${MAX_IMAGES})`}
                 title={`Attach up to ${MAX_IMAGES} images`}
               >
-                <Icon name="image" size={16} />
+                <Icon name="plus" size={18} />
               </button>
               <label className="sr-only" htmlFor="pg-prompt">Prompt</label>
               <textarea
@@ -612,20 +711,35 @@ export default function Playground() {
                 }}
               />
               {busy ? (
-                <button type="button" className="btn btn--danger pg-icon-btn" onClick={cancel} aria-label="Cancel request">
+                <button type="button" className="pg-circle pg-circle--send" onClick={cancel} aria-label="Cancel request">
                   <Icon name="stop" size={14} />
                 </button>
               ) : (
                 <button
                   type="button"
-                  className="btn btn--primary pg-icon-btn"
-                  onClick={send}
+                  className="pg-circle pg-circle--send"
+                  onClick={() => void send()}
                   disabled={sendBlocked || (prompt.trim().length === 0 && !hasImages)}
                   aria-label="Send"
                 >
-                  <Icon name="play" size={14} />
+                  <Icon name="arrowUp" size={18} />
                 </button>
               )}
+            </div>
+
+            <div className="pg-route">
+              {custom ? <StatusBadge tone="info" dot={false}>Custom</StatusBadge> : <PoolBadge pool={effectivePool} />}
+              <span className="pg-route__text" title={routeSummary}>{routeSummary}</span>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm pg-route__edit"
+                onClick={() => setSettingsOpen(true)}
+                aria-haspopup="dialog"
+              >
+                <Icon name="sliders" className="btn__icon" size={12} />
+                Settings
+              </button>
+            </div>
             </div>
           </div>
         </section>
