@@ -119,7 +119,8 @@ export function createApi({
   keyPacer = null,
   resetFallbackState = null,
   describeFallbackState = null,
-  clearRememberedTargets = null
+  clearRememberedTargets = null,
+  customPlayground = null
 }) {
   const liveStreams = new Set();
 
@@ -1184,6 +1185,15 @@ export function createApi({
       const entry = requestLog.findById(id) ?? requestLog.get(id);
       if (!entry) return fail(req, res, 404, "Request not found", "not_found");
       return sendJson(req, res, 200, { request: entry });
+    }
+
+    // The one write-through route in this module: it forwards a single request
+    // to an endpoint the operator typed in. It touches no routing state, health
+    // or request log (see custom-playground.js for the SSRF rules).
+    if (pathname === "/api/playground/custom") {
+      if (req.method !== "POST") return fail(req, res, 405, "Use POST", "method_not_allowed");
+      if (!customPlayground) return fail(req, res, 503, "Custom playground is not available", "unavailable");
+      return customPlayground(req, res);
     }
 
     if (pathname.startsWith("/api/")) {

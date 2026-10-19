@@ -171,6 +171,10 @@ export function loadConfig(env = process.env) {
     // Sticky target lifetime after a success: 20 minutes (STICKY_TTL_MS only
     // exists so tests can use a short real-clock TTL).
     stickyTtlMs: readNumber(env, "STICKY_TTL_MS", 20 * 60 * 1000, { min: 1, expected: "a positive integer" }),
+    // Custom-endpoint playground: let the operator test a base URL on a private
+    // address (Ollama, LM Studio, a LAN gateway). Off by default because that
+    // endpoint calls whatever URL it is given from the gateway's own network.
+    playgroundAllowPrivateHosts: ["1", "true", "yes"].includes(String(env.PLAYGROUND_ALLOW_PRIVATE_HOSTS ?? "").trim().toLowerCase()),
     maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", 10 * 1024 * 1024, { min: 1, max: 100 * 1024 * 1024, expected: "an integer from 1 to 104857600" }),
     // The Fallback Chain: the single source of truth for routing order, per
     // pool, plus the selected operating mode. Written by the control panel.

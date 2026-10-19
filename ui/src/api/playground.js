@@ -21,6 +21,47 @@ export const PROTOCOL_ENDPOINTS = Object.freeze({
   gemini: "/v1beta/models"
 });
 
+export const CUSTOM_ENDPOINT = "/api/playground/custom";
+
+export function buildCustomPayload({ protocol, baseUrl, apiKey, model, request }) {
+  return {
+    protocol,
+    baseUrl: String(baseUrl ?? "").trim(),
+    apiKey: String(apiKey ?? "").trim(),
+    model: String(model ?? "").trim(),
+    request
+  };
+}
+
+/**
+ * Why a custom-endpoint request cannot be sent yet, or null when it can. Shown
+ * as a hint beside the Send button, so it only says what is missing — the
+ * gateway re-validates everything and has the final word.
+ */
+export function customProblem({ baseUrl, model } = {}) {
+  const base = String(baseUrl ?? "").trim();
+  if (!base) return "Enter a base URL.";
+  let url;
+  try {
+    url = new URL(base);
+  } catch {
+    return "Base URL must be a full URL, e.g. https://api.example.com/v1";
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return "Base URL must start with http:// or https://";
+  if (!String(model ?? "").trim()) return "Enter a model id.";
+  return null;
+}
+
+/**
+ * Anthropic's API rejects a request with no `max_tokens`, unlike the others, so
+ * a blank field means a small default there instead of "no limit".
+ */
+export function customMaxTokens(protocol, value) {
+  const parsed = parseMaxTokens(value);
+  if (parsed !== null) return parsed;
+  return protocol === "anthropic" ? 1024 : null;
+}
+
 /**
  * Pin headers understood by the gateway. A pin needs a provider; a key index
  * is meaningless on its own, so it is only sent alongside one.
@@ -253,10 +294,54 @@ export async function sendPlaygroundRequest({
   onDelta,
   onMeta
 }) {
+  return runPlaygroundRequest({
+    path: endpointFor(protocol, model ?? body.model),
+    protocol,
+    body,
+    headers,
+    signal,
+    timeoutMs,
+    onDelta,
+    onMeta
+  });
+}
+
+/**
+ * Custom endpoint: the base URL, API key and model are typed in by the operator
+ * and the gateway forwards ONE request there — outside routing, health,
+ * cooldown and fallback. `body` is the usual client-protocol body; the gateway
+ * works out the upstream URL and auth from `baseUrl` + `protocol`.
+ *
+ * The key is sent in the request body to the operator's own gateway and is
+ * never kept by this module.
+ */
+export async function sendCustomRequest({
+  protocol,
+  baseUrl,
+  apiKey,
+  model,
+  body,
+  signal,
+  timeoutMs,
+  onDelta,
+  onMeta
+}) {
+  return runPlaygroundRequest({
+    path: CUSTOM_ENDPOINT,
+    protocol,
+    body: buildCustomPayload({ protocol, baseUrl, apiKey, model, request: body }),
+    signal,
+    timeoutMs,
+    onDelta,
+    onMeta
+  });
+}
+
+async function runPlaygroundRequest({ path, protocol, body, headers, signal, timeoutMs, onDelta, onMeta }) {
   // `apiStream` keeps its timeout and the caller's abort bridge attached for the
   // whole stream lifetime; `release` drops them once the body is done with.
   const { response, release, wasTimedOut } = await apiStream(
-    endpointFor(protocol, model ?? body.model),
+    path,
     { body, signal, headers, ...(timeoutMs === undefined ? {} : { timeoutMs }) }
   );
 
@@ -280,6 +365,7 @@ async function readPlaygroundResponse({ protocol, response, onDelta, onMeta }) {
     model: response.headers.get("x-multi-ai-model"),
     keyIndex: Number(response.headers.get("x-multi-ai-key-index")),
     sessionId: response.headers.get("x-multi-ai-session-id"),
+    upstreamHost: response.headers.get("x-multi-ai-upstream-host"),
     status: response.status,
     contentType: response.headers.get("content-type") ?? ""
   };
