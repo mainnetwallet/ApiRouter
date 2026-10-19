@@ -275,7 +275,7 @@ test("a started server marks Cohere targets healthy from Get-a-Model alone, and 
   });
   const router = await startRouter({
     COHERE_API_KEYS: "COHERE-SECRET",
-    COHERE_MODELS: "command-a-plus-05-2026,north-mini-code-1-0",
+    COHERE_MODELS: "command-a-plus-05-2026,command-a-03-2025",
     COHERE_BASE_URL: `${cohere.baseUrl}/compatibility/v1`
   });
   try {
@@ -289,7 +289,7 @@ test("a started server marks Cohere targets healthy from Get-a-Model alone, and 
     }
     assert.deepEqual(new Set(seen), new Set([
       "GET /v1/models/command-a-plus-05-2026",
-      "GET /v1/models/north-mini-code-1-0"
+      "GET /v1/models/command-a-03-2025"
     ]), "one lookup per model, nothing else");
     assert.equal(cohere.requests.some((record) => record.method === "POST"), false, "no generation request was sent");
   } finally {
