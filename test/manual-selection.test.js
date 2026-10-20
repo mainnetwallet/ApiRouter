@@ -463,15 +463,15 @@ test("a rejected request (400) is never forced through a second time, and still 
   assert.equal(error.status, 400);
 });
 
-test("a credential failure cools only that key + model and is never retried", async () => {
+test("a 401 cools that key's other models too and is never retried", async () => {
   const { calls, counts } = await walkManual((id) => {
     if (id === "gemini/A#0") throw fail(401);
     throw fail(500);
   });
   assert.equal(counts.get("gemini/A#0"), 1, "a 401 would only fail the same way again");
-  // The same key's other models are separate targets: each is attempted on its own.
+  // A 401 describes the credential, so the same key's other models are cooled with it.
   for (const id of ["gemini/C#0", "gemini/E#0", "gemini/X#0"]) {
-    assert.ok(calls.includes(id), `${id} shares key 0 but is a separate target and must still be tried`);
+    assert.ok(!calls.includes(id), `${id} shares key 0 with the failing 401 and must not be tried`);
   }
   // Key 1 is a different credential and is unaffected.
   assert.equal(counts.get("gemini/A#1"), 2);

@@ -23,10 +23,12 @@ export const FAILURE_SCOPE = Object.freeze({
   PROVIDER: "provider"
 });
 
-// These statuses describe the API key / account rather than the request. They
-// are still cooled down per key + model (see `describeFailure`), so each model on
-// the key gets its own attempt. A provider adapter can still widen one to the
-// whole key or provider by setting `error.scope`.
+// These statuses describe the API key / account rather than the request.
+// `describeFailure` decides how far each one reaches: a 401, or a 402/403 whose
+// message positively names a dead/expired/suspended credential or an empty
+// balance, is key-scoped; a 402/403 that names a model or budget pool, or says
+// nothing useful, stays on the one key + model tried. A provider adapter can
+// still set `error.scope` to override either way.
 const KEY_LEVEL_STATUS_CODES = new Set([401, 402, 403]);
 
 // These describe the request or the model rather than the credential or the
@@ -68,20 +70,21 @@ export function describeFailure(status, error = null) {
   }
   const code = Number(status);
   if (KEY_LEVEL_STATUS_CODES.has(code)) {
-    // 401/402/403 are about the credential, but they are still recorded against
-    // the key + model that was just tried. Every other model on the same key is
-    // then attempted on its own, so one model's refusal (no access, no budget
-    // pool, not enabled for this key) never disables the key's other models.
-    // A message that positively names the model or pool only adds a label for
-    // the Models page.
+    // 401 is always the credential: no model or pool changes whether the key is
+    // valid, so it cools every model sharing the key.
+    if (code === 401) return { scope: FAILURE_SCOPE.KEY, kind: null };
     if (MESSAGE_NARROWABLE_STATUS_CODES.has(code) && typeof error?.message === "string") {
       const text = error.message;
-      if (!SHARED_CREDENTIAL_MESSAGE.test(text)) {
-        for (const [pattern, kind] of TARGET_SCOPED_MESSAGE) {
-          if (pattern.test(text)) return { scope: FAILURE_SCOPE.TARGET, kind };
-        }
+      // Positive evidence of a shared credential/account problem (invalid or
+      // expired key, suspended account, no balance) is key-wide.
+      if (SHARED_CREDENTIAL_MESSAGE.test(text)) return { scope: FAILURE_SCOPE.KEY, kind: null };
+      // Positive evidence of a per-model / per-pool limit stays on one target.
+      for (const [pattern, kind] of TARGET_SCOPED_MESSAGE) {
+        if (pattern.test(text)) return { scope: FAILURE_SCOPE.TARGET, kind };
       }
     }
+    // A bare 402/403 ("Forbidden") is ambiguous: take the narrow answer, which
+    // can only cost a retry, never disable a healthy sibling model.
     return { scope: FAILURE_SCOPE.TARGET, kind: null };
   }
   return { scope: FAILURE_SCOPE.TARGET, kind: null };
@@ -96,8 +99,8 @@ export function describeFailure(status, error = null) {
  * whose message shows the limit is a budget pool's or a model's, not the key's,
  * is target-scoped. Anything unrecognised is treated as target-scoped — the
  * narrow answer, which can only cost a retry, never a needlessly disabled model
- * — except the credential statuses (401/402/403), which stay key-level unless
- * the message positively says otherwise.
+ * — except 401 (always key-level) and a 402/403 whose message positively names
+ * a shared credential or account problem (key-level).
  */
 export function classifyFailure(status, error = null) {
   return describeFailure(status, error).scope;
