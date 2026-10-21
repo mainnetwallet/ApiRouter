@@ -196,7 +196,7 @@ export function loadConfig(env = process.env) {
     customEndpointsRemote: {
       repo: String(env.CUSTOM_ENDPOINTS_GITHUB_REPO || "").trim(),
       token: String(env.CUSTOM_ENDPOINTS_GITHUB_TOKEN || "").trim(),
-      branch: String(env.CUSTOM_ENDPOINTS_GITHUB_BRANCH || "").trim() || "apirouter-data",
+      branch: String(env.CUSTOM_ENDPOINTS_GITHUB_BRANCH || "").trim() || "main",
       path: String(env.CUSTOM_ENDPOINTS_GITHUB_PATH || "").trim() || "custom-endpoints.enc.json",
       apiBase: String(env.CUSTOM_ENDPOINTS_GITHUB_API || "").trim() || "https://api.github.com",
       secret: String(env.CUSTOM_ENDPOINTS_SECRET || "").trim()

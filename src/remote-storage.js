@@ -76,8 +76,8 @@ const encodePath = (value) => String(value).split("/").map(encodeURIComponent).j
 /**
  * @param repo     "owner/name"
  * @param token    fine-grained token with Contents: read & write on that repo
- * @param branch   dedicated data branch (created from the default branch when missing). It
- *                 must not be the branch the host deploys from, or every save would redeploy.
+ * @param branch   branch the file is committed to (created from the default branch when missing).
+ *                 When it is the branch the host deploys from, every save redeploys the service.
  * @param path     file path inside the repo
  * @param secret   passphrase for the AES-256-GCM encryption
  * @param apiBase  GitHub API root (GitHub Enterprise, or a mock in tests)
@@ -186,9 +186,6 @@ export function createRemoteStorage(options, { fetchImpl } = {}) {
   if (!options.repo) return null;
   if (!/^[\w.-]+\/[\w.-]+$/.test(options.repo)) {
     throw new Error("Invalid CUSTOM_ENDPOINTS_GITHUB_REPO: expected owner/name");
-  }
-  if (/^(main|master)$/i.test(String(options.branch))) {
-    throw new Error("Invalid CUSTOM_ENDPOINTS_GITHUB_BRANCH: use a dedicated data branch, not main/master (a save there would redeploy the service)");
   }
   if (!options.token) throw new Error("CUSTOM_ENDPOINTS_GITHUB_TOKEN is required when CUSTOM_ENDPOINTS_GITHUB_REPO is set");
   if (!options.secret || options.secret.length < MIN_SECRET_LENGTH) {

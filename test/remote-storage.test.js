@@ -42,7 +42,7 @@ test("remote storage config fails fast instead of silently using the disk", () =
   assert.throws(() => createRemoteStorage({ repo: "not-a-repo", token: "t", secret: SECRET, branch: "d" }), /owner\/name/);
   assert.throws(() => createRemoteStorage({ repo: "a/b", token: "", secret: SECRET, branch: "d" }), /TOKEN/);
   assert.throws(() => createRemoteStorage({ repo: "a/b", token: "t", secret: "short", branch: "d" }), /SECRET/);
-  assert.throws(() => createRemoteStorage({ repo: "a/b", token: "t", secret: SECRET, branch: "main" }), /dedicated data branch/);
+  assert.ok(createRemoteStorage({ repo: "a/b", token: "t", secret: SECRET, branch: "main" }), "main is allowed: saves commit straight to it, no PR");
   assert.ok(createRemoteStorage({ repo: "a/b", token: "t", secret: SECRET, branch: "apirouter-data", path: "x.json" }));
 });
 

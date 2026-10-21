@@ -203,10 +203,10 @@ Changes apply without a restart. `server.js` listens to the store, removes the o
 
 `/api/custom-endpoints` accepts keys but never returns them: the panel only gets a key count. The base URL passes the same checks as the Playground (http(s) only, no credentials, query or fragment, no private or reserved address, hostnames resolved at save time).
 
-**Persistence.** The store writes a local file (`CUSTOM_ENDPOINTS_FILE`, default `data/custom-endpoints.json`). On a host that wipes its disk on every redeploy that is not enough, so with `CUSTOM_ENDPOINTS_GITHUB_REPO` set the source of truth is an **encrypted blob in a dedicated GitHub branch** (`src/remote-storage.js`, Contents API):
+**Persistence.** The store writes a local file (`CUSTOM_ENDPOINTS_FILE`, default `data/custom-endpoints.json`). On a host that wipes its disk on every redeploy that is not enough, so with `CUSTOM_ENDPOINTS_GITHUB_REPO` set the source of truth is an **encrypted blob committed straight to a GitHub branch** (`src/remote-storage.js`, Contents API):
 
 - Everything is encrypted with AES-256-GCM (key derived with scrypt from `CUSTOM_ENDPOINTS_SECRET`) before it leaves the process; the repository only holds ciphertext.
-- The branch (`apirouter-data` by default, never `main`/`master`) is created from the default branch when missing, so saving never triggers a deploy of the service.
+- The branch (`main` by default, override with `CUSTOM_ENDPOINTS_GITHUB_BRANCH`) receives a direct commit on every save, no PR needed. It is created from the default branch when missing. On the branch the host deploys from (`main`), every save redeploys the service; use a separate branch such as `apirouter-data` to avoid that.
 - Startup: the remote wins over the local file; if the remote is empty, existing local endpoints are uploaded once.
 - Safety: while the remote cannot be read (or decrypted with the current secret) every create, update and remove is refused with 503, so a stale list can never overwrite the saved one. A background retry loads the endpoints as soon as the remote answers.
 - A change is written to the remote first; if that fails the in-memory change is rolled back. Changes are serialized, and a stale blob sha is retried once.

@@ -147,7 +147,7 @@ GROQ_MODELS=openai/gpt-oss-120b,qwen/qwen3.8-27b
 |---|---|
 | `PORT` | Render nijei set kore (`10000`) |
 | `FALLBACK_CHAIN_FILE`, `MANUAL_SELECTION_FILE`, `GATEWAY_STATE_FILE` | Code er default-i `data/*.json`, same. Persistent disk na thakle redeploy-te `data/` muche jay, tokhon UI-r Shutdown-o muche jay (backend abar chalu hoy) |
-| `CUSTOM_ENDPOINTS_GITHUB_REPO`, `CUSTOM_ENDPOINTS_GITHUB_TOKEN`, `CUSTOM_ENDPOINTS_SECRET` | **Save kora Custom endpoint redeploy e jate na muche, er jonno dite hobe.** Repo = `owner/name` (tomar ApiRouter repo-i cholbe), Token = GitHub fine-grained token (sudhu oi repo, Contents: Read and write), Secret = nijer baniye nawa 12+ character er passphrase. Keys encrypt hoye `apirouter-data` branch e jay (main e na, tai deploy trigger hoy na). Secret hariye gele save kora data pora jabe na, tai kothao likhe rakho |
+| `CUSTOM_ENDPOINTS_GITHUB_REPO`, `CUSTOM_ENDPOINTS_GITHUB_TOKEN`, `CUSTOM_ENDPOINTS_SECRET` | **Save kora Custom endpoint redeploy e jate na muche, er jonno dite hobe.** Repo = `owner/name` (tomar ApiRouter repo-i cholbe), Token = GitHub fine-grained token (sudhu oi repo, Contents: Read and write), Secret = nijer baniye nawa 12+ character er passphrase. Keys encrypt hoye `main` branch e direct commit hoy (PR lage na). Tai protibar save e Render redeploy hoy. Secret hariye gele save kora data pora jabe na, tai kothao likhe rakho |
 | `KEEPALIVE_URL` | Render e `RENDER_EXTERNAL_URL` theke auto |
 | `KEEPALIVE_INTERVAL_MS` | Default 10 min thik ache |
 
