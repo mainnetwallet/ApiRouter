@@ -272,7 +272,9 @@ function json(res, status, body, extraHeaders = {}) {
 function authorized(req) {
   if (config.routerApiKeys.length === 0) return true;
   const value = String(req.headers.authorization || "");
-  const token = value.startsWith("Bearer ") ? value.slice(7).trim() : "";
+  const bearer = value.startsWith("Bearer ") ? value.slice(7).trim() : "";
+  // Anthropic-style clients send the key in x-api-key instead of Bearer.
+  const token = bearer || String(req.headers["x-api-key"] || "").trim();
   return Boolean(token && config.routerApiKeys.includes(token));
 }
 
