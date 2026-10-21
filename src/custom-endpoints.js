@@ -16,6 +16,11 @@ import { CUSTOM_PROTOCOLS, PlaygroundError, isBlockedAddress, validateEndpointBa
  *
  * Keys live in the data file (like the other `data/*.json` state) and are never
  * returned by `describe()`: the control panel only ever sees a key COUNT.
+ *
+ * An endpoint serves the text pool (`models`, `apiKeys`, `baseUrl`) and, optionally,
+ * the vision pool (image requests): `visionModels`, plus an optional `visionBaseUrl`
+ * and `visionApiKeys` that default to the text ones when left empty. Either pool may
+ * be empty, but not both.
  */
 
 export const CUSTOM_PROVIDER_PREFIX = "custom-";
@@ -49,9 +54,9 @@ function toList(value) {
   return [...new Set(raw.map((item) => String(item ?? "").trim()).filter(Boolean))];
 }
 
-function cleanModels(value) {
+function cleanModels(value, { required = true } = {}) {
   const models = toList(value);
-  if (models.length === 0) throw bad("At least one model is required");
+  if (required && models.length === 0) throw bad("At least one model is required");
   if (models.length > MAX_MODELS_PER_ENDPOINT) throw bad(`At most ${MAX_MODELS_PER_ENDPOINT} models per endpoint`);
   for (const model of models) {
     if (model.length > MAX_MODEL_LENGTH || hasControlChars(model)) throw bad("A model id is not valid");
@@ -72,6 +77,29 @@ function cleanName(value) {
   if (!name) throw bad("Name is required");
   if (name.length > MAX_NAME_LENGTH || hasControlChars(name)) throw bad("Name is not valid");
   return name;
+}
+
+/** The keys the vision pool uses: its own when set, otherwise the text ones. */
+export const effectiveVisionKeys = (endpoint) => (endpoint.visionApiKeys?.length ? endpoint.visionApiKeys : endpoint.apiKeys);
+/** The base URL the vision pool uses: its own when set, otherwise the text one. */
+export const effectiveVisionBaseUrl = (endpoint) => endpoint.visionBaseUrl || endpoint.baseUrl;
+
+/** An endpoint must serve at least one pool, and every pool it serves needs a key. */
+function assertPools(endpoint, { createMessage = false } = {}) {
+  const hasText = endpoint.models.length > 0;
+  const hasVision = endpoint.visionModels.length > 0;
+  if (!hasText && !hasVision) throw bad("At least one model is required (text, vision or both)");
+  if (hasText && endpoint.apiKeys.length === 0) {
+    throw bad(createMessage
+      ? "At least one API key is required (for a local model without a key, enter any placeholder such as \"none\")"
+      : "At least one API key is required");
+  }
+  if (hasVision && effectiveVisionKeys(endpoint).length === 0) {
+    throw bad("At least one API key is required for the vision models (add vision keys, or text keys that they can share)");
+  }
+  if (endpoint.apiKeys.length > MAX_KEYS_PER_ENDPOINT || endpoint.visionApiKeys.length > MAX_KEYS_PER_ENDPOINT) {
+    throw bad(`At most ${MAX_KEYS_PER_ENDPOINT} keys per endpoint`);
+  }
 }
 
 function slugify(name) {
@@ -112,14 +140,19 @@ function parseEndpoints(text, { allowPrivateHosts }) {
       const id = String(entry?.id ?? "");
       if (!isCustomProviderId(id) || seen.has(id)) continue;
       if (!CUSTOM_PROTOCOLS.includes(entry.protocol)) continue;
-      endpoints.push({
+      const endpoint = {
         id,
         name: cleanName(entry.name),
         baseUrl: validateEndpointBaseUrl(entry.baseUrl, { allowPrivateHosts }),
         protocol: entry.protocol,
-        models: cleanModels(entry.models),
-        apiKeys: cleanKeys(entry.apiKeys)
-      });
+        models: cleanModels(entry.models, { required: false }),
+        apiKeys: cleanKeys(entry.apiKeys),
+        visionModels: cleanModels(entry.visionModels, { required: false }),
+        visionBaseUrl: entry.visionBaseUrl ? validateEndpointBaseUrl(entry.visionBaseUrl, { allowPrivateHosts }) : "",
+        visionApiKeys: cleanKeys(entry.visionApiKeys)
+      };
+      assertPools(endpoint);
+      endpoints.push(endpoint);
       seen.add(id);
     } catch (error) {
       console.warn(`custom endpoints: skipped an invalid saved endpoint (${error.message})`);
@@ -234,7 +267,13 @@ export class CustomEndpointStore {
 
   /** Full records, keys included. For the router itself — never send these to a client. */
   list() {
-    return this.endpoints.map((endpoint) => ({ ...endpoint, models: [...endpoint.models], apiKeys: [...endpoint.apiKeys] }));
+    return this.endpoints.map((endpoint) => ({
+      ...endpoint,
+      models: [...endpoint.models],
+      apiKeys: [...endpoint.apiKeys],
+      visionModels: [...endpoint.visionModels],
+      visionApiKeys: [...endpoint.visionApiKeys]
+    }));
   }
 
   get(id) {
@@ -249,7 +288,12 @@ export class CustomEndpointStore {
       baseUrl: endpoint.baseUrl,
       protocol: endpoint.protocol,
       models: [...endpoint.models],
-      keyCount: endpoint.apiKeys.length
+      keyCount: endpoint.apiKeys.length,
+      visionModels: [...endpoint.visionModels],
+      // "" means the vision models use the text base URL.
+      visionBaseUrl: endpoint.visionBaseUrl,
+      // Keys of their own for the vision pool; 0 means the text keys are shared.
+      visionKeyCount: endpoint.visionApiKeys.length
     };
   }
 
@@ -307,6 +351,14 @@ export class CustomEndpointStore {
     this.emit();
   }
 
+  /** Validates an optional vision base URL ("" clears it). `previous` is the value it replaces. */
+  async cleanVisionBaseUrl(value, previous) {
+    if (value === undefined || value === null || String(value).trim() === "") return "";
+    const url = validateEndpointBaseUrl(value, { allowPrivateHosts: this.allowPrivateHosts });
+    if (url !== previous) await assertPublicHost(url, this);
+    return url;
+  }
+
   create(input) {
     return this.exclusive(async () => {
       await this.ensureReady();
@@ -317,12 +369,13 @@ export class CustomEndpointStore {
       if (!CUSTOM_PROTOCOLS.includes(protocol)) throw bad(`protocol must be one of: ${CUSTOM_PROTOCOLS.join(", ")}`);
       const baseUrl = validateEndpointBaseUrl(input.baseUrl, { allowPrivateHosts: this.allowPrivateHosts });
       await assertPublicHost(baseUrl, this);
-      const models = cleanModels(input.models ?? input.model);
+      const models = cleanModels(input.models ?? input.model, { required: false });
       const apiKeys = cleanKeys(input.apiKeys ?? input.apiKey);
-      if (apiKeys.length === 0) throw bad("At least one API key is required (for a local model without a key, enter any placeholder such as \"none\")");
-      if (apiKeys.length > MAX_KEYS_PER_ENDPOINT) throw bad(`At most ${MAX_KEYS_PER_ENDPOINT} keys per endpoint`);
-
-      const endpoint = { id: this.uniqueId(name), name, baseUrl, protocol, models, apiKeys };
+      const visionModels = cleanModels(input.visionModels, { required: false });
+      const visionApiKeys = cleanKeys(input.visionApiKeys);
+      const visionBaseUrl = await this.cleanVisionBaseUrl(input.visionBaseUrl, "");
+      const endpoint = { id: this.uniqueId(name), name, baseUrl, protocol, models, apiKeys, visionModels, visionBaseUrl, visionApiKeys };
+      assertPools(endpoint, { createMessage: true });
       await this.commit(() => this.endpoints.push(endpoint), () => this.endpoints.splice(this.endpoints.indexOf(endpoint), 1));
       return this.describe(endpoint);
     });
@@ -339,7 +392,13 @@ export class CustomEndpointStore {
       if (!current) throw new CustomEndpointError(404, `no custom endpoint "${id}"`, "not_found");
       if (!input || typeof input !== "object") throw bad("Request body must be a JSON object");
 
-      const next = { ...current, models: [...current.models], apiKeys: [...current.apiKeys] };
+      const next = {
+        ...current,
+        models: [...current.models],
+        apiKeys: [...current.apiKeys],
+        visionModels: [...current.visionModels],
+        visionApiKeys: [...current.visionApiKeys]
+      };
       if (input.name !== undefined) next.name = cleanName(input.name);
       if (input.protocol !== undefined) {
         if (!CUSTOM_PROTOCOLS.includes(input.protocol)) throw bad(`protocol must be one of: ${CUSTOM_PROTOCOLS.join(", ")}`);
@@ -349,11 +408,14 @@ export class CustomEndpointStore {
         next.baseUrl = validateEndpointBaseUrl(input.baseUrl, { allowPrivateHosts: this.allowPrivateHosts });
         if (next.baseUrl !== current.baseUrl) await assertPublicHost(next.baseUrl, this);
       }
-      if (input.models !== undefined) next.models = cleanModels(input.models);
+      if (input.models !== undefined) next.models = cleanModels(input.models, { required: false });
       if (input.apiKeys !== undefined) next.apiKeys = cleanKeys(input.apiKeys);
       if (input.addApiKeys !== undefined) next.apiKeys = [...new Set([...next.apiKeys, ...cleanKeys(input.addApiKeys)])];
-      if (next.apiKeys.length === 0) throw bad("At least one API key is required");
-      if (next.apiKeys.length > MAX_KEYS_PER_ENDPOINT) throw bad(`At most ${MAX_KEYS_PER_ENDPOINT} keys per endpoint`);
+      if (input.visionModels !== undefined) next.visionModels = cleanModels(input.visionModels, { required: false });
+      if (input.visionBaseUrl !== undefined) next.visionBaseUrl = await this.cleanVisionBaseUrl(input.visionBaseUrl, current.visionBaseUrl);
+      if (input.visionApiKeys !== undefined) next.visionApiKeys = cleanKeys(input.visionApiKeys);
+      if (input.addVisionApiKeys !== undefined) next.visionApiKeys = [...new Set([...next.visionApiKeys, ...cleanKeys(input.addVisionApiKeys)])];
+      assertPools(next);
 
       const index = this.endpoints.indexOf(current);
       await this.commit(() => { this.endpoints[index] = next; }, () => { this.endpoints[index] = current; });
@@ -387,13 +449,39 @@ export function customProviderConfig(endpoint) {
   };
 }
 
+/** The same endpoint as a provider of the vision pool (image requests). */
+export function customVisionProviderConfig(endpoint) {
+  return {
+    apiKeys: [...effectiveVisionKeys(endpoint)],
+    models: [...endpoint.visionModels],
+    baseUrl: effectiveVisionBaseUrl(endpoint),
+    envPrefix: "",
+    clientHeaders: {},
+    protocols: [endpoint.protocol],
+    custom: true,
+    label: endpoint.name
+  };
+}
+
 /**
- * Replaces every custom provider in `config.providers` with the given endpoints.
+ * Replaces every custom provider in `config.providers` (text) and
+ * `config.visionProviders` (vision) with the given endpoints.
  * Mutates in place on purpose: the API layer holds the same `config` object.
+ *
+ * The text entry exists for every endpoint, even a vision-only one (with no
+ * models, so it routes nothing), because the capability views walk
+ * `config.providers` to find every provider. The vision entry exists only when
+ * the endpoint has vision models.
  */
 export function applyCustomEndpoints(config, endpoints) {
-  for (const id of Object.keys(config.providers)) {
-    if (isCustomProviderId(id)) delete config.providers[id];
+  config.visionProviders ??= {};
+  for (const group of [config.providers, config.visionProviders]) {
+    for (const id of Object.keys(group)) {
+      if (isCustomProviderId(id)) delete group[id];
+    }
   }
-  for (const endpoint of endpoints) config.providers[endpoint.id] = customProviderConfig(endpoint);
+  for (const endpoint of endpoints) {
+    config.providers[endpoint.id] = customProviderConfig(endpoint);
+    if (endpoint.visionModels.length > 0) config.visionProviders[endpoint.id] = customVisionProviderConfig(endpoint);
+  }
 }

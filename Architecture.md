@@ -197,7 +197,7 @@ Providers normally come from the environment (`PROVIDER_IDS` in `src/config.js`)
 id (custom-<name>) + name + baseUrl + protocol + models[] + apiKeys[]
 ```
 
-`applyCustomEndpoints` (`src/custom-endpoints.js`) merges each record into `config.providers` as a normal provider (`custom: true`, one protocol), so `buildTargets` produces the usual `provider + model + keyIndex` targets and everything downstream (Fallback Chain, health probes, cooldowns, sticky routing, the model switch) treats it like any other provider. Text pool only.
+`applyCustomEndpoints` (`src/custom-endpoints.js`) merges each record into `config.providers` as a normal text provider (`custom: true`, one protocol) and, when the record has `visionModels`, into `config.visionProviders` as well (its own `visionBaseUrl` / `visionApiKeys`, else the text ones), so `buildTargets` produces a text target set and a vision target set; the server hot-reloads both pools, so `buildTargets` produces the usual `provider + model + keyIndex` targets and everything downstream (Fallback Chain, health probes, cooldowns, sticky routing, the model switch) treats it like any other provider.
 
 Changes apply without a restart. `server.js` listens to the store, removes the old `custom-*` targets from the live `textTargets` / `targets` arrays in place, adds the new ones, rebuilds the model capability index, re-registers secrets for redaction, resets the automatic-order cache and probes the new targets at once. The health monitor, the router and the API all read those same arrays and the same `config` object, which is why in-place mutation is enough.
 

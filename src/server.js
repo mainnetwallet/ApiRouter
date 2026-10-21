@@ -1203,15 +1203,18 @@ const customPlayground = createCustomPlayground({
 // monitor, the router and the control panel all read these same arrays), and
 // the new targets are probed straight away.
 customEndpoints.onChange((endpoints) => {
-  for (const list of [textTargets, targets]) {
+  for (const list of [textTargets, visionTargets, targets]) {
     for (let index = list.length - 1; index >= 0; index -= 1) {
       if (isCustomProviderId(list[index].provider)) list.splice(index, 1);
     }
   }
   applyCustomEndpoints(config, endpoints);
-  const customProviders = Object.fromEntries(Object.entries(config.providers).filter(([id]) => isCustomProviderId(id)));
-  const fresh = buildTargets(customProviders);
-  textTargets.push(...fresh);
+  const onlyCustom = (group) => Object.fromEntries(Object.entries(group ?? {}).filter(([id]) => isCustomProviderId(id)));
+  const freshText = buildTargets(onlyCustom(config.providers));
+  const freshVision = buildTargets(onlyCustom(config.visionProviders), VISION_POOL);
+  const fresh = [...freshText, ...freshVision];
+  textTargets.push(...freshText);
+  visionTargets.push(...freshVision);
   targets.push(...fresh);
   modelCapabilities = modelPoolIndex(config);
   monitor.targetCount = targets.length;

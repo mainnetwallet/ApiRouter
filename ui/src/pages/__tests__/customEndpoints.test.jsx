@@ -33,6 +33,18 @@ describe("Custom endpoints manager", () => {
     expect(markup).toContain(">Remove<");
   });
 
+  it("shows the vision models of an endpoint, and nothing extra for a text-only one", () => {
+    const text = render([{ id: "custom-gw", name: "Gw", baseUrl: "https://gw.example.com/v1", protocol: "openai-chat", models: ["m"], keyCount: 1 }]);
+    expect(text).not.toContain("vision model");
+    const both = render([{
+      id: "custom-gw", name: "Gw", baseUrl: "https://gw.example.com/v1", protocol: "openai-chat", models: ["m"], keyCount: 1,
+      visionModels: ["v-a", "v-b"], visionBaseUrl: "", visionKeyCount: 0
+    }]);
+    expect(both).toContain("2 vision models");
+    expect(both).toContain("v-a, v-b");
+    expect(both).toContain("shares the text keys");
+  });
+
   it("warns when saved endpoints live only on a disk a redeploy can wipe", () => {
     expect(render([], { storage: { mode: "file", ready: true } })).toContain("CUSTOM_ENDPOINTS_GITHUB_REPO");
   });

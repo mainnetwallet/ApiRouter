@@ -294,7 +294,7 @@ outright, and that wins over the status code.
 | POST | `/api/gateway/shutdown` | Shut the gateway down: no proxy request or health probe reaches an upstream |
 | POST | `/api/gateway/resume` | Turn the gateway back on |
 | GET / POST | `/api/custom-endpoints` | List / create a saved custom endpoint (see [Saved custom endpoints](#saved-custom-endpoints)); keys are accepted but never returned |
-| PUT / DELETE | `/api/custom-endpoints/:id` | Change (name, base URL, API style, models, `addApiKeys` / `apiKeys`) or remove a saved custom endpoint |
+| PUT / DELETE | `/api/custom-endpoints/:id` | Change (name, base URL, API style, models, `addApiKeys` / `apiKeys`, and the vision part: `visionModels`, `visionBaseUrl`, `addVisionApiKeys` / `visionApiKeys`) or remove a saved custom endpoint |
 | POST | `/api/playground/custom` | Forward ONE request to a base URL, API key and model typed in the Playground (see [Custom endpoint playground](#custom-endpoint-playground)) |
 
 ### Shutdown and resume
@@ -377,7 +377,7 @@ A Playground test forgets everything. To keep a custom endpoint, add it on the *
 - The Playground never saves anything: use it to test an endpoint first, then add it on the Custom Endpoints page.
 - Changes take effect immediately, with no restart. Removing an endpoint removes it from routing at once.
 - Keys are stored in `data/custom-endpoints.json` (override with `CUSTOM_ENDPOINTS_FILE`), like the other `data/` state. They are sent to the gateway but never returned: the control panel only shows how many keys an endpoint has, and the keys are redacted from any error text.
-- Text pool only; there is no separate vision pool for custom endpoints.
+- **Text and vision.** An endpoint serves the text pool (`models`, `apiKeys`, `baseUrl`) and, optionally, the vision pool for image requests: add `visionModels`, plus an optional `visionBaseUrl` and `visionApiKeys`. Left empty, the vision models share the text base URL and keys. An endpoint may be vision-only (no text models). Image requests only ever use vision models, text requests only text models.
 - The same address rules as the Playground apply: private, loopback and metadata addresses are refused (hostnames are resolved when you save) unless `PLAYGROUND_ALLOW_PRIVATE_HOSTS=1`. A local model with no key needs a placeholder key such as `none`.
 - **Surviving a redeploy.** By default the data file lives on the server's disk. On a host that wipes its disk on every redeploy or wake-up (a free Render web service) that would lose your saved endpoints, so they can be kept in a GitHub branch instead. Set `CUSTOM_ENDPOINTS_GITHUB_REPO` (`owner/name`), `CUSTOM_ENDPOINTS_GITHUB_TOKEN` (a fine-grained token with Contents: read and write on that repo) and `CUSTOM_ENDPOINTS_SECRET` (any passphrase of 12+ characters). Everything is encrypted with AES-256-GCM before it is uploaded, so the repository only ever holds ciphertext, but keep the secret safe: with a different secret the saved data cannot be read, and it is never overwritten. It is written to the branch `main` by default (`CUSTOM_ENDPOINTS_GITHUB_BRANCH`; saves commit straight to it with no PR, and on `main` each save redeploys the service, so set it to e.g. `apirouter-data` to avoid that), in `custom-endpoints.enc.json` (`CUSTOM_ENDPOINTS_GITHUB_PATH`). On startup GitHub is the source of truth; if it is unreachable, changes are refused (so a stale list can never overwrite the saved one) and the endpoints load as soon as it answers. Endpoints that already exist on the disk are uploaded the first time.
 

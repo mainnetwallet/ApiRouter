@@ -215,7 +215,7 @@ test("e2e: saved endpoints survive a redeploy that wipes the disk, and answer re
     assert.equal(JSON.stringify(listed).includes(github.token), false, "the token is never shown");
   } finally { await router.close(); }
 
-  assert.equal(github.stored("apirouter-data", "custom-endpoints.enc.json").includes("k1"), false, "keys are encrypted at rest");
+  assert.equal(github.stored("main", "custom-endpoints.enc.json").includes("k1"), false, "keys are encrypted at rest");
 
   router = await startRouter(remoteEnv);
   try {
