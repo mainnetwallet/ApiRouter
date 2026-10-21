@@ -151,7 +151,7 @@ GROQ_MODELS=openai/gpt-oss-120b,qwen/qwen3.8-27b
 | `KEEPALIVE_URL` | Render e `RENDER_EXTERNAL_URL` theke auto |
 | `KEEPALIVE_INTERVAL_MS` | Default 10 min thik ache |
 
-Faka value (jemon `SAMBANOVA_MODELS=`) faka-i thak, set korar dorkar nei.
+Faka value (jemon `COHERE_MODELS=`) faka-i thak, set korar dorkar nei.
 
 Optional (code e default ache, `.env.example` e nei): `MAX_REQUEST_BODY_BYTES`.
 

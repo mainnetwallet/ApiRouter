@@ -77,7 +77,7 @@ function scenario(pool) {
     t("openrouter", "U-mid", 0, pool),
     t("cerebras", "U-probe", 0, pool),
     t("mistral", "U-never-1", 0, pool),
-    t("sambanova", "U-never-2", 0, pool),
+    t("cohere", "U-never-2", 0, pool),
     t("gemini", "S-3", 0, pool), t("gemini", "S-3", 1, pool),
     t("groq", "S-1", 0, pool),
     t("gemini", "S-2", 0, pool)
@@ -105,7 +105,7 @@ const HEALTH_ORDER = [
   "openrouter/U-mid#0",                 // 700 ms
   "gemini/U-slow#0",                    // 2500 ms
   "mistral/U-never-1#0",                // never measured: last, in configuration order
-  "sambanova/U-never-2#0"
+  "cohere/U-never-2#0"
 ];
 
 // ---------------------------------------------------------------------------
@@ -393,7 +393,7 @@ test("an empty selection is the automatic order, unmeasured last", () => {
   // the never-measured ones come last in configuration order.
   assert.deepEqual(modelsOf(p.steps), [
     "gemini/S-2", "gemini/U-fast", "cerebras/U-probe", "openrouter/U-mid",
-    "gemini/U-slow", "gemini/S-3", "groq/S-1", "mistral/U-never-1", "sambanova/U-never-2"
+    "gemini/U-slow", "gemini/S-3", "groq/S-1", "mistral/U-never-1", "cohere/U-never-2"
   ]);
   assert.ok(p.steps.every((step) => step.phase === PHASES.AUTO), "an empty selection has only the automatic phase");
 });
