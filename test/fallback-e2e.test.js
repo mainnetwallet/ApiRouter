@@ -427,7 +427,7 @@ test("streaming, authentication and the request log are unaffected", async () =>
   });
   try {
     // Auth is still enforced on the proxy and on every /api route, the
-    // configuration API included. The gateway reads a Bearer token only.
+    // configuration API included. The gateway reads a Bearer token or an x-api-key header.
     assert.equal((await router.request("/v1/chat/completions", postJson({ model: "x", messages: [] }))).status, 401);
     assert.equal((await router.request("/api/fallback")).status, 401);
     assert.equal((await saveChain(router, "text", [{ provider: "groq", model: "m1" }])).status, 401);
@@ -1339,27 +1339,26 @@ test("agentrouter: when every model's budget pool is exhausted all are tried in 
   }
 });
 
-test("agentrouter: an account-level 402 is recorded per key + model, so every sibling model is still tried", async () => {
+test("agentrouter: an account-level 402 (empty balance) cools the whole key, so sibling models are not called", async () => {
   const { router, agent } = await startAgentRouter(() => ({ status: 402, body: { error: { message: "Insufficient balance. Please top up your account." } } }));
   try {
     const response = await chat(router);
     assert.equal(response.status, 502);
-    assert.deepEqual(postModels(agent), AGENT_MODELS, "each model on the key is attempted once, on its own");
+    assert.deepEqual(postModels(agent), [AGENT_MODELS[0]], "the dead key is called once, not once per model");
 
-    // Each model cooled because it failed itself, not because of a sibling.
+    // The balance belongs to the shared key, so every model on it is cooling.
     const states = await modelStates(router);
-    for (const model of AGENT_MODELS) assert.equal(states[model].status, "cooldown", `${model} failed itself`);
+    for (const model of AGENT_MODELS) assert.equal(states[model].status, "cooldown", `${model} shares the exhausted key`);
 
-    // The walk's own record shows every model as a real attempt. The retry
-    // round re-lists them, but a 402 is not retryable, so each is skipped.
+    // Only the first model is a real attempt; its siblings are skipped, never called.
     const walk = await requestWalk(router);
     const attempted = walk.filter((a) => a.skipped !== true);
-    assert.deepEqual(attempted.map((a) => a.model), AGENT_MODELS, "each model is a real, distinct attempt");
-    assert.deepEqual(attempted.map((a) => a.skipReason ?? null), AGENT_MODELS.map(() => null), "no attempt was skipped");
-    assert.deepEqual(
-      [...new Set(walk.filter((a) => a.skipped === true).map((a) => a.skipReason))],
-      ["not_retryable"], "the retry round skips every model the 402 made unretryable"
-    );
+    assert.deepEqual(attempted.map((a) => a.model), [AGENT_MODELS[0]], "one real attempt for the shared key");
+    assert.ok(walk.filter((a) => a.skipped === true).length > 0, "sibling models are recorded as skipped");
+
+    // Nothing is called while the key is cooling.
+    assert.equal((await chat(router)).status, 503);
+    assert.equal(postModels(agent).length, 1, "no upstream call while the key is cooling");
   } finally {
     await router.close(); await agent.close();
   }

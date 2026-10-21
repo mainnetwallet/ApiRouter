@@ -277,7 +277,7 @@ ekbar Down dekhate pare, deploy shesh hole nijei Up hoye jay.
 | Build fail: `vite: not found` | Build Command e `--include=dev` ache kina dekho |
 | UI khule na, `Not found` | `npm run ui:build` hoy ni. Build command thik kore redeploy koro |
 | Repo list e nai | GitHub → Settings → Applications → Render → repo access dao |
-| `401 Unauthorized` | `Authorization: Bearer <token>` thik ache kina, `APIROUTER_API_KEYS` match kore kina |
+| `401 Unauthorized` | `Authorization: Bearer <token>` (ba `x-api-key: <token>`) thik ache kina, `APIROUTER_API_KEYS` match kore kina |
 | Kono model chole na | Provider key `*_API_KEYS` ba `*_MODELS` / `*_BASE_URL` boshano hoy ni, ba key thik na. Control Panel er Health page dekho |
 | Vision (image) request fail | `*_VISION_API_KEYS`, `*_VISION_MODELS`, `*_VISION_BASE_URL` boshano ache kina dekho |
 | Service sleep kore | UptimeRobot add koro (step 7) |

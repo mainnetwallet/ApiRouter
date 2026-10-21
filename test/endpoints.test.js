@@ -176,6 +176,12 @@ test("with a client token configured, /health and /v1/models stay public and the
     assert.equal(wrong.status, 401);
     const right = await router.request("/v1/chat/completions", postJson(chatBody("m"), { authorization: "Bearer tok" }));
     assert.equal(right.status, 200);
+
+    // Anthropic-style clients send the token in x-api-key instead of Bearer.
+    const viaApiKey = await router.request("/v1/messages", postJson(chatBody("m"), { "x-api-key": "tok" }));
+    assert.notEqual(viaApiKey.status, 401, "a correct x-api-key is accepted");
+    const wrongApiKey = await router.request("/v1/messages", postJson(chatBody("m"), { "x-api-key": "nope" }));
+    assert.equal(wrongApiKey.status, 401, "a wrong x-api-key is rejected");
   } finally {
     await router.close();
     await mock.close();
