@@ -1003,6 +1003,14 @@ export function createApi({
           }
         }
 
+        // A body that names only a (valid) mode carries no selection to save.
+        // The mode is derived from the saved entries, so there is nothing to
+        // write: answer with the state in force instead of walking an entries
+        // list that was never sent.
+        if (!Array.isArray(body?.entries)) {
+          return sendJson(req, res, 200, fallbackPayload(now));
+        }
+
         // What the chain can actually be routed to: the models configured, and
         // the key indexes each of those providers actually has.
         const keyIndexes = new Map();

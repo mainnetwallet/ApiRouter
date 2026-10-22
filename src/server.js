@@ -4,7 +4,7 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { loadConfig, buildTargets } from "./config.js";
+import { loadConfig, buildTargets, legacyVisionPrefixes } from "./config.js";
 import {
   describeHealth,
   rankTargets,
@@ -227,6 +227,19 @@ if (hasLegacyConfig({ manualFile: config.legacyManualSelectionFile, env: process
   console.warn(
     "fallback chain: MANUAL_SELECTION_FILE / TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS are legacy and are now ignored. "
     + "Configure the fallback chain in the control panel instead."
+  );
+}
+// The Text/Vision split is gone: `<PROVIDER>_VISION_*` variables are no longer
+// read. Say so once at startup (provider names only, never a value) so an
+// operator who still has them knows those models are not being routed to. The
+// variables are left exactly as they are; they are never edited or removed.
+const retiredVisionPrefixes = legacyVisionPrefixes(process.env)
+  .filter((prefix) => ["API_KEYS", "MODELS", "BASE_URL", "ACCOUNT_IDS"]
+    .some((name) => String(process.env[`${prefix}_VISION_${name}`] ?? "").trim() !== ""));
+if (retiredVisionPrefixes.length > 0) {
+  console.warn(
+    `config: ${retiredVisionPrefixes.map((prefix) => `${prefix}_VISION_*`).join(", ")} are retired and ignored. `
+    + "Add those models to the provider's ordinary *_MODELS list and declare image_input on them in the Model Configurator."
   );
 }
 const targets = buildTargets(config.providers);

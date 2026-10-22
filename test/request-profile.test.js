@@ -9,10 +9,10 @@ const chat = (body = {}, extra = {}) => analyzeRequest({
   ...extra
 });
 
-test("a plain chat request needs text in and text out, in the text pool", () => {
+test("a plain chat request needs text in and text out, and nothing else", () => {
   const profile = chat();
   assert.equal(profile.operation, "chat");
-  assert.equal(profile.pool, "text");
+  assert.equal("pool" in profile, false, "there is no pool: a request is described by capabilities alone");
   assert.deepEqual(profile.required, ["text_input", "text_output"]);
   assert.deepEqual(profile.preferred, []);
   assert.equal(profile.stream, false);
@@ -27,18 +27,17 @@ test("streaming is required when the client asks for it in any spelling", () => 
     body: { contents: [{ role: "user", parts: [{ text: "hi" }] }] }
   });
   assert.ok(gemini.required.includes("streaming"));
-  assert.equal(gemini.pool, "text");
+  assert.deepEqual(gemini.required, ["text_input", "text_output", "streaming"]);
 });
 
-test("image content parts put the request in the vision pool, in every client shape", () => {
+test("image content parts require image_input, in every client shape", () => {
   const openai = chat({
     messages: [{ role: "user", content: [
       { type: "text", text: "what is this" },
       { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }
     ] }]
   });
-  assert.equal(openai.pool, "vision");
-  assert.ok(openai.required.includes("image_input"));
+  assert.deepEqual(openai.required, ["text_input", "text_output", "image_input"]);
 
   const anthropic = analyzeRequest({
     protocol: "anthropic",
@@ -49,16 +48,14 @@ test("image content parts put the request in the vision pool, in every client sh
       messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: "x" } }] }]
     }
   });
-  assert.equal(anthropic.pool, "vision");
-  assert.ok(anthropic.required.includes("image_input"));
+  assert.deepEqual(anthropic.required, ["text_input", "text_output", "image_input"]);
 
   const gemini = analyzeRequest({
     protocol: "gemini",
     pathname: "/v1beta/models/m:generateContent",
     body: { contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/png", data: "x" } }] }] }
   });
-  assert.equal(gemini.pool, "vision");
-  assert.ok(gemini.required.includes("image_input"));
+  assert.deepEqual(gemini.required, ["text_input", "text_output", "image_input"]);
 });
 
 test("media-shaped values inside tool arguments are not uploads", () => {
@@ -75,29 +72,28 @@ test("media-shaped values inside tool arguments are not uploads", () => {
     }]
   };
   assert.deepEqual(collectRequestMedia(body), { image: false, audio: false, video: false, file: false });
-  assert.equal(chat(body).pool, "text");
+  const profile = chat(body);
+  assert.ok(!profile.required.includes("image_input"), "a value the model produced is not an image the client uploaded");
+  assert.deepEqual(profile.required, ["text_input", "text_output"]);
 });
 
-test("audio, video and file inputs are text-pool capabilities, not a third pool", () => {
+test("audio, video and file inputs are ordinary requirements on top of text, never a separate route", () => {
   const audio = chat({
     messages: [{ role: "user", content: [{ type: "input_audio", input_audio: { format: "wav", data: "AAAA" } }] }]
   });
-  assert.equal(audio.pool, "text");
-  assert.ok(audio.required.includes("audio_input"));
+  assert.deepEqual(audio.required, ["text_input", "text_output", "audio_input"]);
 
   const file = chat({
     messages: [{ role: "user", content: [{ type: "file", file: { filename: "a.pdf", file_data: "data:application/pdf;base64,AA" } }] }]
   });
-  assert.equal(file.pool, "text");
-  assert.ok(file.required.includes("file_input"));
+  assert.deepEqual(file.required, ["text_input", "text_output", "file_input"]);
 
   const video = analyzeRequest({
     protocol: "gemini",
     pathname: "/v1beta/models/m:generateContent",
     body: { contents: [{ role: "user", parts: [{ fileData: { mimeType: "video/mp4", fileUri: "https://example.test/v.mp4" } }] }] }
   });
-  assert.equal(video.pool, "text");
-  assert.ok(video.required.includes("video_input"));
+  assert.deepEqual(video.required, ["text_input", "text_output", "video_input"]);
 });
 
 test("tools require tool calling; provider-side tools require their own capability", () => {
