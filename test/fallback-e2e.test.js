@@ -453,6 +453,52 @@ test("streaming, authentication and the request log are unaffected", async () =>
   }
 });
 
+test("a stream that fails after output starts never switches models", async () => {
+  const partial = 'data: {"id":"x","object":"chat.completion.chunk","model":"m1","choices":[{"index":0,"delta":{"content":"he"}}]}\n\n';
+  const groq = await startMockUpstream(() => ({
+    status: 200,
+    stream: [partial],
+    destroyAfter: 1,
+    // Give the gateway time to send the response headers to the client, so this
+    // test observes a failure after output genuinely started.
+    destroyDelayMs: 500
+  }));
+  const mistral = await startMockUpstream(() => ok("m2"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0",
+    GROQ_MODELS: "m1",
+    GROQ_BASE_URL: `${groq.baseUrl}/v1`,
+    MISTRAL_API_KEYS: "s0",
+    MISTRAL_MODELS: "m2",
+    MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`,
+    FALLBACK_CHAIN_FILE: path.join(tmpDir("stream-no-switch"), "fallback-chain.json")
+  });
+  try {
+    assert.equal((await saveChain(router, "text", [
+      { provider: "groq", model: "m1" },
+      { provider: "mistral", model: "m2" }
+    ])).status, 200);
+
+    // The upstream cuts the connection without a finish event. Depending on
+    // timing the client sees either the partial chunk or a transport error; in
+    // both cases the gateway has already committed to one upstream response and
+    // must not restart the request on another model.
+    try {
+      const streamed = await router.request("/v1/chat/completions", postJson({
+        model: "anything",
+        messages: [{ role: "user", content: "hello" }],
+        stream: true
+      }));
+      await streamed.text().catch(() => "");
+    } catch { /* an abruptly closed stream is the expected client symptom */ }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(groq.apiRequests.length, 1, "the first model was attempted");
+    assert.equal(mistral.apiRequests.length, 0, "no second model after output began");
+  } finally {
+    await router.close(); await groq.close(); await mistral.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // A remembered target may not bypass a key restriction applied afterwards
 // ---------------------------------------------------------------------------

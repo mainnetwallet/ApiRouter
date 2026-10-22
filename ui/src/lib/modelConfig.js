@@ -136,6 +136,18 @@ export function adapterSupports(adapters, protocols, capabilityId) {
 }
 
 /**
+ * The editor's three-way adapter answer. "unknown" is not "unsupported": a
+ * blank Add form has no provider/model yet, so no protocol list exists and the
+ * page must not claim every capability is impossible.
+ */
+export function adapterSupportState(adapters, protocols, capabilityId) {
+  const list = asArray(protocols);
+  const known = adapters && typeof adapters === "object" ? Object.keys(adapters) : [];
+  if (list.length === 0 || known.length === 0) return "unknown";
+  return adapterSupports(adapters, list, capabilityId) ? "supported" : "unsupported";
+}
+
+/**
  * The three facts a checkbox shows, kept distinct:
  *   declared      the operator ticked it
  *   executable    some adapter on this model's protocols can carry it
@@ -176,14 +188,59 @@ export function draftFromRow(row) {
   };
 }
 
-export function draftFromCandidate({ provider, model, capabilities = [] }) {
+export function draftFromCandidate({
+  provider,
+  model,
+  capabilities = [],
+  displayName = null,
+  enabled = true,
+  protocol = ""
+}) {
   return {
     provider: provider ?? "",
     model: model ?? "",
-    displayName: model ?? "",
-    enabled: true,
+    displayName: displayName ?? model ?? "",
+    enabled,
     capabilities: [...capabilities],
-    protocol: ""
+    protocol
+  };
+}
+
+/** The environment row for a provider/model, matched case-insensitively by provider. */
+export function findModelRow(models, provider, model) {
+  const wantedProvider = asString(provider).trim().toLowerCase();
+  const wantedModel = asString(model).trim();
+  if (!wantedProvider || !wantedModel) return null;
+  return asArray(models).find((row) => row.provider === wantedProvider && row.model === wantedModel) ?? null;
+}
+
+/** Only a persisted declaration has an id the DELETE route can act on. */
+export function canRemoveModel(row) {
+  return Boolean(row?.stored && row?.configId);
+}
+
+/**
+ * What clicking a table row opens. A persisted declaration edits its own fields;
+ * an environment-only row opens a CREATE drawer prefilled with that model, so
+ * the page never sends `/api/model-config/null`.
+ */
+export function editorFromRow(row) {
+  if (row?.stored && row.configId) {
+    return { mode: "edit", row, draft: draftFromRow(row) };
+  }
+  return {
+    mode: "create",
+    row: row ?? null,
+    draft: draftFromCandidate({
+      provider: row?.provider ?? "",
+      model: row?.model ?? "",
+      displayName: row?.displayName ?? row?.model ?? "",
+      // Preserve the effective off state for an environment model, but do not
+      // turn a provider-off model into a permanently disabled declaration.
+      enabled: row ? row.enabledByConfig !== false && !row.disabledBySwitch : true,
+      capabilities: row?.capabilities ?? [],
+      protocol: row?.protocol ?? ""
+    })
   };
 }
 
@@ -208,8 +265,11 @@ export function buildDraftPayload(draft) {
 export function availabilityNote(row) {
   if (!row) return "";
   if (row.disabledByProvider) return "The whole provider is switched off on the Providers page.";
-  if (row.disabledBySwitch) return "Switched off in the Control Panel (Models page).";
+  // The declaration is authoritative for a configured model. If a legacy/stale
+  // switch is also present, name the declaration (the reason that survives a
+  // restart) rather than the mirrored switch.
   if (!row.enabledByConfig) return "Switched off in the Model Configurator.";
+  if (row.disabledBySwitch) return "Switched off in the Control Panel (Models page).";
   if (!row.configuredInEnvironment) return "No provider currently configures this model, so it cannot be routed.";
   return "";
 }

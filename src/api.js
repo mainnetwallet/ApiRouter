@@ -955,9 +955,11 @@ export function createApi({
     if (modelConfig && (pathname === "/api/model-config" || pathname === "/api/model-config/refresh" || pathname.startsWith("/api/model-config/"))) {
       if (pathname === "/api/model-config/refresh") {
         if (req.method !== "POST") return fail(req, res, 405, "Use POST", "method_not_allowed");
-        // Re-read the remote document. A failure is reported in `storage`, with
-        // the last local/known configuration still in force — never wiped.
-        await modelConfig.init();
+        // Re-read the remote document. This is serialized with writes, so a
+        // refresh can never race a save and adopt the document that save just
+        // replaced. A failure is reported in `storage`, with the last known
+        // configuration still in force — never wiped.
+        await modelConfig.refresh();
         return sendJson(req, res, 200, { ok: true, ...modelConfigPayload(Date.now()) });
       }
 
@@ -1030,9 +1032,10 @@ export function createApi({
         try { result = await modelConfig.remove(id); }
         catch (error) { return modelConfigFailure(req, res, error); }
         // Removing the declaration restores the environment's default (enabled).
-        // The switch had been kept in step with it, so it is cleared here; an
-        // operator can still switch the model off again on the Models page.
-        if (result.removed?.enabled === false && modelSwitch) {
+        // The switch had been kept in step with it, so it is always cleared here
+        // (even for an inconsistent legacy state); the operator can switch the
+        // model off again on the Models page.
+        if (result.removed && modelSwitch) {
           try { modelSwitch.set(result.removed.provider, result.removed.model, false); } catch { /* same flag, best effort */ }
         }
         resetAutomaticOrderCache();
@@ -1201,11 +1204,36 @@ export function createApi({
           return fail(req, res, 404, `no configured model "${provider}/${model}"`, "not_found");
         }
 
-        let changed;
-        try { changed = modelSwitch.set(provider, model, body.disabled); }
+        // For a DECLARED model the unified enabled flag is the durable source of
+        // truth. The Models page must update it first; otherwise the local
+        // switch and the declaration disagree, and a restart or a GitHub
+        // refresh would undo the click. Environment-only models keep the
+        // switch-only behaviour.
+        const override = modelConfig?.overrideFor?.(provider, model) ?? null;
+        const desiredEnabled = !body.disabled;
+        let configChanged = false;
+        if (override && override.enabled !== desiredEnabled) {
+          try {
+            await modelConfig.update(override.id, { enabled: desiredEnabled });
+            configChanged = true;
+          } catch (error) {
+            return modelConfigFailure(req, res, error);
+          }
+        }
+
+        let switched = false;
+        try { switched = modelSwitch.set(provider, model, body.disabled); }
         catch { return fail(req, res, 500, "Could not save the model switch", "server_error"); }
         resetAutomaticOrderCache();
-        return sendJson(req, res, 200, { ok: true, changed, provider, model, disabled: body.disabled, ...fallbackPayload(now) });
+        return sendJson(req, res, 200, {
+          ok: true,
+          changed: configChanged || switched,
+          configChanged,
+          provider,
+          model,
+          disabled: body.disabled,
+          ...fallbackPayload(now)
+        });
       }
     }
 

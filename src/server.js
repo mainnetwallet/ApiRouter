@@ -42,6 +42,7 @@ import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
 import { OneModelStore, KeyPacer, withOneModel, oneModelKeyId } from "./one-model.js";
 import {
   FallbackChainStore,
+  activeEntries,
   hasLegacyConfig,
   readLegacyConfig,
   remembersSuccess
@@ -165,6 +166,26 @@ const fallbackChain = new FallbackChainStore({
 // is applied to the candidate targets before any plan is built, so it works in
 // the automatic order and in Manual Model Selection alike.
 const modelSwitch = new ModelSwitchStore({ file: config.disabledModelsFile });
+// The configurator's `enabled` flag and the Models page switch are one decision
+// with two storages. A declaration is authoritative for its model, including
+// after a GitHub refresh or a restart, so every adopted configuration projects
+// its flag onto the switch. Entries a refresh removed are switched back on
+// (their environment default); environment-only models are never touched.
+function syncModelSwitches(entries, previousEntries = []) {
+  const current = new Set();
+  for (const entry of entries) {
+    current.add(`${entry.provider}/${entry.model}`);
+    try { modelSwitch.set(entry.provider, entry.model, entry.enabled === false); }
+    catch { /* the config still filters routing; the switch is the abort/UI mirror */ }
+  }
+  for (const entry of previousEntries) {
+    if (current.has(`${entry.provider}/${entry.model}`)) continue;
+    try { modelSwitch.set(entry.provider, entry.model, false); }
+    catch { /* same best-effort mirror */ }
+  }
+}
+modelConfig.onChange(syncModelSwitches);
+syncModelSwitches(modelConfig.list(), []);
 // One Provider Fallback: when on, every request is served from ONE chosen
 // provider (its listed models in priority order, all of their keys, nothing
 // else). A key the operator gave a cooldown cools for that long the moment it is
@@ -766,11 +787,40 @@ async function proxy(req, res, protocol, pathname) {
   const oneModelTargets = oneModel
     ? selectable.filter((target) => oneModelStore.matches(target))
     : [];
+
+  // A saved selection can be structurally usable and still contain no model
+  // that declares the capability THIS request needs (for example, a tool call
+  // when every selected model only declares text). That is a capability
+  // exclusion, not a broken selection: the capability filter has already
+  // removed those models, so the eligible unselected models are the correct
+  // automatic fallback. Keep fail-closed for the other case — a selection whose
+  // models are unreachable, switched off, or restricted to keys that do not
+  // exist — by checking reachability WITHOUT the capability filter first.
+  const savedSelection = activeEntries(fallbackChain.get(pool));
+  let planChain = fallbackChain.get(pool);
+  if (!pinned.pinned && !oneModel && savedSelection.length > 0) {
+    const capableIds = new Set(selection.selected.map((target) => `${target.provider}/${target.model}`));
+    const anyCapable = savedSelection.some((entry) => capableIds.has(`${entry.provider}/${entry.model}`));
+    if (!anyCapable) {
+      const structuralTargets = enabledPoolTargets.filter(
+        (target) => !modelSwitch.isDisabled(target.provider, target.model)
+      );
+      const structuralPinned = pinTargets(structuralTargets, pin, requestedModel);
+      const structuralSelection = selectTargetsForProtocol(structuralPinned.targets, protocol, requestedModel);
+      const structuralIds = new Set(
+        structuralSelection.selected.map((target) => `${target.provider}/${target.model}`)
+      );
+      if (savedSelection.some((entry) => structuralIds.has(`${entry.provider}/${entry.model}`))) {
+        planChain = [];
+      }
+    }
+  }
+
   const routePlan = oneModel
     ? { steps: [], failClosed: false, entries: 0 }
     : buildRoutePlan({
       targets: selectable,
-      chain: fallbackChain.get(pool),
+      chain: planChain,
       pinned: pinned.pinned,
       health: pinned.pinned ? null : healthRegistry,
       cacheKey: `pool:${pool}`,

@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  adapterSupportState,
   adapterSupports,
   availabilityNote,
   buildDraftPayload,
+  canRemoveModel,
   capabilityGroups,
   capabilityState,
   draftFromCandidate,
   draftFromRow,
+  editorFromRow,
   filterModels,
+  findModelRow,
   normalizeModelConfigPayload,
   providerChoices,
   rowTone,
@@ -111,6 +115,38 @@ describe("model config view model", () => {
     expect(adapterSupports({}, ["openai-chat"], "text_input")).toBe(false);
   });
 
+  it("distinguishes an unsupported adapter from an unresolved protocol list", () => {
+    expect(adapterSupportState(adapters, ["openai-chat"], "tool_calling")).toBe("supported");
+    expect(adapterSupportState(adapters, ["anthropic"], "tool_calling")).toBe("unsupported");
+    expect(adapterSupportState(adapters, [], "tool_calling")).toBe("unknown");
+    expect(adapterSupportState({}, ["openai-chat"], "tool_calling")).toBe("unknown");
+  });
+
+  it("opens an environment row as a prefilled create declaration, not an edit with no id", () => {
+    const environment = row({
+      id: "groq/llama",
+      configId: null,
+      stored: false,
+      source: "environment",
+      displayName: "Llama",
+      capabilities: ["text_input"],
+      enabled: true
+    });
+    const editor = editorFromRow(environment);
+    expect(editor.mode).toBe("create");
+    expect(editor.row).toBe(environment);
+    expect(editor.draft.provider).toBe("groq");
+    expect(editor.draft.model).toBe("llama");
+    expect(editor.draft.capabilities).toEqual(["text_input"]);
+    expect(editorFromRow(row()).mode).toBe("edit");
+    expect(editorFromRow(null).mode).toBe("create");
+    expect(canRemoveModel(environment)).toBe(false);
+    expect(canRemoveModel(row())).toBe(true);
+    expect(canRemoveModel(row({ stored: true, configId: null }))).toBe(false);
+    expect(findModelRow([environment], "GROQ", "llama")).toBe(environment);
+    expect(findModelRow([environment], "groq", "other")).toBeNull();
+  });
+
   it("filters by provider, pool, routing, source and free text", () => {
     const models = [
       row(),
@@ -158,6 +194,8 @@ describe("model config view model", () => {
       .toMatch(/whole provider/);
     expect(availabilityNote(row({ disabledBySwitch: true }))).toMatch(/Control Panel/);
     expect(availabilityNote(row({ enabledByConfig: false, enabled: false }))).toMatch(/Model Configurator/);
+    expect(availabilityNote(row({ enabledByConfig: false, enabled: false, disabledBySwitch: true })))
+      .toMatch(/Model Configurator/);
     expect(availabilityNote(row({ configuredInEnvironment: false }))).toMatch(/No provider/);
     expect(availabilityNote(row())).toBe("");
   });

@@ -62,6 +62,11 @@ const saveConfig = (router, id, body) => router.request(
 );
 
 const modelConfig = (router) => router.request("/api/model-config").then(json);
+const putFallback = (router, body) => router.request("/api/fallback", {
+  method: "PUT",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body)
+});
 const modelId = (payload, model) => payload.models.find((row) => row.model === model)?.configId
   ?? payload.models.find((row) => row.model === model)?.id;
 
@@ -141,6 +146,38 @@ test("switching a model off in the configurator takes effect immediately and is 
   }
 });
 
+test("the Models page switch updates a declaration, so the two surfaces cannot disagree", async () => {
+  const { router, text, vision } = await start();
+  try {
+    await json(await saveConfig(router, null, { provider: "groq", model: "text-only" }));
+
+    const off = await json(await router.request("/api/models/switch", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "groq", model: "text-only", disabled: true })
+    }));
+    assert.equal(off.disabled, true);
+    let row = (await modelConfig(router)).models.find((model) => model.model === "text-only");
+    assert.equal(row.enabledByConfig, false, "the durable declaration is off");
+    assert.equal(row.disabledBySwitch, true, "the runtime switch mirrors it");
+    assert.equal((await failure(await chat(router))).body.error.type, "models_disabled");
+    assert.equal(text.apiRequests.length, 0);
+
+    const on = await json(await router.request("/api/models/switch", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "groq", model: "text-only", disabled: false })
+    }));
+    assert.equal(on.disabled, false);
+    row = (await modelConfig(router)).models.find((model) => model.model === "text-only");
+    assert.equal(row.enabledByConfig, true);
+    assert.equal(row.disabledBySwitch, false);
+    assert.equal((await chat(router)).status, 200);
+  } finally {
+    await router.close(); await text.close(); await vision.close();
+  }
+});
+
 test("a pinned request remains an explicit one-off when the configurator switched the model off", async () => {
   const { router, text, vision } = await start();
   try {
@@ -194,6 +231,42 @@ test("a declared vision model without image_input is refused instead of being se
     assert.equal(vision.apiRequests.length, 0, "the payload is never sent to a model that cannot carry it");
   } finally {
     await router.close(); await text.close(); await vision.close();
+  }
+});
+
+test("a capability-incompatible manual selection falls through to eligible unselected models", async () => {
+  const selected = await startMockUpstream(() => ok("selected"));
+  const automatic = await startMockUpstream(() => ok("automatic"));
+  const base = tmpDir("capability-fallback");
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0",
+    GROQ_MODELS: "selected",
+    GROQ_BASE_URL: `${selected.baseUrl}/v1`,
+    MISTRAL_API_KEYS: "m0",
+    MISTRAL_MODELS: "automatic",
+    MISTRAL_BASE_URL: `${automatic.baseUrl}/v1`,
+    MODEL_CONFIG_FILE: path.join(base, "model-config.json")
+  });
+  try {
+    await json(await saveConfig(router, null, {
+      provider: "groq",
+      model: "selected",
+      capabilities: ["text_input", "text_output", "streaming", "structured_output"]
+    }));
+    await json(await putFallback(router, {
+      pool: "text",
+      entries: [{ provider: "groq", model: "selected" }]
+    }));
+
+    const response = await chat(router, {
+      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }]
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-multi-ai-provider"), "mistral");
+    assert.equal(selected.apiRequests.length, 0, "the incompatible selected model is never sent the tool call");
+    assert.equal(automatic.apiRequests.length, 1, "an eligible unselected model serves the request");
+  } finally {
+    await router.close(); await selected.close(); await automatic.close();
   }
 });
 

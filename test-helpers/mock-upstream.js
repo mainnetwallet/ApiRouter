@@ -77,6 +77,13 @@ export async function startMockUpstream(script, options = {}) {
           if (i >= descriptor.stream.length) return res.end();
           res.write(descriptor.stream[i]);
           i += 1;
+          // A stream that fails after producing output. The router must not
+          // switch models once bytes have been sent, because the client has
+          // already received a partial response.
+          if (descriptor.destroyAfter === i) {
+            setTimeout(() => res.destroy(), descriptor.destroyDelayMs || 0);
+            return;
+          }
           setTimeout(writeNext, descriptor.delayMs || 0);
         };
         return writeNext();

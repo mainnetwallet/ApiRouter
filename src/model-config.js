@@ -60,7 +60,13 @@ const SECRET_FIELDS = new Set([
 
 /** A metadata key that names a credential, in any casing/spelling. */
 const SECRET_KEY = /^(api[-_]?keys?|access[-_]?keys?|private[-_]?keys?|keys?|tokens?|secrets?|password|passphrase|authorization|bearer|credentials?|client[-_]?secret)$/i;
-const SECRET_VALUE = /^(sk-[A-Za-z0-9_-]{6,}|ghp_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{6,}|xox[baprs]-[A-Za-z0-9-]{6,}|Bearer\s+\S+)/i;
+// Known provider token shapes. This is intentionally checked on every free-text
+// field (model id, display name, metadata) so a credential pasted into the wrong
+// box is refused instead of becoming part of the persisted document.
+const SECRET_VALUE = /^(?:sk-[A-Za-z0-9_-]{6,}|(?:pk|rk|gsk|xai|pplx|hf|fal|r8|glpat|shpat)[-_][A-Za-z0-9_-]{6,}|gh[pousr]_[A-Za-z0-9]{6,}|github_pat_[A-Za-z0-9_]{6,}|xox[baprs]-[A-Za-z0-9-]{6,}|AIza[0-9A-Za-z_-]{10,}|Bearer\s+\S+)/i;
+const UNSAFE_METADATA_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+const secretValue = (value) => typeof value === "string" && SECRET_VALUE.test(value.trim());
 
 export class ModelConfigError extends Error {
   constructor(status, message, type = "invalid_request") {
@@ -86,6 +92,7 @@ function cleanProvider(value) {
   if (provider.length > MAX_PROVIDER_LENGTH || hasControlChars(provider) || !/^[a-z0-9][a-z0-9._-]*$/.test(provider)) {
     throw bad("provider is not a valid provider id");
   }
+  if (secretValue(provider)) throw bad("provider looks like a credential; model configuration must not hold credentials", "secret_rejected");
   return provider;
 }
 
@@ -93,6 +100,7 @@ function cleanModel(value) {
   const model = typeof value === "string" ? value.trim() : "";
   if (!model) throw bad("model is required");
   if (model.length > MAX_MODEL_LENGTH || hasControlChars(model)) throw bad("model is not a valid model id");
+  if (secretValue(model)) throw bad("model looks like a credential; model configuration must not hold credentials", "secret_rejected");
   return model;
 }
 
@@ -100,13 +108,24 @@ function cleanDisplayName(value, fallback) {
   if (value === undefined || value === null || String(value).trim() === "") return fallback;
   const name = String(value).trim();
   if (name.length > MAX_NAME_LENGTH || hasControlChars(name)) throw bad(`displayName must be at most ${MAX_NAME_LENGTH} characters`);
+  if (secretValue(name)) throw bad("displayName looks like a credential; model configuration must not hold credentials", "secret_rejected");
   return name;
 }
 
-function assertNoSecretFields(input) {
-  for (const key of Object.keys(input)) {
+function assertNoSecretFields(input, path = "") {
+  for (const [key, value] of Object.entries(input)) {
     if (SECRET_FIELDS.has(key.toLowerCase().replace(/[-_]/g, ""))) {
-      throw bad(`"${key}" is not accepted: model configuration never stores credentials. Configure keys on the provider instead.`, "secret_rejected");
+      throw bad(`"${path}${key}" is not accepted: model configuration never stores credentials. Configure keys on the provider instead.`, "secret_rejected");
+    }
+    if (typeof value === "string" && secretValue(value)) {
+      throw bad(`"${path}${key}" looks like a credential; model configuration must not hold credentials`, "secret_rejected");
+    }
+    if (Array.isArray(value)) {
+      for (const [index, item] of value.entries()) {
+        if (typeof item === "string" && secretValue(item)) {
+          throw bad(`"${path}${key}[${index}]" looks like a credential; model configuration must not hold credentials`, "secret_rejected");
+        }
+      }
     }
   }
 }
@@ -121,12 +140,13 @@ function cleanMetadata(value) {
     for (const [rawKey, item] of Object.entries(source)) {
       const key = String(rawKey).trim();
       if (!key || key.length > 80 || hasControlChars(key)) throw bad("metadata contains an invalid key");
+      if (UNSAFE_METADATA_KEYS.has(key)) throw bad(`metadata."${key}" is not an allowed key`);
       if (SECRET_KEY.test(key)) throw bad(`metadata."${key}" is not accepted: the model configuration must not hold credentials`, "secret_rejected");
       count += 1;
       if (count > 100) throw bad("metadata has too many fields");
       if (typeof item === "string") {
         if (item.length > 500) throw bad(`metadata."${key}" is too long`);
-        if (SECRET_VALUE.test(item)) throw bad(`metadata."${key}" looks like a credential; model configuration must not hold credentials`, "secret_rejected");
+        if (secretValue(item)) throw bad(`metadata."${key}" looks like a credential; model configuration must not hold credentials`, "secret_rejected");
         target[key] = item;
       } else if (typeof item === "number" || typeof item === "boolean" || item === null) {
         target[key] = item;
@@ -134,7 +154,13 @@ function cleanMetadata(value) {
         if (item.length > 50 || item.some((entry) => typeof entry !== "string" && typeof entry !== "number" && typeof entry !== "boolean")) {
           throw bad(`metadata."${key}" must be a flat list of simple values`);
         }
-        target[key] = item.map((entry) => (typeof entry === "string" ? entry.slice(0, 500) : entry));
+        for (const entry of item) {
+          if (typeof entry === "string" && entry.length > 500) throw bad(`metadata."${key}" contains a value that is too long`);
+          if (secretValue(entry)) {
+            throw bad(`metadata."${key}" looks like a credential; model configuration must not hold credentials`, "secret_rejected");
+          }
+        }
+        target[key] = [...item];
       } else if (isObject(item)) {
         target[key] = {};
         walk(item, target[key], depth + 1);
@@ -174,10 +200,22 @@ function cloneEntry(entry) {
 export function normalizeStoredEntry(raw) {
   if (!isObject(raw)) return null;
   try {
+    // A loaded document gets the same credential check as a write. Known fields
+    // are projected below, but a token smuggled into an unknown top-level field
+    // still means the document is not safe to keep.
+    assertNoSecretFields(raw);
     const provider = cleanProvider(raw.provider);
     const model = cleanModel(raw.model);
-    const id = typeof raw.id === "string" && /^mc_[0-9a-f]{8,32}$/.test(raw.id) ? raw.id : modelConfigId(provider, model);
+    // The id is derived, never trusted: a hand-edited or hostile document must
+    // not be able to collide two models or smuggle an arbitrary string through.
+    const id = modelConfigId(provider, model);
+    if (raw.capabilities !== undefined && !Array.isArray(raw.capabilities)) {
+      throw bad("capabilities must be an array of capability ids");
+    }
     const { capabilities } = normalizeCapabilities(raw.capabilities);
+    if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") {
+      throw bad("enabled must be true or false");
+    }
     const version = Number.isInteger(raw.version) && raw.version > 0 ? raw.version : 1;
     return {
       id,
@@ -254,6 +292,10 @@ export class ModelConfigStore {
     this.remoteReady = !remote;
     this.remoteRevision = null;
     this.lastRemoteError = null;
+    // Set when the local file is valid but was written by a newer schema. In
+    // local-only mode that file is the source of truth, so a save must refuse
+    // instead of replacing fields this build does not understand.
+    this.localBlocked = null;
     this.skipped = [];
     this.warnings = [];
     this.listeners = new Set();
@@ -272,6 +314,9 @@ export class ModelConfigStore {
       const parsed = JSON.parse(fs.readFileSync(this.file, "utf8"));
       this.applyDocument(parsed);
     } catch (error) {
+      if (error instanceof ModelConfigError && error.type === "schema_too_new") {
+        this.localBlocked = { status: error.status, message: error.message, type: error.type };
+      }
       this.warnings = [`Ignored the local model configuration: ${error?.message ?? error}`];
       this.logger?.warn?.(`model config: ignoring ${this.file} (${error?.message ?? error})`);
     }
@@ -384,16 +429,29 @@ export class ModelConfigStore {
     }
   }
 
+  /**
+   * Re-reads the remote copy through the same queue as writes. Without this a
+   * background refresh could adopt an older snapshot and then a queued save
+   * could persist it over the newer document it never saw.
+   */
+  refresh() {
+    return this.exclusive(async () => {
+      const previous = this.entries;
+      const changed = await this.init();
+      if (changed) this.emit(previous);
+      return changed;
+    });
+  }
+
   /** Keeps trying to reach GitHub, then hot-loads what it holds. */
   startRetry() {
     if (!this.remote || this.retryTimer) return;
     this.retryTimer = setInterval(async () => {
       if (this.remoteReady) { clearInterval(this.retryTimer); this.retryTimer = null; return; }
-      const changed = await this.init();
+      await this.refresh();
       if (this.remoteReady) {
         clearInterval(this.retryTimer);
         this.retryTimer = null;
-        if (changed) this.emit();
       }
     }, RETRY_INTERVAL_MS);
     this.retryTimer.unref?.();
@@ -421,9 +479,16 @@ export class ModelConfigStore {
     return () => this.listeners.delete(listener);
   }
 
-  emit() {
+  /**
+   * Observers receive the new list and the previous one. The previous list is
+   * how the Model Switch can be reconciled for entries a refresh removed; it is
+   * a copy, so a listener cannot mutate store state.
+   */
+  emit(previousEntries = []) {
+    const current = this.list();
+    const previous = previousEntries.map(cloneEntry);
     for (const listener of this.listeners) {
-      try { listener(this.list()); } catch { /* observers must never break a save */ }
+      try { listener(current, previous); } catch { /* observers must never break a save */ }
     }
   }
 
@@ -433,6 +498,7 @@ export class ModelConfigStore {
    */
   async ensureReady() {
     if (this.remoteReady) return;
+    const previous = this.entries;
     const changed = await this.init();
     if (!this.remoteReady) {
       throw new ModelConfigError(
@@ -441,7 +507,7 @@ export class ModelConfigStore {
         "unavailable"
       );
     }
-    if (changed) this.emit();
+    if (changed) this.emit(previous);
   }
 
   /**
@@ -471,6 +537,9 @@ export class ModelConfigStore {
       }
       try { this.writeLocal(text); } catch { /* the mirror is optional when GitHub holds the truth */ }
     } else {
+      if (this.localBlocked) {
+        throw new ModelConfigError(this.localBlocked.status, this.localBlocked.message, this.localBlocked.type);
+      }
       try {
         this.writeLocal(text);
       } catch (error) {
@@ -654,8 +723,9 @@ export class ModelConfigStore {
       if (this.entries.length >= MAX_MODEL_CONFIG_ENTRIES) {
         throw bad(`At most ${MAX_MODEL_CONFIG_ENTRIES} model configurations`);
       }
+      const previous = this.entries;
       await this.persist([...this.entries, entry]);
-      this.emit();
+      this.emit(previous);
       return { entry: cloneEntry(entry), warnings };
     });
   }
@@ -674,8 +744,9 @@ export class ModelConfigStore {
         throw new ModelConfigError(409, `"${entry.provider}/${entry.model}" already has a saved model configuration`, "conflict");
       }
       const next = this.entries.map((item) => (item.id === current.id ? entry : item));
+      const previous = this.entries;
       await this.persist(next);
-      this.emit();
+      this.emit(previous);
       return { entry: cloneEntry(entry), warnings };
     });
   }
@@ -688,8 +759,9 @@ export class ModelConfigStore {
       // Another request may have edited the same document while this one waited.
       const latest = this.get(id);
       if (!latest) throw new ModelConfigError(404, `no model configuration "${id}"`, "not_found");
+      const previous = this.entries;
       await this.persist(this.entries.filter((entry) => entry.id !== latest.id));
-      this.emit();
+      this.emit(previous);
       return { removed: cloneEntry(latest) };
     });
   }

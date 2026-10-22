@@ -98,6 +98,50 @@ test("credentials are refused, including token-shaped metadata", async () => {
   assert.equal(store.list().length, 0);
 });
 
+test("credentials pasted into names and metadata arrays are refused, and nothing is truncated", async () => {
+  const store = new ModelConfigStore({ logger: quiet });
+  const knownModels = new Set(["groq/m"]);
+
+  for (const input of [
+    { provider: "groq", model: "m", displayName: "sk-live-abcdef123456" },
+    { provider: "groq", model: "m", metadata: { aliases: ["sk-live-abcdef123456"] } },
+    { provider: "groq", model: "sk-live-abcdef123456" }
+  ]) {
+    await assert.rejects(
+      () => store.create(input, { knownModels }),
+      (error) => error instanceof ModelConfigError && error.type === "secret_rejected",
+      JSON.stringify(input)
+    );
+  }
+
+  await assert.rejects(
+    () => store.create({ provider: "groq", model: "m", metadata: { aliases: ["x".repeat(501)] } }, { knownModels }),
+    (error) => error.status === 400 && error.type === "invalid_request"
+  );
+  assert.equal(store.list().length, 0);
+});
+
+test("a loaded document is validated field by field and unsafe entries are dropped", () => {
+  const store = new ModelConfigStore({ logger: quiet });
+  store.applyDocument({
+    version: 1,
+    models: [
+      { provider: "groq", model: "string-enabled", enabled: "false" },
+      { provider: "groq", model: "string-caps", capabilities: "text_input" },
+      { provider: "groq", model: "bad-secret", apiKey: "sk-live-abcdef123456" },
+      { provider: "groq", model: "bad-array", metadata: { aliases: ["sk-live-abcdef123456"] } },
+      { provider: "groq", model: "bad-proto", metadata: JSON.parse('{"__proto__":{"polluted":true}}') },
+      { provider: "groq", model: "good", enabled: true, capabilities: ["text_input"], metadata: { notes: "ok" } }
+    ]
+  });
+
+  assert.deepEqual(store.list().map((entry) => entry.model), ["good"]);
+  assert.equal(store.list()[0].enabled, true);
+  assert.deepEqual(store.list()[0].capabilities, ["text_input"]);
+  assert.equal(store.skipped.length, 5);
+  assert.equal({}.polluted, undefined);
+});
+
 test("an unknown model cannot be declared, so a typo never becomes an invisible entry", async () => {
   const store = new ModelConfigStore({ logger: quiet });
   await assert.rejects(
@@ -220,6 +264,21 @@ test("a document from a newer schema is refused and never rewritten", () => {
   assert.equal(store.list().length, 0);
 });
 
+test("a local-only store never overwrites a newer local document it could not read", async () => {
+  const file = tmpFile();
+  const original = JSON.stringify({ version: 99, revision: "future", models: [] });
+  fs.writeFileSync(file, original);
+  const store = new ModelConfigStore({ file, logger: quiet });
+
+  assert.equal(store.list().length, 0);
+  assert.match(store.warnings[0], /schema 99/);
+  await assert.rejects(
+    () => store.create({ provider: "groq", model: "m" }, { knownModels: new Set(["groq/m"]) }),
+    (error) => error instanceof ModelConfigError && error.status === 409 && error.type === "schema_too_new"
+  );
+  assert.equal(fs.readFileSync(file, "utf8"), original);
+});
+
 test("malformed entries are skipped with a warning, the rest of the document is kept", () => {
   const store = new ModelConfigStore({ logger: quiet });
   store.applyDocument({
@@ -262,6 +321,30 @@ test("the model document is stored as plain JSON in GitHub and survives a fresh 
   assert.equal(await second.init(), true);
   assert.equal(second.list().length, 1);
   assert.equal(second.list()[0].model, "m");
+  await github.close();
+});
+
+test("refresh adopts a newer GitHub document and reports the previous list", async () => {
+  const github = await startMockGithub();
+  const options = { repo: github.repo, token: github.token, apiBase: github.apiBase, branch: "main", path: "model-config.json" };
+  const knownModels = new Set(["groq/a", "groq/b"]);
+
+  const first = new ModelConfigStore({ remote: createModelConfigStorage(options), logger: quiet });
+  await first.init();
+  await first.create({ provider: "groq", model: "a", enabled: false }, { knownModels });
+
+  const second = new ModelConfigStore({ remote: createModelConfigStorage(options), logger: quiet });
+  assert.equal(await second.init(), true);
+  await second.create({ provider: "groq", model: "b" }, { knownModels });
+
+  const changes = [];
+  first.onChange((current, previous) => changes.push({ current, previous }));
+  assert.equal(await first.refresh(), true);
+  assert.deepEqual(first.list().map((entry) => entry.model).sort(), ["a", "b"]);
+  assert.equal(changes.length, 1);
+  assert.deepEqual(changes[0].previous.map((entry) => entry.model), ["a"]);
+  assert.deepEqual(changes[0].current.map((entry) => entry.model).sort(), ["a", "b"]);
+  assert.equal(JSON.parse(github.stored("main", "model-config.json")).models.length, 2);
   await github.close();
 });
 

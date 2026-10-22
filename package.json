@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test",
+    "test": "node --test \"test/*.test.js\"",
     "test:ui": "vitest run --config ui/vite.config.js",
     "test:all": "npm test && npm run test:ui",
     "ui:dev": "vite --config ui/vite.config.js",

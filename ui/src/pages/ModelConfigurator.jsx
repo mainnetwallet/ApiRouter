@@ -21,14 +21,15 @@ import {
   updateModelConfig
 } from "../api/modelConfig.js";
 import {
-  adapterSupports,
+  adapterSupportState,
   availabilityNote,
   buildDraftPayload,
+  canRemoveModel,
   capabilityGroups,
   capabilityState,
-  draftFromCandidate,
-  draftFromRow,
+  editorFromRow,
   filterModels,
+  findModelRow,
   normalizeModelConfigPayload,
   providerChoices,
   rowTone,
@@ -112,16 +113,20 @@ export default function ModelConfigurator() {
 
   const openEditor = (row) => {
     setFormError(null);
-    setEditor({ mode: "edit", row, draft: draftFromRow(row) });
+    setEditor(editorFromRow(row));
   };
 
   const openCreate = () => {
     setFormError(null);
-    setEditor({ mode: "create", row: null, draft: draftFromCandidate({ provider: "", model: "" }) });
+    setEditor(editorFromRow(null));
   };
 
   const saveEditor = async () => {
     if (!editor) return;
+    if (editor.mode === "edit" && !editor.row?.configId) {
+      setFormError(new Error("This declaration has no saved id; reload the page and try again."));
+      return;
+    }
     setBusy(true);
     setFormError(null);
     const payload = buildDraftPayload(editor.draft);
@@ -146,7 +151,7 @@ export default function ModelConfigurator() {
   };
 
   const confirmRemove = async () => {
-    if (!removing?.configId) return;
+    if (!removing?.configId) { setRemoving(null); return; }
     setBusy(true);
     try {
       await removeModelConfig(removing.configId);
@@ -395,6 +400,7 @@ export default function ModelConfigurator() {
 
       <EditorDrawer
         editor={editor}
+        models={view.models}
         groups={groups}
         providers={providers}
         adapters={view.adapters}
@@ -482,21 +488,38 @@ function CapabilityChips({ row, limit = 5 }) {
  * The editor. `mode: "create"` also asks provider/model; an edit can never
  * change them (the API refuses it), so those fields are shown read-only.
  */
-function EditorDrawer({ editor, groups, providers, adapters, busy, error, onChange, onClose, onSave, onRemove }) {
+function EditorDrawer({ editor, models, groups, providers, adapters, busy, error, onChange, onClose, onSave, onRemove }) {
   if (!editor) return null;
   const { mode, row, draft } = editor;
   const create = mode === "create";
+  // A row opened from the table carries its environment facts; a blank Add form
+  // may match a model once the operator types one. `row` is null only for the
+  // latter, so the adapter badges can distinguish "unsupported" from "unknown".
+  const environmentRow = row ?? findModelRow(models, draft.provider, draft.model);
+  const protocols = environmentRow?.protocols ?? [];
+  const protocolOptions = [...new Set([
+    ...protocols,
+    ...(draft.protocol ? [draft.protocol] : []),
+    ...(protocols.length === 0 ? ["openai-chat", "openai-responses", "anthropic", "gemini"] : [])
+  ])];
+  const identityLocked = Boolean(row);
 
   return (
     <Drawer
       open
       onClose={onClose}
       wide
-      title={create ? "Add a model declaration" : row?.model ?? "Model"}
-      subtitle={create ? "Provider + model must already be configured by the environment" : providerLabel(row.provider)}
+      title={create ? (row ? `Configure ${row.model}` : "Add a model declaration") : row?.displayName || row?.model || "Model"}
+      subtitle={
+        create
+          ? (row
+            ? `${providerLabel(row.provider)} · this environment model has no saved declaration yet`
+            : "Provider + model must already be configured by the environment")
+          : providerLabel(row.provider)
+      }
       footer={
         <>
-          {!create ? (
+          {!create && canRemoveModel(row) ? (
             <button type="button" className="btn btn--danger" disabled={busy} onClick={onRemove}>
               <Icon name="trash" className="btn__icon" size={12} /><span className="btn__label">Remove</span>
             </button>
@@ -520,15 +543,18 @@ function EditorDrawer({ editor, groups, providers, adapters, busy, error, onChan
               <input
                 id="mc-provider"
                 className="input"
-                list="mc-provider-options"
+                list={identityLocked ? undefined : "mc-provider-options"}
                 value={draft.provider ?? ""}
                 onChange={(event) => onChange({ ...draft, provider: event.target.value })}
                 placeholder="groq"
                 autoComplete="off"
+                readOnly={identityLocked}
               />
-              <datalist id="mc-provider-options">
-                {providers.map((value) => <option key={value} value={value} />)}
-              </datalist>
+              {!identityLocked ? (
+                <datalist id="mc-provider-options">
+                  {providers.map((value) => <option key={value} value={value} />)}
+                </datalist>
+              ) : null}
             </div>
             <div className="field">
               <label className="field__label" htmlFor="mc-model">Model</label>
@@ -539,8 +565,13 @@ function EditorDrawer({ editor, groups, providers, adapters, busy, error, onChan
                 onChange={(event) => onChange({ ...draft, model: event.target.value })}
                 placeholder="llama-3.3-70b-versatile"
                 autoComplete="off"
+                readOnly={identityLocked}
               />
-              <p className="field__hint">Must match a model a configured provider actually exposes.</p>
+              <p className="field__hint">
+                {identityLocked
+                  ? "Provider and model are fixed for an existing environment model."
+                  : "Must match a model a configured provider actually exposes."}
+              </p>
             </div>
           </div>
         ) : null}
@@ -575,8 +606,11 @@ function EditorDrawer({ editor, groups, providers, adapters, busy, error, onChan
             onChange={(event) => onChange({ ...draft, protocol: event.target.value })}
           >
             <option value="">Use the provider&rsquo;s protocols</option>
-            {(row?.protocols?.length ? row.protocols : ["openai-chat", "openai-responses", "anthropic", "gemini"])
-              .map((protocol) => <option key={protocol} value={protocol}>{protocolLabel(protocol)}</option>)}
+            {protocolOptions.map((protocol) => (
+              <option key={protocol} value={protocol}>
+                {protocolLabel(protocol)}{protocols.length > 0 && !protocols.includes(protocol) ? " (not offered)" : ""}
+              </option>
+            ))}
           </select>
           <p className="field__hint">
             Only needed when this model must be reached by one specific wire format. The provider must offer it.
@@ -593,6 +627,12 @@ function EditorDrawer({ editor, groups, providers, adapters, busy, error, onChan
           </div>
 
           {groups.length === 0 ? <p className="tiny dim">The capability schema was not reported by the gateway.</p> : null}
+          {(draft.capabilities ?? []).length === 0 && groups.length > 0 ? (
+            <p className="tiny dim">
+              No capabilities are declared. The model stays visible but cannot serve any request until at least one
+              capability is selected.
+            </p>
+          ) : null}
 
           {groups.map((group) => (
             <fieldset key={group.id} className="panel" style={{ margin: 0 }}>
@@ -600,7 +640,7 @@ function EditorDrawer({ editor, groups, providers, adapters, busy, error, onChan
               <div className="panel__body stack" style={{ gap: "var(--sp-2)" }}>
                 {group.items.map((item) => {
                   const declared = (draft.capabilities ?? []).includes(item.id);
-                  const executable = adapterSupports(adapters, row?.protocols, item.id);
+                  const support = adapterSupportState(adapters, protocols, item.id);
                   const controlId = `mc-cap-${item.id}`;
                   return (
                     <label key={item.id} className="row" style={{ gap: "var(--sp-2)", alignItems: "flex-start" }}>
@@ -613,12 +653,16 @@ function EditorDrawer({ editor, groups, providers, adapters, busy, error, onChan
                       <span className="grow">
                         <span className="row" style={{ gap: 6 }}>
                           <span>{item.label}</span>
-                          {executable ? (
+                          {support === "supported" ? (
                             <StatusBadge tone="ok" dot={false}>adapter</StatusBadge>
-                          ) : (
+                          ) : support === "unsupported" ? (
                             <StatusBadge tone="warn" dot={false} title="No adapter on this model's protocols can execute it">
                               no adapter
                             </StatusBadge>
+                          ) : (
+                            <span className="tiny dim" title="Choose a provider and model to resolve its protocols">
+                              adapter unknown
+                            </span>
                           )}
                           {!item.requestable ? <span className="tiny dim">preference only</span> : null}
                         </span>
