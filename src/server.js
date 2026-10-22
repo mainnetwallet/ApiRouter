@@ -28,7 +28,15 @@ import { createStaticHandler } from "./static-files.js";
 import { selectTargetsForProtocol, pinTargets } from "./observability/route-select.js";
 import { createCustomPlayground } from "./custom-playground.js";
 import { CustomEndpointStore, applyCustomEndpoints, isCustomProviderId } from "./custom-endpoints.js";
-import { createRemoteStorage } from "./remote-storage.js";
+import { createModelConfigStorage, createRemoteStorage } from "./remote-storage.js";
+import { ModelConfigStore } from "./model-config.js";
+import { analyzeRequest } from "./request-profile.js";
+import {
+  filterTargetsByRequirements,
+  noCapableRouteMessage,
+  requestedModelCapabilityMessage,
+  validateRequestedModel
+} from "./model-capabilities.js";
 import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
 import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
 import { OneModelStore, KeyPacer, withOneModel, oneModelKeyId } from "./one-model.js";
@@ -103,6 +111,33 @@ customEndpoints.startRetry();
 applyCustomEndpoints(config, customEndpoints.list());
 if (customEndpointsRemote) console.log(`custom endpoints: stored in ${customEndpointsRemote.location} (encrypted)`);
 
+// The Unified Model Configurator. It is an OVERLAY on the provider configuration
+// above, not a second provider system: keys, base URLs, protocols and pools keep
+// coming from the environment or a saved custom endpoint, while this store holds
+// what the operator declared — enabled flags and capabilities — as plain JSON
+// (never a credential) in `data/model-config.json` and, when configured, a
+// GitHub branch. It is loaded before the target lists are used so the very first
+// request already sees the saved declarations.
+let modelConfigRemote;
+try { modelConfigRemote = createModelConfigStorage(config.modelConfigRemote); }
+catch (error) {
+  console.error(`Configuration error: ${error.message}`);
+  process.exit(1);
+}
+const modelConfig = new ModelConfigStore({
+  file: config.modelConfigFile,
+  remote: modelConfigRemote
+});
+await modelConfig.init();
+modelConfig.startRetry();
+if (modelConfigRemote) {
+  console.log(`model config: stored in ${modelConfigRemote.location} (plain JSON, no credentials)`);
+  const storage = modelConfig.storageInfo();
+  if (storage.error) {
+    console.warn(`model config: using the local copy until GitHub answers (${storage.error})`);
+  }
+}
+
 // Everything the router holds that must never be echoed back: provider keys
 // (both pools, saved custom endpoints included), Cloudflare account ids (they
 // sit in the upstream URL path) and the router's own client keys. Registered
@@ -112,6 +147,7 @@ function registerSecrets() {
     ...(config.routerApiKeys || []),
     config.customEndpointsRemote?.token,
     config.customEndpointsRemote?.secret,
+    config.modelConfigRemote?.token,
     ...[config.providers, config.visionProviders].flatMap((group) => Object.values(group || {}).flatMap((p) => p?.apiKeys || [])),
     ...[config.providers, config.visionProviders].flatMap((group) => group?.cloudflare?.accountIds || [])
   ]);
@@ -501,11 +537,59 @@ async function proxy(req, res, protocol, pathname) {
   // field, so both spellings have to be considered here.
   const wantsStream = body.stream === true || (protocol === "gemini" && isGeminiStream(pathname));
 
+  // WHAT this request needs, derived from the endpoint and the payload — never
+  // from the model name. A capability is required only when the payload
+  // unambiguously needs it (a media part, tools, a response format, an explicit
+  // output modality, streaming). `reasoning` is reported separately as a
+  // preference and never hard-filters a working route.
+  const profile = analyzeRequest({ protocol, pathname, body, stream: wantsStream });
+
   // The pool is decided from the request body before anything else, because it
   // governs the session, the candidate targets and the capability rules for the
   // whole request. An image request is served only by the vision pool (own
   // keys / base URLs / models); every other request only by the text pool.
   const { pool, targets: poolTargets } = selectPool(body, { textTargets, visionTargets });
+
+  // A pinned request is an explicit one-off (the Playground testing one key).
+  // It already ignores the Models page switch and cooldowns, so it must ignore
+  // the same `enabled` flag when the configurator owns it. Capabilities still
+  // apply: a pin can choose a target, not make it able to carry an image.
+  const pin = readPin(req);
+  const pinnedRequest = Boolean(pin.provider) && !pin.error;
+
+  // The unified configuration, read once per request. `targets` is the same
+  // array the router walks (a saved custom endpoint is spliced into it), so a
+  // model declared in the Model Configurator is considered from this request on.
+  const modelIndex = modelConfig.index(targets);
+  // A stored protocol hint is a real constraint, not a label: when the provider
+  // offers that wire format, the model is reached through it alone. A hint the
+  // provider does not offer is ignored (the row warns about it) rather than
+  // forcing a call the provider cannot serve.
+  const configuredPoolTargets = poolTargets.map((target) => {
+    const configured = modelIndex.get(`${target.provider}/${target.model}`)?.protocol;
+    const protocols = target.protocols ?? [];
+    return configured && protocols.length > 1 && protocols.includes(configured)
+      ? { ...target, protocols: [configured] }
+      : target;
+  });
+  // Models switched off in the Model Configurator are removed first: "off" is
+  // not a capability verdict, and reporting it as "cannot serve this request"
+  // would hide the real reason from the operator.
+  const enabledPoolTargets = pinnedRequest
+    ? configuredPoolTargets
+    : configuredPoolTargets.filter((target) => !modelConfig.explicitlyDisabled(target.provider, target.model));
+  const capabilityLookup = (target) => {
+    const entry = modelIndex.get(`${target.provider}/${target.model}`);
+    return pinnedRequest && entry ? { ...entry, enabled: true } : entry;
+  };
+  const { eligible: capablePoolTargets, exclusions } = filterTargetsByRequirements(
+    enabledPoolTargets,
+    profile.required,
+    capabilityLookup
+  );
+  // Bounded and de-duplicated by provider/model by the filter itself. Logged,
+  // never echoed with payload or credential detail.
+  const excludedCandidates = exclusions.slice(0, 20);
 
   const sessionInfo = getSession(req, protocol, pool);
 
@@ -532,9 +616,18 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "gemini" ? geminiProtocol(target)
     : bridgeProtocol(target);
 
-  liveSeq = beginRequest({ id: sessionInfo.id, receivedAt, protocol, pool, requestedModel });
+  liveSeq = beginRequest({
+    id: sessionInfo.id,
+    receivedAt,
+    protocol,
+    pool,
+    requestedModel,
+    // Stored with the request so the live view can explain a route that was
+    // never taken without keeping any part of the payload.
+    requiredCapabilities: profile.required,
+    excludedCandidates
+  });
 
-  const pin = readPin(req);
   if (pin.error) {
     recordRequest({
       pendingSeq: liveSeq,
@@ -580,7 +673,61 @@ async function proxy(req, res, protocol, pathname) {
     }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  const pinned = pinTargets(poolTargets, pin, requestedModel);
+  // The same rule for the unified configuration: a model the operator has
+  // declared is rejected when none of its provider entries can DECLARE and
+  // EXECUTE what this payload needs. Never silently answer with another model.
+  const modelRejection = validateRequestedModel(modelIndex, requestedModel, profile.required);
+  if (modelRejection) {
+    const message = requestedModelCapabilityMessage(modelRejection);
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
+      outcome: "failed", errorType: "model_capability_mismatch", errorMessage: message, attempts
+    });
+    return json(res, 400, {
+      error: {
+        message,
+        type: "model_capability_mismatch",
+        model: modelRejection.model,
+        required_capabilities: modelRejection.required
+      }
+    }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
+  // Every model in the pool is switched off in the Model Configurator. This is
+  // not a capability failure: the operator explicitly disabled them, and that
+  // is the reason the client is told.
+  if (!pinnedRequest && poolTargets.length > 0 && enabledPoolTargets.length === 0) {
+    const message = `Every model in the ${pool} pool is switched off in the Model Configurator`;
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
+      outcome: "failed", errorType: "models_disabled", errorMessage: message, attempts
+    });
+    return json(res, 503, { error: { message, type: "models_disabled" } }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
+  // Targets exist, but none declares (and can execute) what the payload needs.
+  // Answering 503 here — instead of sending the request to a model that will
+  // reject or mangle it — is the whole point of the capability layer.
+  if (enabledPoolTargets.length > 0 && capablePoolTargets.length === 0) {
+    const message = noCapableRouteMessage(profile.required, pool);
+    recordRequest({
+      pendingSeq: liveSeq,
+      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
+      outcome: "failed", errorType: "no_capable_route", errorMessage: message, attempts
+    });
+    return json(res, 503, {
+      error: {
+        message,
+        type: "no_capable_route",
+        required_capabilities: profile.required,
+        excluded_candidates: excludedCandidates
+      }
+    }, { "x-multi-ai-session-id": sessionInfo.id });
+  }
+
+  const pinned = pinTargets(capablePoolTargets, pin, requestedModel);
   if (pinned.pinned && pinned.targets.length === 0) {
     const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;
     const message = `No configured target matches the pinned selection (${sanitizeMessage(where)})`;
@@ -1231,6 +1378,7 @@ const handleApi = createApi({
   customEndpoints,
   fallbackChain,
   modelSwitch,
+  modelConfig,
   oneModel: oneModelStore,
   keyPacer,
   targets,
@@ -1339,8 +1487,11 @@ async function handleRequest(req, res) {
 
   if (req.method === "GET" && pathname === "/health") {
     // The real route order the Fallback Chain produces, not a health-score sort;
-    // cooling targets are excluded exactly as routing skips them.
-    const routable = targets.filter((target) => !modelSwitch.isDisabled(target.provider, target.model));
+    // cooling targets and models switched off (Model Switch or the unified Model
+    // Configurator) are excluded exactly as routing skips them.
+    const routable = targets.filter((target) =>
+      !modelSwitch.isDisabled(target.provider, target.model)
+      && !modelConfig.explicitlyDisabled(target.provider, target.model));
     const ranked = routeOrderByPool(routable, {
       chains: fallbackChain.snapshot(),
       health: healthRegistry,
@@ -1460,6 +1611,7 @@ process.once("SIGINT", () => {
   monitor.stop();
   stopHealthMonitor();
   stopKeepAlive();
+  modelConfig.stopRetry();
   handleApi.closeStreams();
   server.close(() => process.exit(0));
 });
@@ -1467,6 +1619,7 @@ process.once("SIGTERM", () => {
   monitor.stop();
   stopHealthMonitor();
   stopKeepAlive();
+  modelConfig.stopRetry();
   handleApi.closeStreams();
   server.close(() => process.exit(0));
 });

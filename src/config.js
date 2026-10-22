@@ -201,6 +201,20 @@ export function loadConfig(env = process.env) {
       apiBase: String(env.CUSTOM_ENDPOINTS_GITHUB_API || "").trim() || "https://api.github.com",
       secret: String(env.CUSTOM_ENDPOINTS_SECRET || "").trim()
     },
+    // The Unified Model Configurator: capability declarations, enabled flags and
+    // model metadata (NEVER keys). Non-secret, so it may live in a public file;
+    // it is mirrored in GitHub when a repository is configured.
+    modelConfigFile: String(env.MODEL_CONFIG_FILE || "").trim() || "data/model-config.json",
+    modelConfigRemote: {
+      // Model configuration contains no secrets, so it needs no encryption
+      // secret. It does reuse the custom-endpoint GitHub setup when no
+      // MODEL_CONFIG_GITHUB_* variables are given, so one repository serves both.
+      repo: String(env.MODEL_CONFIG_GITHUB_REPO || env.CUSTOM_ENDPOINTS_GITHUB_REPO || "").trim(),
+      token: String(env.MODEL_CONFIG_GITHUB_TOKEN || env.CUSTOM_ENDPOINTS_GITHUB_TOKEN || "").trim(),
+      branch: String(env.MODEL_CONFIG_GITHUB_BRANCH || env.CUSTOM_ENDPOINTS_GITHUB_BRANCH || "").trim() || "main",
+      path: String(env.MODEL_CONFIG_GITHUB_PATH || "").trim() || "model-config.json",
+      apiBase: String(env.MODEL_CONFIG_GITHUB_API || env.CUSTOM_ENDPOINTS_GITHUB_API || "").trim() || "https://api.github.com"
+    },
     // Legacy, read ONCE to seed the chain above when no chain has been saved
     // yet. Never consulted again afterwards: the old systems cannot override
     // the configured chain.

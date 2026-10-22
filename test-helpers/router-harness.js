@@ -30,6 +30,7 @@ export async function startRouter(env = {}) {
       GATEWAY_STATE_FILE: path.join(configDir, "gateway-state.json"),
       DISABLED_MODELS_FILE: path.join(configDir, "disabled-models.json"),
       CUSTOM_ENDPOINTS_FILE: path.join(configDir, "custom-endpoints.json"),
+      MODEL_CONFIG_FILE: path.join(configDir, "model-config.json"),
       ...env
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -98,6 +99,12 @@ function clearProviderEnv() {
   // that wants to exercise the migration sets them explicitly afterwards.
   env.TEXT_PRIORITY_MODELS = "";
   env.VISION_PRIORITY_MODELS = "";
+  // Remote persistence must be opt-in per test. An ambient repository in the
+  // developer's shell would otherwise make every test talk to GitHub.
+  for (const name of ["REPO", "TOKEN", "BRANCH", "PATH", "API"]) {
+    env[`CUSTOM_ENDPOINTS_GITHUB_${name}`] = "";
+    env[`MODEL_CONFIG_GITHUB_${name}`] = "";
+  }
   return env;
 }
 

@@ -16,6 +16,8 @@ import {
   remembersSuccess
 } from "./fallback-chain.js";
 import { readJsonBody } from "./adapters.js";
+import { CAPABILITY_INFO, ADAPTER_CAPABILITIES, inferCapabilities } from "./model-capabilities.js";
+import { MODEL_CONFIG_SCHEMA_VERSION, MODEL_PROTOCOLS } from "./model-config.js";
 import { describeConfig, describeEnvironment } from "./observability/config-view.js";
 import { describeRouting } from "./observability/router-preview.js";
 import { servableProtocols } from "./observability/route-select.js";
@@ -116,6 +118,7 @@ export function createApi({
   refreshHealth,
   fallbackChain = null,
   modelSwitch = null,
+  modelConfig = null,
   oneModel = null,
   keyPacer = null,
   resetFallbackState = null,
@@ -183,9 +186,13 @@ export function createApi({
   const describeAll = (now = Date.now()) => health.describe(targets, now);
 
   // Targets routing may actually use: models switched off in the Control Panel
-  // are removed, so every order shown by the API is the order requests walk.
-  // True when the model is off on its own OR its whole provider is off.
-  const isSwitchedOff = (target) => Boolean(modelSwitch?.isDisabled?.(target.provider, target.model));
+  // or in the Model Configurator are removed, so every order shown by the API is
+  // the order requests walk. True when the model is off on its own OR its whole
+  // provider is off.
+  const isSwitchedOff = (target) => Boolean(
+    modelSwitch?.isDisabled?.(target.provider, target.model)
+    || modelConfig?.explicitlyDisabled?.(target.provider, target.model)
+  );
   const isProviderSwitchedOff = (provider) => Boolean(modelSwitch?.isProviderDisabled?.(provider));
   // With One Provider Fallback on, only the chosen provider's listed models are
   // ever routed, so every order the API shows is limited to them, as the proxy
@@ -726,6 +733,137 @@ export function createApi({
     };
   }
 
+  // --- /api/model-config (Unified Model Configurator) --------------------
+  /**
+   * Everything the Model Configurator page needs, and nothing else: no key, no
+   * base URL and no credential ever leaves the gateway through this payload.
+   *
+   * Each row is the EFFECTIVE entry for one provider/model: the environment's
+   * keys/protocols/pool, the persisted declaration when there is one, and the
+   * live Model Switch state. `enabled` therefore answers "may the router pick
+   * this at all", while `enabledByConfig` is only the persisted checkbox — so
+   * the page can say WHY a model is off instead of guessing.
+   */
+  function modelConfigPayload(now = Date.now()) {
+    if (!modelConfig) {
+      return {
+        generatedAt: new Date(now).toISOString(),
+        available: false,
+        models: [],
+        summary: { total: 0, configured: 0, environmentOnly: 0, enabled: 0, disabled: 0 },
+        storage: { mode: "unavailable", location: null, ready: false, error: "The Model Configurator is not available in this process", localOnly: true },
+        schema: { version: MODEL_CONFIG_SCHEMA_VERSION, capabilities: CAPABILITY_INFO, protocols: [...MODEL_PROTOCOLS] },
+        adapters: ADAPTER_CAPABILITIES
+      };
+    }
+
+    const inSelection = (pool) => new Set(
+      activeEntries(fallbackChain?.get?.(pool) ?? []).map((entry) => `${entry.provider}/${entry.model}`)
+    );
+    const textSelected = inSelection("text");
+    const visionSelected = inSelection("vision");
+
+    const models = modelConfig.listEffective(targets).map((row) => {
+      const key = `${row.provider}/${row.model}`;
+      const switchedOff = Boolean(modelSwitch?.isDisabled?.(row.provider, row.model));
+      const providerOff = Boolean(modelSwitch?.isProviderDisabled?.(row.provider));
+      return {
+        id: row.id,
+        configId: row.configId,
+        provider: row.provider,
+        model: row.model,
+        displayName: row.displayName,
+        // The unified checkbox, before the other switches are applied.
+        enabledByConfig: row.enabled,
+        // The effective answer routing obeys.
+        enabled: row.enabled && !switchedOff && !providerOff,
+        disabledBySwitch: switchedOff,
+        disabledByProvider: providerOff,
+        capabilities: row.capabilities,
+        capabilitiesSource: row.capabilitiesSource,
+        executableCapabilities: row.executableCapabilities,
+        unsupportedCapabilities: row.unsupportedCapabilities,
+        protocol: row.protocol,
+        metadata: row.metadata,
+        pools: row.pools,
+        protocols: row.protocols,
+        keyCount: row.keyCount,
+        configuredInEnvironment: row.configuredInEnvironment,
+        stored: row.stored,
+        source: row.stored ? "configured" : "environment",
+        manualSelection: { text: textSelected.has(key), vision: visionSelected.has(key) },
+        warnings: row.warnings,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt
+      };
+    });
+
+    const count = (predicate) => models.filter(predicate).length;
+    return {
+      generatedAt: new Date(now).toISOString(),
+      available: true,
+      revision: modelConfig.revision,
+      updatedAt: modelConfig.updatedAt ? new Date(modelConfig.updatedAt).toISOString() : null,
+      storage: modelConfig.storageInfo(),
+      warnings: modelConfig.warnings,
+      models,
+      summary: {
+        total: models.length,
+        configured: count((row) => row.stored),
+        environmentOnly: count((row) => !row.stored),
+        enabled: count((row) => row.enabled),
+        disabled: count((row) => !row.enabled),
+        declaredUnsupported: count((row) => row.unsupportedCapabilities.length > 0)
+      },
+      schema: {
+        version: MODEL_CONFIG_SCHEMA_VERSION,
+        capabilities: CAPABILITY_INFO,
+        protocols: [...MODEL_PROTOCOLS]
+      },
+      adapters: ADAPTER_CAPABILITIES
+    };
+  }
+
+  /** The `provider/model` pairs the environment can actually route to. */
+  const knownModelIds = () => new Set(targets.map((target) => `${target.provider}/${target.model}`));
+
+  /**
+   * Validation defaults for a NEW declaration: the capabilities the environment
+   * already implies for that model, so "configure" starts from the truth instead
+   * of from an empty checkbox grid.
+   */
+  function inferDefaultsFor(provider, model) {
+    const normalizedProvider = typeof provider === "string" ? provider.trim().toLowerCase() : "";
+    const normalizedModel = typeof model === "string" ? model.trim() : "";
+    const row = modelConfig?.index(targets).get(`${normalizedProvider}/${normalizedModel}`);
+    if (!row) return null;
+    return {
+      capabilities: inferCapabilities({
+        pool: row.pools.includes("vision") ? "vision" : "text",
+        protocols: row.protocols
+      })
+    };
+  }
+
+  /**
+   * The Model Switch and the unified `enabled` flag are two views of one
+   * decision. Whichever surface the operator used, both must agree afterwards:
+   * this projects the configurator's checkbox onto the (unchanged) Model Switch
+   * store, and the switch is still applied independently when routing.
+   */
+  function syncModelSwitch(entry, { explicit }) {
+    if (!modelSwitch || !explicit) return;
+    try { modelSwitch.set(entry.provider, entry.model, entry.enabled === false); }
+    catch { /* the switch is an optimisation of the same flag, never a save blocker */ }
+  }
+
+  function modelConfigFailure(req, res, error) {
+    if (error?.status && error.status < 500) {
+      return fail(req, res, error.status, error.message, error.type || "invalid_request");
+    }
+    return fail(req, res, 500, "Could not save the model configuration", "server_error");
+  }
+
   // --- dispatcher --------------------------------------------------------
   async function handleApi(req, res, pathname, searchParams) {
     const now = Date.now();
@@ -806,6 +944,106 @@ export function createApi({
 
     if (pathname === "/api/models" && req.method === "GET") {
       return sendJson(req, res, 200, modelsPayload(now));
+    }
+
+    /*
+     * The Unified Model Configurator: one declaration per provider/model, with
+     * an enabled flag and the capabilities that model really has. It is the
+     * overlay routing and the page both read, so a checkbox cannot disagree with
+     * a route. The document holds ids and declarations only — never a key.
+     */
+    if (modelConfig && (pathname === "/api/model-config" || pathname === "/api/model-config/refresh" || pathname.startsWith("/api/model-config/"))) {
+      if (pathname === "/api/model-config/refresh") {
+        if (req.method !== "POST") return fail(req, res, 405, "Use POST", "method_not_allowed");
+        // Re-read the remote document. A failure is reported in `storage`, with
+        // the last local/known configuration still in force — never wiped.
+        await modelConfig.init();
+        return sendJson(req, res, 200, { ok: true, ...modelConfigPayload(Date.now()) });
+      }
+
+      let id = "";
+      if (pathname !== "/api/model-config") {
+        try { id = decodeURIComponent(pathname.slice("/api/model-config/".length)); }
+        catch { return fail(req, res, 400, "Malformed model configuration id", "invalid_request"); }
+      }
+
+      if (!id) {
+        if (req.method === "GET") return sendJson(req, res, 200, modelConfigPayload(now));
+        if (req.method !== "POST") {
+          return fail(req, res, 405, "Use GET /api/model-config or POST /api/model-config", "method_not_allowed");
+        }
+
+        let body;
+        try { body = await readJsonBody(req, config.maxBodyBytes); }
+        catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
+        const input = body && typeof body === "object" && !Array.isArray(body) ? { ...body } : body;
+
+        // A new declaration starts from the switch's current state, so adding a
+        // configuration cannot silently turn a disabled model back on.
+        if (input && typeof input === "object" && input.enabled === undefined && modelSwitch) {
+          const provider = typeof input.provider === "string" ? input.provider.trim().toLowerCase() : "";
+          const model = typeof input.model === "string" ? input.model.trim() : "";
+          if (provider && model) input.enabled = !modelSwitch.isDisabled(provider, model);
+        }
+
+        let result;
+        try {
+          result = await modelConfig.create(input, {
+            knownModels: knownModelIds(),
+            defaults: inferDefaultsFor(input?.provider, input?.model)
+          });
+        } catch (error) { return modelConfigFailure(req, res, error); }
+
+        syncModelSwitch(result.entry, { explicit: true });
+        resetAutomaticOrderCache();
+        return sendJson(req, res, 201, {
+          ok: true,
+          entry: result.entry,
+          warnings: result.warnings,
+          ...modelConfigPayload(Date.now())
+        });
+      }
+
+      if (req.method === "PUT" || req.method === "PATCH") {
+        let body;
+        try { body = await readJsonBody(req, config.maxBodyBytes); }
+        catch (error) { return fail(req, res, error.status || 400, "Invalid JSON body", "invalid_request"); }
+        const input = body && typeof body === "object" && !Array.isArray(body) ? body : body;
+        const explicitEnabled = Boolean(input && typeof input === "object" && input.enabled !== undefined);
+
+        let result;
+        try { result = await modelConfig.update(id, input, { knownModels: knownModelIds() }); }
+        catch (error) { return modelConfigFailure(req, res, error); }
+
+        syncModelSwitch(result.entry, { explicit: explicitEnabled });
+        resetAutomaticOrderCache();
+        return sendJson(req, res, 200, {
+          ok: true,
+          entry: result.entry,
+          warnings: result.warnings,
+          ...modelConfigPayload(Date.now())
+        });
+      }
+
+      if (req.method === "DELETE") {
+        let result;
+        try { result = await modelConfig.remove(id); }
+        catch (error) { return modelConfigFailure(req, res, error); }
+        // Removing the declaration restores the environment's default (enabled).
+        // The switch had been kept in step with it, so it is cleared here; an
+        // operator can still switch the model off again on the Models page.
+        if (result.removed?.enabled === false && modelSwitch) {
+          try { modelSwitch.set(result.removed.provider, result.removed.model, false); } catch { /* same flag, best effort */ }
+        }
+        resetAutomaticOrderCache();
+        return sendJson(req, res, 200, {
+          ok: true,
+          removed: result.removed,
+          ...modelConfigPayload(Date.now())
+        });
+      }
+
+      return fail(req, res, 405, "Method not allowed", "method_not_allowed");
     }
 
     if (pathname === "/api/fallback" && fallbackChain) {

@@ -14,6 +14,7 @@ ApiRouter gives OpenAI-compatible and native AI clients one local endpoint while
 - **Remembered successes** — the provider, model and exact key that last answered are tried first on the next request (20-minute TTL), with no mode to set.
 - **Key-aware routing** — keys are handled independently within each provider/model target.
 - **Text + vision separation** — vision requests stay in the vision pool; they do not silently fall back to text-only targets.
+- **Unified Model Configurator** — declare text, vision, tool, media and structured-output capabilities per model in one place, and switch a model off from the same page; a request only reaches a model that declares what it needs.
 - **Multiple client protocols** — Claude Messages, OpenAI Responses, OpenAI Chat Completions, Gemini, and generic OpenAI-compatible clients.
 - **Control Panel** — inspect providers, models, health, routing, requests, live logs, analytics, configuration, and system state.
 - **Live Logs** — follow request and per-target lifecycle events in real time.
@@ -221,6 +222,104 @@ in the automatic order and in Manual Model Selection alike:
 
 State is stored in `DISABLED_MODELS_FILE` (default `data/disabled-models.json`).
 
+### Model Configurator (capabilities and eligibility)
+
+The **Model Configurator** (Configure -> Model Configurator, `/model-config`) is one
+unified page for every model the gateway knows, text and vision together. Each row
+shows the provider/model, its pools, its protocols, how many keys it has, whether it
+is enabled, and one checkbox per capability. A model is declared once instead of
+being configured separately for text and vision.
+
+The capability vocabulary is intentionally broader than what any one adapter can do:
+
+```text
+text_input   text_output   tool_calling   image_input   image_output
+video_input  video_output  audio_input    audio_output  file_input
+structured_output  streaming  reasoning   embeddings    web_search
+code_execution
+```
+
+- A model that comes only from `.env` (or a saved custom endpoint) is **inferred**:
+  its capabilities are guessed from its pool and protocols (for example a vision-pool
+  model gets `image_input`, and every current adapter gets `text_input`,
+  `text_output`, `tool_calling` and `streaming`). The page marks these rows as
+  environment-provided.
+- Saving the row makes it **configured**, and its checkboxes become authoritative for
+  that exact `provider/model`. Deleting the declaration returns the model to the
+  inferred defaults. Provider, model and credentials still come from the environment
+  or the Custom Endpoints page; the configurator never stores a key or a base URL.
+- `enabled` is one decision, shared with the Models page **Switch**: changing either
+  surface updates the other, so the two can never contradict each other. A disabled
+  model is removed before any plan is built, is not a failure, and does not cool down.
+- `reasoning` is a preference, not a hard requirement. It never filters out a model
+  that can otherwise serve the request.
+- An optional **protocol hint** narrows a model to one wire format when its provider
+  offers more than one. A hint the provider does not offer is ignored and reported as
+  a warning, never forced onto the upstream.
+- `image_output`, `audio_output`, `video_output` and `embeddings` can be declared, but
+  no adapter in this build executes them. The page reports those checkboxes as
+  declared-but-not-executable rather than pretending the route will work.
+
+#### How a request uses capabilities
+
+Requirements come from the **endpoint and payload**, never from the model name:
+
+1. Detect what the request needs: media parts (`image`, `audio`, `video`, `file`),
+   tools, a structured response format, an explicit output modality, and streaming.
+2. Remove models switched off in the configurator or on the Models page.
+3. Keep only targets that declare every required capability *and* whose adapter can
+   actually execute it. A declared capability the adapter cannot execute is not
+   eligible.
+4. Walk the remaining candidates in the normal order: **Manual Model Selection first,
+   in its saved order**, then **Automatic Health-Based Fallback** for the rest. Key
+   rotation, cooldowns, remembered successes and retries behave exactly as described
+   above.
+5. A failure never ends the walk while another eligible target remains.
+
+The capability filter is applied once, before the first upstream attempt. If a stream
+has already started, it is never handed to another model. When nothing can serve the
+request the gateway fails closed with a reason instead of substituting a model:
+
+| Situation | Response |
+|---|---|
+| Every model in the pool is switched off | `503`, `error.type: "models_disabled"` |
+| Targets exist, but none can declare and execute the required capabilities | `503`, `error.type: "no_capable_route"`, with `required_capabilities` and the first `excluded_candidates` |
+| The client names a configured model that cannot serve this request | `400`, `error.type: "model_capability_mismatch"` |
+
+The required capabilities and excluded candidates are also recorded on the request
+timeline, so Live Logs and the request detail can explain a route that was never taken.
+
+#### Persistence
+
+Model configuration is non-secret JSON: ids, enabled flags, capabilities and optional
+display metadata. It is stored in `data/model-config.json` (`MODEL_CONFIG_FILE`), and
+can be persisted to a GitHub branch so it survives a redeploy:
+
+- Set `MODEL_CONFIG_GITHUB_REPO` and `MODEL_CONFIG_GITHUB_TOKEN`, optionally
+  `MODEL_CONFIG_GITHUB_BRANCH` (default `main`) and `MODEL_CONFIG_GITHUB_PATH`
+  (default `model-config.json`). Any `MODEL_CONFIG_GITHUB_*` value that is not set
+  falls back to the matching `CUSTOM_ENDPOINTS_GITHUB_*` value, so one repository and
+  token can serve both stores. No encryption secret is needed because no credential is
+  written there.
+- On startup GitHub is the source of truth and the document is restored before the
+  first request is routed. If GitHub holds nothing yet, the local file is uploaded once.
+  If GitHub cannot be reached, the last local configuration stays usable, the retry
+  loop keeps trying, and **writes are refused with `503`** so a stale copy can never
+  overwrite a newer remote one.
+- The GitHub Contents API `sha` is the revision. A save sends the revision it read; if
+  the remote document changed in the meantime, GitHub refuses the write and the change
+  is rejected with `409 conflict`. Nothing is retried over it automatically: refresh
+  (`POST /api/model-config/refresh`) re-reads the document first.
+- The schema is versioned (`version: 1`). A document written by a newer build is
+  refused and is never overwritten. Credential-shaped fields and token-shaped values
+  are rejected at validation time.
+
+The page and API expose `GET /api/model-config`, `POST /api/model-config`,
+`PUT`/`PATCH`/`DELETE /api/model-config/:id` and `POST /api/model-config/refresh`.
+The payload contains effective rows, storage state (`file` or `github`, ready or with
+its error), warnings, the capability schema and the adapter matrix; it never contains
+a key, a base URL or any other credential.
+
 ### Sticky sessions
 
 The remembered target is scoped per session, protocol and pool, and lasts
@@ -286,6 +385,9 @@ outright, and that wins over the status code.
 | GET | `/api/fallback` | The saved selection per pool, the derived mode and the model catalogue with health and latency |
 | PUT | `/api/fallback` | Save one pool's Manual Model Selection |
 | POST | `/api/fallback/reset` | Clear remembered model/key preferences (Reset Fallback) |
+| GET / POST | `/api/model-config` | Effective model declarations (capabilities, enabled, storage state) / create one declaration; never returns a credential |
+| PUT / PATCH / DELETE | `/api/model-config/:id` | Change or remove one declaration (`enabled` stays in step with the Models page Switch) |
+| POST | `/api/model-config/refresh` | Re-read the persisted document (for example after a `409 conflict`) |
 | GET | `/api/router/preview` | Preview routing decisions |
 | GET | `/api/analytics` | Usage and performance analytics |
 | GET | `/api/config` | Effective configuration without secrets |
@@ -329,6 +431,7 @@ Useful areas include:
 - Dashboard
 - Providers
 - Models
+- Model Configurator
 - Health Monitor
 - Router
 - Fallback

@@ -15,6 +15,7 @@ const Dashboard = lazy(() => import("./pages/Dashboard.jsx"));
 const Providers = lazy(() => import("./pages/Providers.jsx"));
 const CustomEndpointsPage = lazy(() => import("./pages/CustomEndpoints.jsx"));
 const Models = lazy(() => import("./pages/Models.jsx"));
+const ModelConfigurator = lazy(() => import("./pages/ModelConfigurator.jsx"));
 const HealthMonitor = lazy(() => import("./pages/HealthMonitor.jsx"));
 const RouterControl = lazy(() => import("./pages/RouterControl.jsx"));
 const Fallback = lazy(() => import("./pages/Fallback.jsx"));
@@ -37,6 +38,8 @@ export const ROUTES = [
     description: "Your own base URL, models and keys, saved permanently as a fallback provider" },
   { path: "/models", label: "Models", icon: "box", group: "Configure", element: Models,
     description: "Model catalogue with health, protocol and usage" },
+  { path: "/model-config", label: "Model Configurator", icon: "sliders", group: "Configure", element: ModelConfigurator,
+    description: "Unified capability declarations and routing switches for every model" },
 
   // Deliberately NOT "/health": the gateway answers GET /health with the raw
   // JSON contract, and `RESERVED_PREFIXES` in src/server.js shadows the SPA for

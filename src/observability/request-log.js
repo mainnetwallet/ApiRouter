@@ -46,6 +46,31 @@ const PHASES = ["sticky", "chain", "auto", "manual-selection", "health-fallback"
 const pad = (value) => String(value).padStart(6, "0");
 
 /**
+ * Routing diagnostics that are safe to store: capability ids are a fixed
+ * vocabulary and exclusions are fixed reason labels plus provider/model ids.
+ * Nothing here can carry a body, a header or a credential.
+ */
+const MAX_EXCLUSIONS = 50;
+const MAX_REQUIREMENTS = 20;
+const SAFE_TOKEN = /^[A-Za-z0-9_.:/-]{1,120}$/;
+
+function capabilityList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((item) => typeof item === "string" && /^[a-z_]{2,40}$/.test(item)))].slice(0, MAX_REQUIREMENTS);
+}
+
+function exclusionList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, MAX_EXCLUSIONS).map((item) => ({
+    provider: typeof item?.provider === "string" && SAFE_TOKEN.test(item.provider) ? item.provider : null,
+    model: typeof item?.model === "string" && SAFE_TOKEN.test(item.model) ? item.model : null,
+    reason: typeof item?.reason === "string" && /^[a-z_]{2,60}$/.test(item.reason) ? item.reason : "excluded",
+    missing: capabilityList(item?.missing)
+  }));
+}
+
+
+/**
  * The allow-listed, request-independent part of one attempt row. Identity
  * (`attemptId`, `attemptSeq`, `callIndex`) is added by the log, never by the
  * caller's position in an array.
@@ -268,6 +293,10 @@ export class RequestLog {
       protocol: entry.protocol ?? null,
       pool: normalizePool(entry.pool),
       requestedModel: sanitizeMessage(entry.requestedModel, { maxLength: 120 }),
+      // What this request needs, so a route that was not taken can be explained
+      // without recording the payload.
+      requiredCapabilities: capabilityList(entry.requiredCapabilities),
+      excludedCandidates: exclusionList(entry.excludedCandidates),
       outcome: "pending",
       attempts: [],
       attemptCount: 0,
@@ -284,7 +313,7 @@ export class RequestLog {
    * Update a pending request: the attempts finished so far, and/or the attempt
    * currently on the wire (`inflight`, or `null` once it has answered).
    */
-  progress(startSeq, { attempts, inflight } = {}) {
+  progress(startSeq, { attempts, inflight, excludedCandidates } = {}) {
     const pending = this.pendingEntries.get(startSeq);
     if (!pending) return;
     if (attempts !== undefined) {
@@ -308,6 +337,7 @@ export class RequestLog {
         }
         : null;
     }
+    if (excludedCandidates !== undefined) pending.excludedCandidates = exclusionList(excludedCandidates);
     this.#emit("pending", pending);
   }
 
@@ -519,6 +549,14 @@ export class RequestLog {
       protocol: entry.protocol ?? null,
       pool,
       requestedModel: sanitizeMessage(entry.requestedModel, { maxLength: 120 }),
+      // The request's capability requirements and the candidates routing ruled
+      // out (and why). Fixed vocabulary only; never a body or a credential.
+      requiredCapabilities: entry.requiredCapabilities !== undefined
+        ? capabilityList(entry.requiredCapabilities)
+        : (pending?.requiredCapabilities ?? []),
+      excludedCandidates: entry.excludedCandidates !== undefined
+        ? exclusionList(entry.excludedCandidates)
+        : (pending?.excludedCandidates ?? []),
       autoRouted: entry.autoRouted === true,
       streamed: entry.streamed === true,
       attempts,
