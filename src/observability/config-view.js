@@ -29,21 +29,17 @@ function configuredHeaderNames(provider) {
     .sort();
 }
 
-function describeProvider(id, provider, targets, pool = "text", capabilities = null) {
-  const providerTargets = targets.filter((target) => target.provider === id && (target.pool ?? "text") === pool);
+function describeProvider(id, provider, targets, capabilities = null) {
+  const providerTargets = targets.filter((target) => target.provider === id);
   const configured = isProviderConfigured(provider);
   const caps = capabilities ?? {
-    capabilities: { text: pool === "text" && configured, vision: pool === "vision" && configured },
-    textModels: pool === "text" ? [...provider.models] : [],
-    visionModels: pool === "vision" ? [...provider.models] : []
+    capabilities: { text: configured, vision: configured },
+    textModels: [...provider.models],
+    visionModels: [...provider.models]
   };
 
   return {
     id,
-    // Which pool this row describes. The same provider is described once per
-    // pool it participates in, and the two rows are never merged: a provider
-    // healthy for text and failing for vision has to be able to say so.
-    pool,
     configured,
     // Why a provider is not routable, so the UI can say more than "off".
     missing: configured
@@ -56,8 +52,8 @@ function describeProvider(id, provider, targets, pool = "text", capabilities = n
             : null
         ].filter(Boolean),
 
-    // Capability metadata: what this provider can route, per pool, and with
-    // which models. Derived from configuration, never assumed.
+    // Capability metadata: what this provider can route, and with which models.
+    // Derived from configuration, never assumed.
     capabilities: { ...caps.capabilities },
     textModels: [...caps.textModels],
     visionModels: [...caps.visionModels],
@@ -89,7 +85,7 @@ export function describeConfig(config, targets = []) {
   const capabilities = describeProviderCapabilities(config);
 
   const providers = Object.entries(config.providers).map(([id, provider]) =>
-    describeProvider(id, provider, targets, "text", capabilities[id])
+    describeProvider(id, provider, targets, capabilities[id])
   );
 
   const configuredProviders = providers.filter((provider) => provider.configured);
@@ -104,29 +100,26 @@ export function describeConfig(config, targets = []) {
     },
     routing: {
       retryableStatus: [...config.retryableStatus].sort((a, b) => a - b),
-      strategy: "single Fallback Chain per pool, with optional remembered success",
+      strategy: "single unified Fallback Chain, with optional remembered success",
       targetIdentity: "provider + model + keyIndex",
       exactModelPreferred: false,
-      // The two pools are routed independently; a request never crosses over.
+      // Routing is capability-based: every configured target is a candidate,
+      // and the request's required capabilities decide which ones are eligible.
       pools: ["text", "vision"],
-      crossPoolFallback: "blocked",
+      crossPoolFallback: "unified",
       // Where the order comes from. The strategy itself is not environment
       // configuration any more, so it is reported by /api/fallback.
       orderSource: "fallback-chain",
       chainFile: config.fallbackChainFile
     },
     providers,
-    // Image requests use this separate pool (own keys, base URLs and models).
-    visionProviders: Object.entries(config.visionProviders ?? {}).map(([id, provider]) =>
-      describeProvider(id, provider, targets, "vision", capabilities[id])),
     // One entry per known provider, with both capabilities on one object.
     capabilities: Object.values(capabilities),
     summary: {
       knownProviders: providers.length,
       configuredProviders: configuredProviders.length,
       unconfiguredProviders: providers.length - configuredProviders.length,
-      configuredTargets: targets.filter((target) => (target.pool ?? "text") === "text").length,
-      configuredVisionTargets: targets.filter((target) => target.pool === "vision").length,
+      configuredTargets: targets.length,
       textCapableProviders: Object.values(capabilities).filter((c) => c.capabilities.text).length,
       visionCapableProviders: Object.values(capabilities).filter((c) => c.capabilities.vision).length,
       dualCapableProviders: Object.values(capabilities)
@@ -139,27 +132,25 @@ export function describeConfig(config, targets = []) {
  * The env var names an operator can safely act on. Values are never included.
  * Grouped the way `.env.example` presents them so the UI can mirror that file.
  */
-function providerEnvVars(providers, { vision }) {
+function providerEnvVars(providers) {
   // A saved custom endpoint is not environment configuration: no env var names.
   return Object.entries(providers).filter(([, provider]) => !provider.custom).map(([id, provider]) => {
-    const prefix = id.toUpperCase() + (vision ? "_VISION" : "");
     return {
       provider: id,
       vars: [
-        { name: `${prefix}_API_KEYS`, configured: provider.apiKeys.length > 0, kind: "secret" },
-        { name: `${prefix}_MODELS`, configured: provider.models.length > 0, kind: "list" },
+        { name: `${id.toUpperCase()}_API_KEYS`, configured: provider.apiKeys.length > 0, kind: "secret" },
+        { name: `${id.toUpperCase()}_MODELS`, configured: provider.models.length > 0, kind: "list" },
         ...(id === "cloudflare"
           // Cloudflare's URL is built from the account id, so that is what to set.
-          ? [{ name: `${prefix}_ACCOUNT_IDS`, configured: (provider.accountIds || []).length > 0, kind: "list" }]
-          : [{ name: `${prefix}_BASE_URL`, configured: Boolean(provider.baseUrl), kind: "url" }])
+          ? [{ name: `${id.toUpperCase()}_ACCOUNT_IDS`, configured: (provider.accountIds || []).length > 0, kind: "list" }]
+          : [{ name: `${id.toUpperCase()}_BASE_URL`, configured: Boolean(provider.baseUrl), kind: "url" }])
       ]
     };
   });
 }
 
 export function describeEnvironment(config) {
-  const providerVars = providerEnvVars(config.providers, { vision: false });
-  const visionProviderVars = providerEnvVars(config.visionProviders ?? {}, { vision: true });
+  const providerVars = providerEnvVars(config.providers);
 
   return {
     server: [
@@ -176,7 +167,6 @@ export function describeEnvironment(config) {
       { name: "VISION_PRIORITY_MODELS", configured: false, kind: "list", note: "removed — use the Fallback Chain" },
       { name: "MANUAL_SELECTION_FILE", configured: false, kind: "text", note: "read once, to seed the Fallback Chain" }
     ],
-    providers: providerVars,
-    visionProviders: visionProviderVars
+    providers: providerVars
   };
 }

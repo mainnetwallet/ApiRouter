@@ -1,15 +1,10 @@
 /**
- * Vision-aware routing.
+ * Image detection for capability-based routing.
  *
- * Image requests use a pool of their own. Each provider can be given a separate
- * vision key, base URL and model list (GEMINI_VISION_API_KEYS,
- * GEMINI_VISION_BASE_URL, GEMINI_VISION_MODELS, ...). A request that carries an
- * image is routed ONLY to those vision targets, and a text request never
- * reaches them, so text-only models are not tried (or logged as failures) for
- * images and vision keys are not spent on plain text.
- *
- * While no vision target is configured, an image request fails with 503
- * `no_vision_route`; it is never sent to the normal text pool.
+ * The router no longer splits requests into text and vision pools. Instead,
+ * each request is analyzed for its required capabilities, and only models
+ * that declare the needed capabilities are eligible. This module provides
+ * the shared image-detection logic used by the request profiler.
  */
 
 function isImageMime(value) {
@@ -83,16 +78,4 @@ export function requestHasImage(body) {
     if (contentHasImage(body[field]) || entryHasImage(body[field])) return true;
   }
   return false;
-}
-
-/**
- * Picks the candidate pool for a request.
- *   { pool: "vision", targets }   any request that carries an image
- *   { pool: "text",   targets }   every other request
- * An image request NEVER gets text targets. When no vision target is configured,
- * `targets` is empty and the caller answers 503 `no_vision_route`.
- */
-export function selectPool(body, { textTargets = [], visionTargets = [] } = {}) {
-  if (requestHasImage(body)) return { pool: "vision", targets: visionTargets };
-  return { pool: "text", targets: textTargets };
 }

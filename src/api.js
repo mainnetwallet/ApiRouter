@@ -6,7 +6,6 @@ import { modelLatency, resetAutomaticOrderCache, routeOrderByPool } from "./fall
 import {
   FALLBACK_MODE_INFO,
   FALLBACK_MODES,
-  FALLBACK_POOLS,
   MAX_KEYS,
   activeEntries,
   allowedKeyIndexes,
@@ -206,38 +205,27 @@ export function createApi({
   // The chain store is the single source of truth for order and mode. These two
   // read it defensively so the API module stays usable when it is constructed
   // without one (a test harness, or a future embedder).
-  const fallbackSnapshot = () => (fallbackChain ? { text: fallbackChain.get("text"), vision: fallbackChain.get("vision") } : {});
+  const fallbackSnapshot = () => (fallbackChain ? fallbackChain.get() : []);
   const fallbackMode = () => fallbackChain?.mode ?? FALLBACK_MODES.AUTO;
 
   // --- /api/health -------------------------------------------------------
   function healthPayload(now = Date.now()) {
     const entries = describeAll(now);
-    // The real route order per pool, exactly as the saved selection produces it;
+    // The real route order, exactly as the saved selection produces it;
     // health only removes cooling targets. Not a health-score sort.
     const ranked = routeOrderByPool(routableTargets(), {
-      chains: fallbackSnapshot(),
+      chain: fallbackSnapshot(),
       health,
       now,
       isEligible: (target) => health.isAvailable(target, now)
     });
-
-    // Text and vision are reported separately as well as together. The combined
-    // rollup answers "how is this provider doing overall"; the per-pool figures
-    // are what routing actually depends on, since each pool has its own health.
-    const textEntries = entries.filter((entry) => (entry.pool ?? "text") === "text");
-    const visionEntries = entries.filter((entry) => entry.pool === "vision");
 
     return {
       ok: true,
       generatedAt: new Date(now).toISOString(),
       service: "apirouter",
       summary: summarizeHealth(entries),
-      poolSummary: {
-        text: summarizeHealth(textEntries),
-        vision: summarizeHealth(visionEntries)
-      },
       providers: providerRollup(entries),
-      visionProviders: providerRollup(visionEntries),
       targets: entries,
       ranked: ranked.map((target, index) => ({
         rank: index + 1,
@@ -245,7 +233,6 @@ export function createApi({
         provider: target.provider,
         model: target.model,
         keyIndex: target.keyIndex,
-        pool: target.pool ?? "text",
         protocols: [...(target.protocols ?? [])]
       })),
       monitor: monitor ? monitor.snapshot(now) : null,
@@ -279,14 +266,7 @@ export function createApi({
 
   function providersPayload(now = Date.now()) {
     const allEntries = describeAll(now);
-    // Text providers and the separate vision pool are reported apart. Both the
-    // health rollup and the target list are computed per pool, so a vision
-    // failure can never be counted against a provider's text health (or the
-    // other way round).
-    const entries = allEntries.filter((entry) => (entry.pool ?? "text") === "text");
-    const visionEntries = allEntries.filter((entry) => entry.pool === "vision");
-    const rollup = providerRollup(entries);
-    const visionRollup = providerRollup(visionEntries);
+    const rollup = providerRollup(allEntries);
     const configView = describeConfig(config, targets);
     const byId = new Map(configView.providers.map((provider) => [provider.id, provider]));
 
@@ -298,7 +278,7 @@ export function createApi({
         disabled: isProviderSwitchedOff(provider.id),
         health: healthRow ?? emptyRollup(provider),
         // Per-target detail is what the provider drawer renders.
-        targets: entries.filter((entry) => entry.provider === provider.id)
+        targets: allEntries.filter((entry) => entry.provider === provider.id)
       };
     });
 
@@ -310,21 +290,9 @@ export function createApi({
       generatedAt: new Date(now).toISOString(),
       summary: {
         ...configView.summary,
-        health: summarizeHealth(entries),
-        visionHealth: summarizeHealth(visionEntries)
+        health: summarizeHealth(allEntries)
       },
       providers,
-      // The separate vision pool (image requests only), per target, with its
-      // own independent health rollup.
-      visionProviders: configView.visionProviders.map((provider) => {
-        const healthRow = visionRollup.find((row) => row.provider === provider.id);
-        return {
-          ...provider,
-          disabled: isProviderSwitchedOff(provider.id),
-          health: healthRow ?? emptyRollup(provider),
-          targets: visionEntries.filter((entry) => entry.provider === provider.id)
-        };
-      }),
       unconfiguredHealth: orphans
     };
   }
@@ -348,7 +316,6 @@ export function createApi({
       filters: {
         providers: [...new Set(catalogue.map((model) => model.provider))].sort(),
         protocols: [...new Set(catalogue.flatMap((model) => model.protocols))].sort(),
-        pools: [...new Set(catalogue.map((model) => model.pool))].sort(),
         statuses: Object.values(HEALTH_STATES)
       },
       summary: summarizeHealth(entries)
@@ -361,15 +328,13 @@ export function createApi({
     const healthById = new Map(describeAll(now).map((entry) => [entry.id, entry]));
 
     // What can be chosen: one row per provider/model, with how many keys it has
-    // in each pool and whether the Model Switch currently has it off.
+    // and whether the Model Switch currently has it off.
     const groups = new Map();
     for (const target of targets) {
       const id = `${target.provider}/${target.model}`;
       const group = groups.get(id) ?? {
-        provider: target.provider, model: target.model, pools: [], keyCount: 0, disabled: isSwitchedOff(target)
+        provider: target.provider, model: target.model, keyCount: 0, disabled: isSwitchedOff(target)
       };
-      const pool = target.pool ?? "text";
-      if (!group.pools.includes(pool)) group.pools.push(pool);
       group.keyCount += 1;
       groups.set(id, group);
     }
@@ -383,8 +348,7 @@ export function createApi({
 
     const keys = targets
       .filter((target) => oneModel.matches(target))
-      .sort((a, b) => oneModel.modelRank(a) - oneModel.modelRank(b)
-        || (a.pool ?? "text").localeCompare(b.pool ?? "text") || a.keyIndex - b.keyIndex)
+      .sort((a, b) => oneModel.modelRank(a) - oneModel.modelRank(b) || a.keyIndex - b.keyIndex)
       .map((target) => {
         const entry = healthById.get(health.key(target));
         const pacing = keyPacer ? keyPacer.describe(target, now) : { cooldownUntil: 0, ready: true };
@@ -393,9 +357,8 @@ export function createApi({
           model: target.model,
           // 1 = the model that leads; the next model is used when this one's keys all fail or cool.
           rank: oneModel.modelRank(target) + 1,
-          pool: target.pool ?? "text",
           keyIndex: target.keyIndex,
-          // Id to use in `cooldowns`: "model::pool:keyIndex".
+          // Id to use in `cooldowns`: "model::keyIndex".
           keyId: oneModelKeyId(target),
           // The cooldown the operator set on this key, in ms (0 = none).
           cooldownMs: oneModel.cooldownFor(target),
@@ -468,21 +431,17 @@ export function createApi({
    */
   function fallbackPayload(now = Date.now()) {
     const health = describeAll(now);
-    const byPool = { text: [], vision: [] };
     const index = new Map();
 
     for (const entry of health) {
-      const pool = entry.pool ?? "text";
-      if (!byPool[pool]) continue;
-      const id = `${pool}/${entry.provider}/${entry.model}`;
+      const id = `${entry.provider}/${entry.model}`;
       let group = index.get(id);
       if (!group) {
-        group = { id, provider: entry.provider, model: entry.model, pool, keyStates: [], protocols: [] };
+        group = { id, provider: entry.provider, model: entry.model, keyStates: [], protocols: [] };
         index.set(id, group);
-        byPool[pool].push(group);
       }
-      // Every key of one model in one pool serves the same protocols; the union
-      // is taken anyway so a partially configured provider cannot understate it.
+      // Every key of one model serves the same protocols; the union is taken
+      // anyway so a partially configured provider cannot understate it.
       for (const protocol of entry.protocols ?? []) {
         if (!group.protocols.includes(protocol)) group.protocols.push(protocol);
       }
@@ -500,57 +459,50 @@ export function createApi({
         lastStatus: entry.lastStatus,
         modelListed: entry.modelListedConfirmed ?? null
       });
-      if (!group.protocols.includes) group.protocols = [...(entry.protocols ?? [])];
     }
 
-    for (const pool of FALLBACK_POOLS) {
-      // The entries the planner narrows by, read exactly as `chainGroups` reads
-      // them: enabled entries only, one per provider/model.
-      const entries = new Map(activeEntries(fallbackChain?.get?.(pool) ?? []).map((entry) => [entryId(entry), entry]));
-      for (const group of byPool[pool] ?? []) {
-        group.keyStates.sort((a, b) => a.keyIndex - b.keyIndex);
-        // The key indexes this model actually has, which is what an entry's own
-        // `keys` narrows. Kept separate from `keyStates` so an entry's saved
-        // subset can never be confused with the provider's key inventory.
-        group.keyIndexes = group.keyStates.map((key) => key.keyIndex);
-        // The number routing actually orders by, and where it came from: the
-        // planner's own definition (`modelLatency`), not a second one, applied to
-        // the keys the planner orders this model by. When the chain restricts the
-        // entry to a subset of keys, only those keys are eligible and only they
-        // count: key 0 at 50 ms must not speed up an entry that allows key 1 only
-        // (900 ms). A model with no enabled entry is ordered over all its keys.
-        // The two component figures below stay provider-wide: the lowest per kind
-        // across every key the model has.
-        const entry = entries.get(entryId(group));
-        const eligible = entry ? new Set(allowedKeyIndexes(entry, group.keyIndexes)) : null;
-        const ordering = modelLatency(
-          eligible ? group.keyStates.filter((key) => eligible.has(key.keyIndex)) : group.keyStates
-        );
-        const lowest = (field) => {
-          const values = group.keyStates.map((key) => key[field]).filter((value) => Number.isFinite(value));
-          return values.length > 0 ? Math.min(...values) : null;
-        };
-        group.measuredLatencyMs = lowest("requestLatencyMs");
-        group.probeLatencyMs = lowest("probeLatencyMs");
-        group.latencyMs = ordering.latencyMs;
-        group.latencySource = ordering.source;
-        group.available = group.keyStates.some((key) => key.available);
-        group.status = rollupStatus(group.keyStates);
-        group.disabled = Boolean(modelSwitch?.isDisabled?.(group.provider, group.model));
-        group.providerDisabled = isProviderSwitchedOff(group.provider);
-      }
+    // The entries the planner narrows by, read exactly as `chainGroups` reads
+    // them: enabled entries only, one per provider/model.
+    const entries = new Map(activeEntries(fallbackChain?.get?.() ?? []).map((entry) => [entryId(entry), entry]));
+    for (const group of index.values()) {
+      group.keyStates.sort((a, b) => a.keyIndex - b.keyIndex);
+      // The key indexes this model actually has, which is what an entry's own
+      // `keys` narrows. Kept separate from `keyStates` so an entry's saved
+      // subset can never be confused with the provider's key inventory.
+      group.keyIndexes = group.keyStates.map((key) => key.keyIndex);
+      // The number routing actually orders by, and where it came from: the
+      // planner's own definition (`modelLatency`), not a second one, applied to
+      // the keys the planner orders this model by. When the chain restricts the
+      // entry to a subset of keys, only those keys are eligible and only they
+      // count: key 0 at 50 ms must not speed up an entry that allows key 1 only
+      // (900 ms). A model with no enabled entry is ordered over all its keys.
+      const entry = entries.get(entryId(group));
+      const eligible = entry ? new Set(allowedKeyIndexes(entry, group.keyIndexes)) : null;
+      const ordering = modelLatency(
+        eligible ? group.keyStates.filter((key) => eligible.has(key.keyIndex)) : group.keyStates
+      );
+      const lowest = (field) => {
+        const values = group.keyStates.map((key) => key[field]).filter((value) => Number.isFinite(value));
+        return values.length > 0 ? Math.min(...values) : null;
+      };
+      group.measuredLatencyMs = lowest("requestLatencyMs");
+      group.probeLatencyMs = lowest("probeLatencyMs");
+      group.latencyMs = ordering.latencyMs;
+      group.latencySource = ordering.source;
+      group.available = group.keyStates.some((key) => key.available);
+      group.status = rollupStatus(group.keyStates);
+      group.disabled = Boolean(modelSwitch?.isDisabled?.(group.provider, group.model));
+      group.providerDisabled = isProviderSwitchedOff(group.provider);
     }
 
     return {
       mode: fallbackMode(),
       remembersSuccess: remembersSuccess(fallbackMode()),
       modes: FALLBACK_MODE_INFO,
-      chain: { text: fallbackChain?.get?.("text") ?? [], vision: fallbackChain?.get?.("vision") ?? [] },
-      catalogue: byPool,
+      chain: fallbackChain?.get?.() ?? [],
+      catalogue: [...index.values()],
       disabledModels: modelSwitch?.list?.() ?? [],
       disabledProviders: modelSwitch?.listProviders?.() ?? [],
-      pools: FALLBACK_POOLS,
-      poolsSeparate: true,
       // What the router is currently remembering, so the panel can show it and
       // Reset Fallback can be seen to have worked rather than merely claimed.
       remembered: typeof describeFallbackState === "function" ? describeFallbackState() : null
@@ -566,12 +518,12 @@ export function createApi({
   }
 
   // --- /api/router/preview -----------------------------------------------
-  const POOLS = ["text", "vision"];
-
   /**
-   * `pool` selects which routing pool to preview. Text is the default so every
-   * existing caller keeps working; `vision` previews the image-request pool,
-   * which has its own targets, its own health and its own fallback chain.
+   * A faithful, read-only rendering of the decision the router makes for a given
+   * request shape. Routing is capability-based: every configured target is a
+   * candidate, and the request's required capabilities decide which ones are
+   * eligible. There is no separate text/vision pool — a model that declares
+   * image_input can serve image requests, and one that does not cannot.
    */
   function routerPreviewPayload(searchParams, now = Date.now()) {
     const protocol = (searchParams.get("protocol") || "").trim();
@@ -579,32 +531,18 @@ export function createApi({
       return { error: "a protocol query parameter is required" };
     }
 
-    const requestedPool = (searchParams.get("pool") || "").trim().toLowerCase();
-    const pool = requestedPool || "text";
-    if (!POOLS.includes(pool)) {
-      return {
-        error: `unknown pool "${requestedPool}"`,
-        details: { pools: POOLS }
-      };
-    }
+    // The preview runs against the same target set the proxy would use.
+    const switchedOnTargets = targets.filter((target) => !isSwitchedOff(target));
 
-    // The preview must run against the same target set the proxy would use for
-    // this pool — never the combined list, which could show a route the router
-    // would refuse to take.
-    const configuredPoolTargets = targets.filter((target) => (target.pool ?? "text") === pool);
-    const switchedOnTargets = configuredPoolTargets.filter((target) => !isSwitchedOff(target));
-
-    if (configuredPoolTargets.length > 0 && switchedOnTargets.length === 0) {
+    if (targets.length > 0 && switchedOnTargets.length === 0) {
       return {
         status: 503,
         type: "models_disabled",
-        error: "Every model in this pool is switched off in the Control Panel"
+        error: "Every model is switched off in the Control Panel"
       };
     }
 
-    // One Provider Fallback: only the chosen provider's listed models are routed,
-    // and a pool none of them has a key in cannot be served at all (nothing else
-    // is ever tried).
+    // One Provider Fallback: only the chosen provider's listed models are routed.
     const activeOneModel = oneModelActive();
     const poolTargets = activeOneModel
       ? switchedOnTargets.filter((target) => oneModel.matches(target))
@@ -614,17 +552,15 @@ export function createApi({
       return {
         status: 503,
         type: "one_model_unavailable",
-        error: `One Provider Fallback is on and ${activeOneModel.provider} has no usable key in the ${pool} pool for its chosen models`
+        error: `One Provider Fallback is on and ${activeOneModel.provider} has no usable key for its chosen models`
       };
     }
 
     if (poolTargets.length === 0) {
       return {
         status: 503,
-        type: pool === "vision" ? "no_vision_route" : "no_route",
-        error: pool === "vision"
-          ? "No vision provider is configured"
-          : "No provider is configured"
+        type: "no_route",
+        error: "No provider is configured"
       };
     }
 
@@ -634,21 +570,19 @@ export function createApi({
     const supported = servableProtocols(poolTargets);
     if (!supported.has(protocol)) {
       return {
-        error: `protocol "${protocol}" is not served by any configured target in the ${pool} pool`,
-        details: { supported: [...supported].sort(), pool }
+        error: `protocol "${protocol}" is not served by any configured target`,
+        details: { supported: [...supported].sort() }
       };
     }
 
     return {
       generatedAt: new Date(now).toISOString(),
-      pools: POOLS,
       protocols: [...supported].sort(),
       ...describeRouting({
         targets: poolTargets,
         health,
         protocol,
-        pool,
-        chain: fallbackChain?.get?.(pool) ?? [],
+        chain: fallbackChain?.get?.() ?? [],
         retryableStatus: config.retryableStatus,
         model: (searchParams.get("model") || "").trim(),
         stickyTargetId: (searchParams.get("session") || "").trim() || null, // observability text only
@@ -662,18 +596,12 @@ export function createApi({
     const { label, rangeMs } = resolveRange(searchParams.get("range") || "1h", now);
     const buckets = Math.max(2, Math.min(Number(searchParams.get("buckets")) || 30, 120));
 
-    // Optional pool scope. Only "text" / "vision" narrow the figures; any other
-    // value is ignored (all traffic) so a typo cannot silently empty the page.
-    const requestedPool = (searchParams.get("pool") || "").trim().toLowerCase();
-    const pool = requestedPool === "text" || requestedPool === "vision" ? requestedPool : null;
-
     const start = now - rangeMs;
     const entries = [...requestLog.entries.values()].filter((entry) =>
-      entry.receivedAt >= start && (pool === null || (entry.pool ?? "text") === pool));
+      entry.receivedAt >= start);
 
     return {
       generatedAt: new Date(now).toISOString(),
-      pool,
       range: { label, rangeMs, from: new Date(start).toISOString(), to: new Date(now).toISOString() },
       bucketMs: Math.floor(rangeMs / buckets),
       availableRanges: ["5m", "15m", "1h", "6h", "24h", "7d"],
@@ -691,9 +619,6 @@ export function createApi({
         provider: breakdown(entries, (entry) => entry.finalProvider),
         model: breakdown(entries, (entry) => entry.finalModel),
         protocol: breakdown(entries, (entry) => entry.protocol),
-        // Text and vision traffic are broken out so an image-routing problem is
-        // never averaged away by the (usually much larger) text volume.
-        pool: breakdown(entries, (entry) => entry.pool),
         outcome: breakdown(entries, (entry) => entry.outcome),
         errors: errorDistribution(entries),
         fallback: breakdown(
@@ -757,11 +682,9 @@ export function createApi({
       };
     }
 
-    const inSelection = (pool) => new Set(
-      activeEntries(fallbackChain?.get?.(pool) ?? []).map((entry) => `${entry.provider}/${entry.model}`)
+    const inSelection = new Set(
+      activeEntries(fallbackChain?.get?.() ?? []).map((entry) => `${entry.provider}/${entry.model}`)
     );
-    const textSelected = inSelection("text");
-    const visionSelected = inSelection("vision");
 
     const models = modelConfig.listEffective(targets).map((row) => {
       const key = `${row.provider}/${row.model}`;
@@ -785,13 +708,12 @@ export function createApi({
         unsupportedCapabilities: row.unsupportedCapabilities,
         protocol: row.protocol,
         metadata: row.metadata,
-        pools: row.pools,
         protocols: row.protocols,
         keyCount: row.keyCount,
         configuredInEnvironment: row.configuredInEnvironment,
         stored: row.stored,
         source: row.stored ? "configured" : "environment",
-        manualSelection: { text: textSelected.has(key), vision: visionSelected.has(key) },
+        inManualSelection: inSelection.has(key),
         warnings: row.warnings,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt
@@ -839,7 +761,6 @@ export function createApi({
     if (!row) return null;
     return {
       capabilities: inferCapabilities({
-        pool: row.pools.includes("vision") ? "vision" : "text",
         protocols: row.protocols
       })
     };
@@ -1064,8 +985,9 @@ export function createApi({
          * is invalid, which used to persist the mode on the way to the error.
          */
         const hasMode = body?.mode !== undefined;
-        const hasPool = body?.pool !== undefined;
-        if (!hasMode && !hasPool) return fail(req, res, 400, "a pool or a mode is required", "invalid_request");
+        if (!hasMode && !Array.isArray(body?.entries)) {
+          return fail(req, res, 400, "an entries array is required", "invalid_request");
+        }
 
         /*
          * The mode is DERIVED from the saved selection now, so a posted mode is
@@ -1081,93 +1003,69 @@ export function createApi({
           }
         }
 
-        let pool = null;
-        let entries = null;
-        if (hasPool) {
-          pool = String(body.pool ?? "").trim().toLowerCase();
-          if (!FALLBACK_POOLS.includes(pool)) {
-            return fail(req, res, 400, `unknown pool "${pool}"`, "invalid_request", { pools: FALLBACK_POOLS });
-          }
-          if (!Array.isArray(body?.entries)) return fail(req, res, 400, "entries must be an array", "invalid_request");
-
-          // What this pool can actually be routed to: the models it serves, and
-          // the key indexes each of those providers actually has configured.
-          const keyIndexes = new Map();
-          for (const target of targets) {
-            if ((target.pool ?? "text") !== pool) continue;
-            const id = `${target.provider}/${target.model}`;
-            if (!keyIndexes.has(id)) keyIndexes.set(id, new Set());
-            keyIndexes.get(id).add(target.keyIndex);
-          }
-
-          // Checked against what was SENT, not the normalized form. The store
-          // reads a file on disk forgivingly on purpose — a malformed
-          // restriction becomes an unusable one (permitting nothing) and a stale
-          // index becomes one that matches no key — but neither is something an
-          // operator should be able to save from here, so a write that cannot be
-          // honoured is refused rather than stored.
-          const unknown = [];
-          const badKeys = [];
-          for (const raw of body.entries) {
-            const provider = String(raw?.provider ?? "").trim().toLowerCase();
-            const model = String(raw?.model ?? "").trim();
-            // Malformed entries carry no routing intent; normalization drops them.
-            if (!provider || !model) continue;
-            const id = `${provider}/${model}`;
-            const available = keyIndexes.get(id);
-            if (!available) {
-              unknown.push(id);
-              continue;
-            }
-            const problem = keyRestrictionProblem(raw?.keys, available);
-            if (problem) {
-              badKeys.push({
-                provider, model,
-                ...problem,
-                available: [...available].sort((a, b) => a - b)
-              });
-            }
-          }
-
-          if (unknown.length > 0) {
-            return fail(
-              req, res, 400,
-              "entries contains models that are not configured for this pool",
-              "invalid_request",
-              { pool, unknown }
-            );
-          }
-          if (badKeys.length > 0) {
-            return fail(
-              req, res, 400,
-              "entries contains key restrictions that are not valid for this pool",
-              "invalid_request",
-              { pool, keys: badKeys }
-            );
-          }
-
-          entries = normalizeEntries(body.entries);
+        // What the chain can actually be routed to: the models configured, and
+        // the key indexes each of those providers actually has.
+        const keyIndexes = new Map();
+        for (const target of targets) {
+          const id = `${target.provider}/${target.model}`;
+          if (!keyIndexes.has(id)) keyIndexes.set(id, new Set());
+          keyIndexes.get(id).add(target.keyIndex);
         }
+
+        // Checked against what was SENT, not the normalized form. The store
+        // reads a file on disk forgivingly on purpose — a malformed
+        // restriction becomes an unusable one (permitting nothing) and a stale
+        // index becomes one that matches no key — but neither is something an
+        // operator should be able to save from here, so a write that cannot be
+        // honoured is refused rather than stored.
+        const unknown = [];
+        const badKeys = [];
+        for (const raw of body.entries) {
+          const provider = String(raw?.provider ?? "").trim().toLowerCase();
+          const model = String(raw?.model ?? "").trim();
+          // Malformed entries carry no routing intent; normalization drops them.
+          if (!provider || !model) continue;
+          const id = `${provider}/${model}`;
+          const available = keyIndexes.get(id);
+          if (!available) {
+            unknown.push(id);
+            continue;
+          }
+          const problem = keyRestrictionProblem(raw?.keys, available);
+          if (problem) {
+            badKeys.push({
+              provider, model,
+              ...problem,
+              available: [...available].sort((a, b) => a - b)
+            });
+          }
+        }
+
+        if (unknown.length > 0) {
+          return fail(req, res, 400, "entries contains models that are not configured", "invalid_request", { unknown });
+        }
+        if (badKeys.length > 0) {
+          return fail(req, res, 400, "entries contains key restrictions that are not valid", "invalid_request", { keys: badKeys });
+        }
+
+        const entries = normalizeEntries(body.entries);
 
         // Nothing above failed, so this is the only place anything is written.
         // A posted mode is not written — it is derived from the entries — so
-        // only the pool (when one was given) is persisted, in ONE update.
-        // What this pool's chain was, so a save that changes nothing can be
-        // told from one that reorders, adds, removes, enables, disables or
-        // re-restricts a model.
-        const chainBefore = hasPool ? JSON.stringify(fallbackChain.get(pool)) : null;
+        // only the entries are persisted, in ONE update.
+        const chainBefore = JSON.stringify(fallbackChain.get());
         try {
-          if (hasPool) fallbackChain.update({ pool, entries });
+          fallbackChain.update({ entries });
         } catch {
           return fail(req, res, 500, "Could not save the fallback configuration", "server_error");
         }
         // A remembered target is only a preference over the chain that was in
-        // force when it succeeded. Once this pool's chain has really changed it
-        // must not override the new order, so that pool's remembered targets
-        // are dropped — and only that pool's, and only after the write above
-        // succeeded. Health and cooldowns are deliberately left alone.
-        if (hasPool && typeof clearRememberedTargets === "function" && JSON.stringify(fallbackChain.get(pool)) !== chainBefore) {
-          try { clearRememberedTargets(pool); } catch { /* the chain is saved; a stale preference is not worth failing the save */ }
+        // force when it succeeded. Once the chain has really changed it must not
+        // override the new order, so remembered targets are dropped — and only
+        // after the write above succeeded. Health and cooldowns are deliberately
+        // left alone.
+        if (typeof clearRememberedTargets === "function" && JSON.stringify(fallbackChain.get()) !== chainBefore) {
+          try { clearRememberedTargets(); } catch { /* the chain is saved; a stale preference is not worth failing the save */ }
         }
         // The saved configuration is live from this moment. Invalidated only
         // after the writes succeeded, so a rejected save cannot disturb the

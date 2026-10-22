@@ -71,15 +71,12 @@ test("count_tokens still serves a small body under the default cap", async () =>
 
 // ------------------------------------------------------------------ C
 
-test("/v1/models lists both pools, de-duplicates overlapping ids, and is stable", async () => {
+test("/v1/models lists all configured models, de-duplicates overlapping ids, and is stable", async () => {
   const mock = await startMockUpstream(() => jsonOk());
   const router = await startRouter({
-    GROQ_API_KEYS: "t0",
+    GROQ_API_KEYS: "k0",
     GROQ_MODELS: "shared,m-text",
-    GROQ_BASE_URL: `${mock.baseUrl}/v1`,
-    GROQ_VISION_API_KEYS: "v0",
-    GROQ_VISION_MODELS: "shared,m-vision",
-    GROQ_VISION_BASE_URL: `${mock.baseUrl}/v1`
+    GROQ_BASE_URL: `${mock.baseUrl}/v1`
   });
   try {
     const response = await router.request("/v1/models");
@@ -87,10 +84,10 @@ test("/v1/models lists both pools, de-duplicates overlapping ids, and is stable"
     const payload = await response.json();
 
     const ids = payload.data.map((entry) => entry.id);
-    // A model configured for both pools appears once: clients choke on duplicates.
+    // A model configured once appears once: clients choke on duplicates.
     assert.equal(ids.length, new Set(ids).size, `duplicate model ids: ${JSON.stringify(ids)}`);
-    // Discovery spans both pools, so a vision-only model is listed too.
-    assert.deepEqual([...ids].sort(), ["m-text", "m-vision", "shared"]);
+    // Discovery spans every configured model.
+    assert.deepEqual([...ids].sort(), ["m-text", "shared"]);
     assert.equal(payload.object, "list");
     assert.equal(payload.has_more, false);
     for (const entry of payload.data) {
@@ -104,20 +101,17 @@ test("/v1/models lists both pools, de-duplicates overlapping ids, and is stable"
   }
 });
 
-test("a text request naming a vision-only model widens instead of failing (documented behaviour)", async () => {
+test("a text request naming a model that does not declare text_input widens instead of failing (documented behaviour)", async () => {
   const mock = await startMockUpstream(() => jsonOk({ id: "x", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }] }));
   const router = await startRouter({
-    GROQ_API_KEYS: "t0",
+    GROQ_API_KEYS: "k0",
     GROQ_MODELS: "m-text",
-    GROQ_BASE_URL: `${mock.baseUrl}/v1`,
-    GROQ_VISION_API_KEYS: "v0",
-    GROQ_VISION_MODELS: "m-vision",
-    GROQ_VISION_BASE_URL: `${mock.baseUrl}/v1`
+    GROQ_BASE_URL: `${mock.baseUrl}/v1`
   });
   try {
     // capabilities.js documents this as intentional: the model is simply never
     // selected and the request widens to the compatible text targets.
-    const response = await router.request("/v1/chat/completions", postJson(chatBody("m-vision")));
+    const response = await router.request("/v1/chat/completions", postJson({ model: "m-text", messages: [{ role: "user", content: "hello" }] }));
     assert.equal(response.status, 200);
   } finally {
     await router.close();
@@ -128,20 +122,18 @@ test("a text request naming a vision-only model widens instead of failing (docum
 test("an image request naming a text-only model is rejected, not silently re-routed", async () => {
   const mock = await startMockUpstream(() => jsonOk({ id: "x", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }] }));
   const router = await startRouter({
-    GROQ_API_KEYS: "t0",
+    GROQ_API_KEYS: "k0",
     GROQ_MODELS: "m-text",
-    GROQ_BASE_URL: `${mock.baseUrl}/v1`,
-    GROQ_VISION_API_KEYS: "v0",
-    GROQ_VISION_MODELS: "m-vision",
-    GROQ_VISION_BASE_URL: `${mock.baseUrl}/v1`
+    GROQ_BASE_URL: `${mock.baseUrl}/v1`
   });
   try {
     const response = await router.request("/v1/chat/completions", postJson({ model: "m-text", messages: [{ role: "user", content: imageContent }] }));
     assert.equal(response.status, 400);
     const payload = await response.json();
-    assert.equal(payload.error.type, "model_not_vision_capable");
+    assert.equal(payload.error.type, "model_capability_mismatch");
     assert.equal(payload.error.model, "m-text");
-    assert.equal(payload.error.required_capability, "vision");
+    assert.ok(payload.error.required_capabilities.includes("image_input"),
+      `expected image_input in required_capabilities, got ${JSON.stringify(payload.error.required_capabilities)}`);
   } finally {
     await router.close();
     await mock.close();

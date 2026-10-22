@@ -334,7 +334,7 @@ test("OneModelStore: key cooldowns persist, edit by scope and reset with the mod
 test("withOneModel: only a key with a cooldown is paced, a failure cools the key in health, the last good key leads", async () => {
   const pacer = new KeyPacer();
   const health = new HealthRegistry();
-  const targets = [0, 1].map((keyIndex) => ({ provider: "p", model: "m", keyIndex, pool: "text" }));
+  const targets = [0, 1].map((keyIndex) => ({ provider: "p", model: "m", keyIndex }));
   const used = [];
   const invoke = async (target) => {
     used.push(target.keyIndex);
@@ -349,7 +349,7 @@ test("withOneModel: only a key with a cooldown is paced, a failure cools the key
   assert.equal(pacer.isReady(targets[1]), false, "key 1 has one, so it cools after its (successful) call");
   assert.equal(health.isAvailable(targets[0]), false, "the failed key is cooling in the health registry");
   assert.equal(health.get(health.key(targets[0])).status, "failed");
-  assert.equal(pacer.preferredKeyIndex("m", "text"), 1, "the key that answered leads next time");
+  assert.equal(pacer.preferredKeyIndex("m"), 1, "the key that answered leads next time");
 });
 
 test("OneModelStore: a saved single-model file and an old \"text:0\" cooldown still load", () => {
@@ -362,7 +362,7 @@ test("OneModelStore: a saved single-model file and an old \"text:0\" cooldown st
 
 test("withOneModel: model 1 leads, the next model is used when its keys fail or cool, and it is back on model 1 afterwards", async () => {
   const pacer = new KeyPacer();
-  const targets = ["m1", "m2", "m3"].flatMap((model) => [0, 1].map((keyIndex) => ({ provider: "p", model, keyIndex, pool: "text" })));
+  const targets = ["m1", "m2", "m3"].flatMap((model) => [0, 1].map((keyIndex) => ({ provider: "p", model, keyIndex })));
   const used = [];
   let m1Up = false;
   const invoke = async (target) => {
@@ -383,7 +383,7 @@ test("withOneModel: model 1 leads, the next model is used when its keys fail or 
 
 test("withOneModel: a model with every key cooling is passed over, and the request waits only when all models are cooling", async () => {
   const pacer = new KeyPacer();
-  const targets = ["m1", "m2"].flatMap((model) => [0, 1].map((keyIndex) => ({ provider: "p", model, keyIndex, pool: "text" })));
+  const targets = ["m1", "m2"].flatMap((model) => [0, 1].map((keyIndex) => ({ provider: "p", model, keyIndex })));
   const used = [];
   const invoke = async (target) => { used.push(`${target.model}:${target.keyIndex}`); return "ok"; };
   const options = { pacer, models: ["m1", "m2"], cooldownFor: () => 400 };
@@ -399,7 +399,7 @@ test("withOneModel: a model with every key cooling is passed over, and the reque
 });
 
 test("withOneModel: keys that failed and have a cooldown are tried again once it is over; keys without one are not", async () => {
-  const targets = [0, 1].map((keyIndex) => ({ provider: "p", model: "m1", keyIndex, pool: "text" }));
+  const targets = [0, 1].map((keyIndex) => ({ provider: "p", model: "m1", keyIndex }));
   let calls = 0;
   const invoke = async () => { calls += 1; if (calls <= 2) { const e = new Error("boom"); e.status = 500; throw e; } return "ok"; };
   const withCooldown = await withOneModel(targets, invoke, { pacer: new KeyPacer(), models: ["m1"], cooldownFor: () => 150 });

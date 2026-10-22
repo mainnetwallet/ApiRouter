@@ -4,13 +4,7 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { loadConfig, buildTargets, VISION_POOL } from "./config.js";
-import {
-  TEXT_POOL,
-  capabilityErrorMessage,
-  modelPoolIndex,
-  validateModelForPool
-} from "./capabilities.js";
+import { loadConfig, buildTargets } from "./config.js";
 import {
   describeHealth,
   rankTargets,
@@ -47,7 +41,6 @@ import {
   readLegacyConfig,
   remembersSuccess
 } from "./fallback-chain.js";
-import { selectPool } from "./vision.js";
 import {
   bridgeProtocol,
   buildBridgeRequest,
@@ -140,7 +133,7 @@ if (modelConfigRemote) {
 }
 
 // Everything the router holds that must never be echoed back: provider keys
-// (both pools, saved custom endpoints included), Cloudflare account ids (they
+// (saved custom endpoints included), Cloudflare account ids (they
 // sit in the upstream URL path) and the router's own client keys. Registered
 // before any request is served and again whenever a custom endpoint changes.
 function registerSecrets() {
@@ -149,12 +142,12 @@ function registerSecrets() {
     config.customEndpointsRemote?.token,
     config.customEndpointsRemote?.secret,
     config.modelConfigRemote?.token,
-    ...[config.providers, config.visionProviders].flatMap((group) => Object.values(group || {}).flatMap((p) => p?.apiKeys || [])),
-    ...[config.providers, config.visionProviders].flatMap((group) => group?.cloudflare?.accountIds || [])
+    ...Object.values(config.providers || {}).flatMap((p) => p?.apiKeys || []),
+    ...Object.values(config.providers || {}).flatMap((p) => p?.cloudflare?.accountIds || [])
   ]);
 }
 registerSecrets();
-// The Fallback Chain: the single source of truth for routing order, per pool.
+// The Fallback Chain: the single source of truth for routing order.
 // On first run it is seeded from the legacy manual-selection file and priority
 // env vars, so an upgrade keeps the operator's routing; after that the legacy
 // sources are never read again and cannot override what is configured here.
@@ -236,13 +229,7 @@ if (hasLegacyConfig({ manualFile: config.legacyManualSelectionFile, env: process
     + "Configure the fallback chain in the control panel instead."
   );
 }
-const textTargets = buildTargets(config.providers);
-const visionTargets = buildTargets(config.visionProviders, VISION_POOL);
-// Everything the router can reach: health checks, the dashboard and the metrics cover both pools.
-const targets = [...textTargets, ...visionTargets];
-// Which pools each configured model id belongs to. Static for the process
-// lifetime (it comes from the environment), so it is built once.
-let modelCapabilities = modelPoolIndex(config);
+const targets = buildTargets(config.providers);
 const sessions = new SessionStore();
 
 /**
@@ -342,18 +329,14 @@ function authorized(req) {
 // protocol + pool; an explicit header still selects its own isolated session.
 const DEFAULT_SESSION_ID = "default";
 
-function getSession(req, protocol, pool = TEXT_POOL) {
+function getSession(req, protocol) {
   const requested = String(req.headers["x-multi-ai-session-id"] || "").trim();
   const id = requested || DEFAULT_SESSION_ID;
-  // Text and vision keep independent sticky targets. Sharing one entry would
-  // let a vision target's id sit in a text session (and vice versa), which is
-  // harmless today only because the id would not be found in the other pool's
-  // group — an accident, not a design. The pools get their own state.
-  const key = protocol + ":" + pool + ":" + id;
+  const key = protocol + ":" + id;
 
   let state = sessions.get(key);
   if (!state) {
-    state = sessions.set(key, { id, protocol, pool, session: new RouteSession({ ttlMs: config.stickyTtlMs }) });
+    state = sessions.set(key, { id, protocol, session: new RouteSession({ ttlMs: config.stickyTtlMs }) });
   }
 
   return { id, state };
@@ -565,11 +548,10 @@ async function proxy(req, res, protocol, pathname) {
   // preference and never hard-filters a working route.
   const profile = analyzeRequest({ protocol, pathname, body, stream: wantsStream });
 
-  // The pool is decided from the request body before anything else, because it
-  // governs the session, the candidate targets and the capability rules for the
-  // whole request. An image request is served only by the vision pool (own
-  // keys / base URLs / models); every other request only by the text pool.
-  const { pool, targets: poolTargets } = selectPool(body, { textTargets, visionTargets });
+  // Routing is capability-based: every configured target is a candidate, and
+  // the request's required capabilities decide which ones are eligible.
+  // There is no separate text/vision pool — a model that declares image_input
+  // can serve image requests, and one that does not cannot.
 
   // A pinned request is an explicit one-off (the Playground testing one key).
   // It already ignores the Models page switch and cooldowns, so it must ignore
@@ -586,7 +568,7 @@ async function proxy(req, res, protocol, pathname) {
   // offers that wire format, the model is reached through it alone. A hint the
   // provider does not offer is ignored (the row warns about it) rather than
   // forcing a call the provider cannot serve.
-  const configuredPoolTargets = poolTargets.map((target) => {
+  const configuredTargets = targets.map((target) => {
     const configured = modelIndex.get(`${target.provider}/${target.model}`)?.protocol;
     const protocols = target.protocols ?? [];
     return configured && protocols.length > 1 && protocols.includes(configured)
@@ -596,15 +578,15 @@ async function proxy(req, res, protocol, pathname) {
   // Models switched off in the Model Configurator are removed first: "off" is
   // not a capability verdict, and reporting it as "cannot serve this request"
   // would hide the real reason from the operator.
-  const enabledPoolTargets = pinnedRequest
-    ? configuredPoolTargets
-    : configuredPoolTargets.filter((target) => !modelConfig.explicitlyDisabled(target.provider, target.model));
+  const enabledTargets = pinnedRequest
+    ? configuredTargets
+    : configuredTargets.filter((target) => !modelConfig.explicitlyDisabled(target.provider, target.model));
   const capabilityLookup = (target) => {
     const entry = modelIndex.get(`${target.provider}/${target.model}`);
     return pinnedRequest && entry ? { ...entry, enabled: true } : entry;
   };
-  const { eligible: capablePoolTargets, exclusions } = filterTargetsByRequirements(
-    enabledPoolTargets,
+  const { eligible: capableTargets, exclusions } = filterTargetsByRequirements(
+    enabledTargets,
     profile.required,
     capabilityLookup
   );
@@ -612,7 +594,7 @@ async function proxy(req, res, protocol, pathname) {
   // never echoed with payload or credential detail.
   const excludedCandidates = exclusions.slice(0, 20);
 
-  const sessionInfo = getSession(req, protocol, pool);
+  const sessionInfo = getSession(req, protocol);
 
   // Target selection is shared with the routing preview, so what the Router
   // page shows is the decision this function actually makes.
@@ -641,7 +623,6 @@ async function proxy(req, res, protocol, pathname) {
     id: sessionInfo.id,
     receivedAt,
     protocol,
-    pool,
     requestedModel,
     // Stored with the request so the live view can explain a route that was
     // never taken without keeping any part of the payload.
@@ -652,57 +633,21 @@ async function proxy(req, res, protocol, pathname) {
   if (pin.error) {
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: "invalid_request_error", errorMessage: pin.error, attempts
     });
     return json(res, 400, { error: { message: clientMessage(pin.error), type: "invalid_request_error" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  // Nothing in this pool at all. Reported before capability validation, because
-  // "no vision provider is configured" is the more useful answer than "that
-  // model is not a vision model" when both are true.
-  if (pool === VISION_POOL && poolTargets.length === 0) {
-    const message = "No vision provider is configured";
-    recordRequest({
-      pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
-      outcome: "failed", errorType: "no_vision_route", errorMessage: message, attempts
-    });
-    return json(res, 503, { error: { message, type: "no_vision_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
-  }
-
-  // A model the router only knows as configured for the *other* pool is a
-  // capability mismatch: reject it clearly instead of silently routing the
-  // request to a different model than the client asked for. A model the router
-  // has never heard of is not a mismatch and keeps the existing
-  // widen-to-all-compatible-targets behaviour.
-  const capability = validateModelForPool(modelCapabilities, requestedModel, pool);
-  if (capability) {
-    const message = capabilityErrorMessage(capability);
-    recordRequest({
-      pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
-      outcome: "failed", errorType: capability.type, errorMessage: message, attempts
-    });
-    return json(res, 400, {
-      error: {
-        message,
-        type: capability.type,
-        model: capability.model,
-        required_capability: capability.required_capability
-      }
-    }, { "x-multi-ai-session-id": sessionInfo.id });
-  }
-
-  // The same rule for the unified configuration: a model the operator has
-  // declared is rejected when none of its provider entries can DECLARE and
-  // EXECUTE what this payload needs. Never silently answer with another model.
+  // A model the unified configuration knows is rejected when none of its
+  // provider entries can DECLARE and EXECUTE what this payload needs. Never
+  // silently answer with another model.
   const modelRejection = validateRequestedModel(modelIndex, requestedModel, profile.required);
   if (modelRejection) {
     const message = requestedModelCapabilityMessage(modelRejection);
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 400,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 400,
       outcome: "failed", errorType: "model_capability_mismatch", errorMessage: message, attempts
     });
     return json(res, 400, {
@@ -715,14 +660,14 @@ async function proxy(req, res, protocol, pathname) {
     }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  // Every model in the pool is switched off in the Model Configurator. This is
-  // not a capability failure: the operator explicitly disabled them, and that
-  // is the reason the client is told.
-  if (!pinnedRequest && poolTargets.length > 0 && enabledPoolTargets.length === 0) {
-    const message = `Every model in the ${pool} pool is switched off in the Model Configurator`;
+  // Every model is switched off in the Model Configurator. This is not a
+  // capability failure: the operator explicitly disabled them, and that is
+  // the reason the client is told.
+  if (!pinnedRequest && enabledTargets.length > 0 && capableTargets.length === 0) {
+    const message = "Every model is switched off in the Model Configurator";
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,
       outcome: "failed", errorType: "models_disabled", errorMessage: message, attempts
     });
     return json(res, 503, { error: { message, type: "models_disabled" } }, { "x-multi-ai-session-id": sessionInfo.id });
@@ -731,11 +676,11 @@ async function proxy(req, res, protocol, pathname) {
   // Targets exist, but none declares (and can execute) what the payload needs.
   // Answering 503 here — instead of sending the request to a model that will
   // reject or mangle it — is the whole point of the capability layer.
-  if (enabledPoolTargets.length > 0 && capablePoolTargets.length === 0) {
-    const message = noCapableRouteMessage(profile.required, pool);
+  if (enabledTargets.length > 0 && capableTargets.length === 0) {
+    const message = noCapableRouteMessage(profile.required);
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,
       outcome: "failed", errorType: "no_capable_route", errorMessage: message, attempts
     });
     return json(res, 503, {
@@ -748,13 +693,13 @@ async function proxy(req, res, protocol, pathname) {
     }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  const pinned = pinTargets(capablePoolTargets, pin, requestedModel);
+  const pinned = pinTargets(capableTargets, pin, requestedModel);
   if (pinned.pinned && pinned.targets.length === 0) {
     const where = `${pinned.provider}${pinned.keyIndex !== null ? ` key ${pinned.keyIndex}` : ""}${pinned.model ? ` / ${pinned.model}` : ""}`;
     const message = `No configured target matches the pinned selection (${sanitizeMessage(where)})`;
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 404,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 404,
       outcome: "failed", errorType: "no_route", errorMessage: message, attempts
     });
     return json(res, 404, { error: { message, type: "no_route" } }, { "x-multi-ai-session-id": sessionInfo.id });
@@ -796,13 +741,13 @@ async function proxy(req, res, protocol, pathname) {
   // automatic fallback. Keep fail-closed for the other case — a selection whose
   // models are unreachable, switched off, or restricted to keys that do not
   // exist — by checking reachability WITHOUT the capability filter first.
-  const savedSelection = activeEntries(fallbackChain.get(pool));
-  let planChain = fallbackChain.get(pool);
+  const savedSelection = activeEntries(fallbackChain.get());
+  let planChain = fallbackChain.get();
   if (!pinned.pinned && !oneModel && savedSelection.length > 0) {
     const capableIds = new Set(selection.selected.map((target) => `${target.provider}/${target.model}`));
     const anyCapable = savedSelection.some((entry) => capableIds.has(`${entry.provider}/${entry.model}`));
     if (!anyCapable) {
-      const structuralTargets = enabledPoolTargets.filter(
+      const structuralTargets = enabledTargets.filter(
         (target) => !modelSwitch.isDisabled(target.provider, target.model)
       );
       const structuralPinned = pinTargets(structuralTargets, pin, requestedModel);
@@ -823,20 +768,17 @@ async function proxy(req, res, protocol, pathname) {
       chain: planChain,
       pinned: pinned.pinned,
       health: pinned.pinned ? null : healthRegistry,
-      cacheKey: `pool:${pool}`,
+      cacheKey: "unified",
       stickyTargetId: pinned.pinned ? null : sessionInfo.state.session.validTargetId()
     });
 
   if (selection.compatible.length === 0) {
-    const noRouteMessage = pool === VISION_POOL
-      ? "No configured vision target supports this client protocol"
-      : "No configured provider targets support this client protocol";
+    const noRouteMessage = "No configured provider targets support this client protocol";
     recordRequest({
       pendingSeq: liveSeq,
       id: sessionInfo.id,
       receivedAt,
       protocol,
-      pool,
       requestedModel,
       httpStatus: 503,
       outcome: "failed",
@@ -851,36 +793,34 @@ async function proxy(req, res, protocol, pathname) {
     const offMessage = "Every model that could serve this request is switched off in the Control Panel";
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,
       outcome: "failed", errorType: "models_disabled", errorMessage: offMessage, attempts
     });
     return json(res, 503, { error: { message: offMessage, type: "models_disabled" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
   // One Provider Fallback is on but none of the chosen provider's models can
-  // serve THIS request (no key in this pool, or none speaks this client's
-  // protocol). The mode never falls back to another provider, so say so plainly.
+  // serve THIS request. The mode never falls back to another provider, so say so plainly.
   if (oneModel && oneModelTargets.length === 0) {
     const label = sanitizeMessage(`${oneModel.provider} (${oneModel.models.join(", ")})`);
     const allOff = oneModel.models.every((model) => modelSwitch.isDisabled(oneModel.provider, model));
     const oneMessage = allOff
       ? `One Provider Fallback is on and every chosen model of ${label} is switched off in the Control Panel`
-      : `One Provider Fallback is on and ${label} cannot serve this request (no key for the ${pool} pool or this protocol)`;
+      : `One Provider Fallback is on and ${label} cannot serve this request (none speaks this client protocol)`;
     recordRequest({
       pendingSeq: liveSeq,
-      id: sessionInfo.id, receivedAt, protocol, pool, requestedModel, httpStatus: 503,
+      id: sessionInfo.id, receivedAt, protocol, requestedModel, httpStatus: 503,
       outcome: "failed", errorType: "one_model_unavailable", errorMessage: oneMessage, attempts
     });
     return json(res, 503, { error: { message: oneMessage, type: "one_model_unavailable" } }, { "x-multi-ai-session-id": sessionInfo.id });
   }
 
-  // A Manual Model Selection is saved for this pool but nothing in it can serve
-  // this request. The plan is deliberately empty: reaching for a model the
-  // selection does not name, or a key an entry excludes, would be the silent
-  // fallback the selection exists to prevent. Say so plainly instead of
-  // reporting a generic outage.
+  // A Manual Model Selection is saved but nothing in it can serve this request.
+  // The plan is deliberately empty: reaching for a model the selection does not
+  // name, or a key an entry excludes, would be the silent fallback the selection
+  // exists to prevent. Say so plainly instead of reporting a generic outage.
   if (routePlan.failClosed) {
-    const chainMessage = `The saved ${pool} Manual Model Selection has no usable target for this request `
+    const chainMessage = `The saved Manual Model Selection has no usable target for this request `
       + `(${routePlan.entries} entr${routePlan.entries === 1 ? "y" : "ies"} saved, none reachable for this protocol). `
       + (selection.selected.length > selectable.length ? " Some models are switched off in the Control Panel. " : "")
       + "Clear the selection to use the automatic order instead.";
@@ -889,7 +829,6 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionInfo.id,
       receivedAt,
       protocol,
-      pool,
       requestedModel,
       httpStatus: 503,
       outcome: "failed",
@@ -1225,7 +1164,6 @@ async function proxy(req, res, protocol, pathname) {
         id: sessionId,
         receivedAt,
         protocol,
-        pool,
         requestedModel,
         autoRouted: !selection.modelMatched,
         streamed: wantsStream,
@@ -1302,7 +1240,6 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionId,
       receivedAt,
       protocol,
-      pool,
       requestedModel,
       autoRouted: !selection.modelMatched,
       streamed: !buffered && Boolean(result.upstream.body),
@@ -1363,7 +1300,6 @@ async function proxy(req, res, protocol, pathname) {
       id: sessionInfo.id,
       receivedAt,
       protocol,
-      pool,
       requestedModel,
       autoRouted: !selection.modelMatched,
       attempts,
@@ -1400,20 +1336,13 @@ const customPlayground = createCustomPlayground({
 // monitor, the router and the control panel all read these same arrays), and
 // the new targets are probed straight away.
 customEndpoints.onChange((endpoints) => {
-  for (const list of [textTargets, visionTargets, targets]) {
-    for (let index = list.length - 1; index >= 0; index -= 1) {
-      if (isCustomProviderId(list[index].provider)) list.splice(index, 1);
-    }
+  for (let index = targets.length - 1; index >= 0; index -= 1) {
+    if (isCustomProviderId(targets[index].provider)) targets.splice(index, 1);
   }
   applyCustomEndpoints(config, endpoints);
   const onlyCustom = (group) => Object.fromEntries(Object.entries(group ?? {}).filter(([id]) => isCustomProviderId(id)));
-  const freshText = buildTargets(onlyCustom(config.providers));
-  const freshVision = buildTargets(onlyCustom(config.visionProviders), VISION_POOL);
-  const fresh = [...freshText, ...freshVision];
-  textTargets.push(...freshText);
-  visionTargets.push(...freshVision);
+  const fresh = buildTargets(onlyCustom(config.providers));
   targets.push(...fresh);
-  modelCapabilities = modelPoolIndex(config);
   monitor.targetCount = targets.length;
   registerSecrets();
   resetAutomaticOrderCache();
@@ -1448,33 +1377,28 @@ const handleApi = createApi({
     resetAutomaticOrderCache();
     return { clearedSessions: cleared, sessions: sessions.size };
   },
-  // A chain edit invalidates what was remembered for THAT pool only: a text
-  // edit never disturbs the vision pool's preference, or the reverse. Sessions
-  // are kept (only their remembered target goes), and health is not touched.
-  clearRememberedTargets: (pool) => {
+  // A chain edit invalidates what was remembered: sessions are kept (only their
+  // remembered target goes), and health is not touched.
+  clearRememberedTargets: () => {
     let cleared = 0;
     for (const entry of sessions.values()) {
-      if ((entry?.pool ?? TEXT_POOL) !== pool) continue;
       if (entry?.session?.targetId) cleared += 1;
       entry?.session?.clear?.();
     }
-    return { pool, clearedSessions: cleared };
+    return { clearedSessions: cleared };
   },
-  // What is remembered right now, per pool. Read as the router reads it, so an
-  // expired target is reported as absent rather than as still preferred.
+  // What is remembered right now. Read as the router reads it, so an expired
+  // target is reported as absent rather than as still preferred.
   describeFallbackState: () => {
     const remembered = [];
     for (const entry of sessions.values()) {
       const targetId = entry?.session?.validTargetId?.() ?? null;
       if (!targetId) continue;
-      remembered.push({ sessionId: entry.id, protocol: entry.protocol, pool: entry.pool, targetId });
+      remembered.push({ sessionId: entry.id, protocol: entry.protocol, targetId });
     }
     return {
       sessions: sessions.size,
-      remembered: {
-        text: remembered.filter((item) => (item.pool ?? "text") === "text"),
-        vision: remembered.filter((item) => item.pool === "vision")
-      }
+      remembered
     };
   },
   refreshHealth: () => refreshAllHealth(targets, trackedCheckTargetHealth)
@@ -1543,43 +1467,27 @@ async function handleRequest(req, res) {
       !modelSwitch.isDisabled(target.provider, target.model)
       && !modelConfig.explicitlyDisabled(target.provider, target.model));
     const ranked = routeOrderByPool(routable, {
-      chains: fallbackChain.snapshot(),
+      chain: fallbackChain.get(),
       health: healthRegistry,
       isEligible: (target) => healthRegistry.isAvailable(target)
-    }).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, pool: target.pool ?? "text", protocols: target.protocols }));
+    }).map((target, index) => ({ rank: index + 1, provider: target.provider, model: target.model, keyIndex: target.keyIndex, protocols: target.protocols }));
     const health = describeHealth(targets);
-    const inPool = (pool) => health.filter((entry) => entry.pool === pool);
     return json(res, 200, {
       ok: true,
       service: "apirouter",
       gateway: gateway.snapshot(),
       providers: [...PROVIDERS, ...Object.keys(config.providers).filter(isCustomProviderId)],
       configuredTargets: targets.length,
-      configuredTextTargets: textTargets.length,
-      configuredVisionTargets: visionTargets.length,
       health,
-      // Per-pool counts, because the two pools fail independently.
-      pools: {
-        text: { targets: textTargets.length, health: inPool("text") },
-        vision: { targets: visionTargets.length, health: inPool("vision") }
-      },
       rankedTargets: ranked,
-      // Which ordering the router is actually using right now, and how many
-      // entries each pool's chain holds. A chain of zero entries in every pool
-      // means the automatic health-based order is in force.
+      // Which ordering the router is actually using right now. A chain of zero
+      // entries means the automatic health-based order is in force.
       fallback: {
         mode: fallbackChain.mode,
         remembersSuccess: remembersSuccess(fallbackChain.mode),
-        chains: {
-          text: fallbackChain.get("text").length,
-          vision: fallbackChain.get("vision").length
-        },
-        // Per pool: `rankedTargets` going quiet for a pool is ambiguous on its
-        // own, because an unusable chain and an unavailable provider look the
-        // same there. This says which it is. `failClosed` means every request
-        // for that pool will fail until the chain is fixed or cleared.
-        pools: chainStatusByPool(routable, {
-          chains: fallbackChain.snapshot(),
+        chains: fallbackChain.get().length,
+        status: chainStatusByPool(routable, {
+          chain: fallbackChain.get(),
           health: healthRegistry
         })
       },

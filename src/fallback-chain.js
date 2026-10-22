@@ -2,11 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * The Fallback Chain: the single, persisted source of truth for routing order,
- * per pool (text / vision).
+ * The Fallback Chain: the single, persisted source of truth for routing order.
  *
- *   text   [ gemini/m2, groq/m3, gemini/m1 ]
- *   vision [ gemini/v2, openrouter/v1 ]
+ *   [ gemini/m2, groq/m3, gemini/m1 ]
  *
  * Each entry is one provider/model GROUP. `keys` narrows it to specific API
  * keys (`null` = every configured key of that provider/model, tried in key
@@ -20,13 +18,11 @@ import path from "node:path";
  * The file holds ids and flags, never credentials.
  */
 
-export const FALLBACK_POOLS = Object.freeze(["text", "vision"]);
-
 /**
  * There is no mode switch any more: the Manual Model Selection list IS the
  * configuration, and the mode is derived from it.
  *
- *   manual  a Manual Model Selection is saved for the pool: those models are
+ *   manual  a Manual Model Selection is saved: those models are
  *           tried in their saved order, then every model NOT selected, by health
  *   auto    the selection is empty: the automatic health/latency order applies
  *
@@ -41,19 +37,19 @@ export const FALLBACK_MODES = Object.freeze({
 export const DEFAULT_MODE = FALLBACK_MODES.AUTO;
 
 /**
- * The mode a set of per-pool selections derives to — the single definition of
+ * The mode a set of selections derives to — the single definition of
  * the rule that the store's `mode` getter and `persist()` both read.
  *
  * It takes the selections as an argument rather than reading the store's own
  * state, so it can be applied to the data about to be written. Deriving from
- * `this.byPool` instead would be wrong inside `update()`, where the new
+ * `this.entries` instead would be wrong inside `update()`, where the new
  * selection has not been adopted yet: the file would then record the *previous*
  * mode next to the *new* entries, and a reader that trusts the field (an older
  * build, or a person reading the file) would be told the opposite of what the
  * selection means.
  */
-function derivedMode(byPool) {
-  return FALLBACK_POOLS.some((pool) => (byPool?.[pool] ?? []).length > 0)
+function derivedMode(entries) {
+  return (entries?.length ?? 0) > 0
     ? FALLBACK_MODES.MANUAL
     : FALLBACK_MODES.AUTO;
 }
@@ -235,14 +231,14 @@ const FILE_VERSION = 2;
 export class FallbackChainStore {
   /**
    * @param file       path to persist to ("" disables persistence, as in tests)
-   * @param migrate    optional () => ({ text, vision, mode }) used ONCE, when no
+   * @param migrate    optional () => ({ entries, mode }) used ONCE, when no
    *                   file exists yet, to seed from the legacy configuration.
    *                   Never applied over an existing file, so a saved chain is
    *                   never silently overwritten by the old format.
    */
   constructor({ file = null, migrate = null } = {}) {
     this.file = file ? path.resolve(file) : null;
-    this.byPool = { text: [], vision: [] };
+    this.entries = [];
     this.migrated = false;
     this.load(migrate);
   }
@@ -250,14 +246,14 @@ export class FallbackChainStore {
   /**
    * The mode in force, DERIVED from the saved selection rather than stored.
    *
-   * A pool with a saved Manual Model Selection is walked in `manual` mode; a
-   * pool with none is walked by the automatic health/latency order. Because the
+   * A saved Manual Model Selection is walked in `manual` mode; an empty
+   * selection is walked by the automatic health/latency order. Because the
    * mode is a property of the configuration, an edit to the list takes effect
    * immediately and cannot drift from what is actually walked, and there is no
    * separate switch left to fall out of sync with it.
    */
   get mode() {
-    return derivedMode(this.byPool);
+    return derivedMode(this.entries);
   }
 
   load(migrate = null) {
@@ -295,12 +291,9 @@ export class FallbackChainStore {
       return false;
     }
     if (!legacy) return false;
-    const next = {
-      text: normalizeEntries(legacy.text),
-      vision: normalizeEntries(legacy.vision)
-    };
-    if (next.text.length === 0 && next.vision.length === 0) return false;
-    this.apply(next);
+    const next = normalizeEntries(legacy.entries);
+    if (next.length === 0) return false;
+    this.apply({ entries: next });
     this.migrated = true;
     return true;
   }
@@ -310,26 +303,26 @@ export class FallbackChainStore {
     // A stored `mode` from an older file is read but not adopted: the mode is
     // derived from the entries below, so the file cannot force a mode the
     // selection does not support.
-    for (const pool of FALLBACK_POOLS) this.byPool[pool] = normalizeEntries(data?.[pool]);
+    this.entries = normalizeEntries(data?.entries);
   }
 
-  get(pool) {
+  get() {
     // Copy the array so a caller cannot mutate stored state. `keys` is either an
     // array — including the empty, unusable restriction — or the unrestricted
     // `null`, and those two must stay distinguishable, so the test is on the
     // type rather than on truthiness.
-    return (this.byPool[pool] ?? []).map((entry) => ({
+    return this.entries.map((entry) => ({
       ...entry,
       keys: Array.isArray(entry.keys) ? [...entry.keys] : null
     }));
   }
 
   snapshot() {
-    return { mode: this.mode, text: this.get("text"), vision: this.get("vision") };
+    return { mode: this.mode, entries: this.get() };
   }
 
   /**
-   * Applies one pool's chain as ONE persisted update.
+   * Applies the chain as ONE persisted update.
    *
    * The mode used to be written alongside the chain, so a request carrying both
    * could persist the mode and then fail on the chain — a half-applied
@@ -340,29 +333,31 @@ export class FallbackChainStore {
    * the file and the running configuration as they were.
    *
    * `mode` is accepted and IGNORED so a client that still posts a mode (or a
-   * retired one) keeps working; the mode follows from whether the pool has any
-   * saved entries. `pool: null` leaves both chains alone.
+   * retired one) keeps working; the mode follows from whether there are any
+   * saved entries.
    */
-  update({ mode, pool = null, entries = null } = {}) {
+  update({ mode, entries = null } = {}) {
     void mode;
-    if (pool !== null && !FALLBACK_POOLS.includes(pool)) throw new Error(`unknown pool "${pool}"`);
-    const nextByPool = pool === null ? this.byPool : { ...this.byPool, [pool]: normalizeEntries(entries) };
+    // A mode-only update changes nothing: the mode is derived from the entries,
+    // so there is nothing to persist and no entries to clear.
+    if (entries === null) return this.snapshot();
+    const nextEntries = normalizeEntries(entries);
 
     // Durable state first: nothing in memory moves unless the write succeeds.
-    this.persist(nextByPool);
+    this.persist(nextEntries);
 
-    this.byPool = nextByPool;
+    this.entries = nextEntries;
     return this.snapshot();
   }
 
-  /** Replaces one pool's chain (an empty array clears it) and persists atomically. */
-  set(pool, entries) {
-    this.update({ pool, entries });
-    return this.get(pool);
+  /** Replaces the chain (an empty array clears it) and persists atomically. */
+  set(entries) {
+    this.update({ entries });
+    return this.get();
   }
 
-  clear(pool) {
-    return this.set(pool, []);
+  clear() {
+    return this.set([]);
   }
 
   /** Retained for callers written against the old switch; the mode is derived. */
@@ -376,20 +371,18 @@ export class FallbackChainStore {
    *
    * The derived mode is still written, so a file produced here is readable by an
    * older build without it having to infer the mode from the entries. It is
-   * derived from the entries being written — never from `this.byPool`, which
+   * derived from the entries being written — never from `this.entries`, which
    * `update()` has deliberately not adopted yet.
    */
-  persist(data = this.byPool) {
+  persist(entries = this.entries) {
     if (!this.file) return;
     // Normalize once, and derive the mode from exactly these entries, so the
     // file can never describe a mode its own selection contradicts.
-    const text = normalizeEntries(data.text);
-    const vision = normalizeEntries(data.vision);
+    const normalized = normalizeEntries(entries);
     const payload = {
       version: FILE_VERSION,
-      mode: derivedMode({ text, vision }),
-      text,
-      vision
+      mode: derivedMode(normalized),
+      entries: normalized
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
@@ -404,22 +397,27 @@ export class FallbackChainStore {
  *   MANUAL_SELECTION_FILE (data/manual-selection.json)  operator's model order
  *   TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS       priority entries
  *
- * Manual entries lead, then any priority entry not already present, per pool.
- * The seeded mode is `manual`, which is what the legacy manual-selection
- * behaviour actually was (the last good target of the selection led the next
- * request, then the rest of the selection) — and it is also what the seed's
- * non-empty entries derive to, so an upgrade preserves routing rather than
- * changing it.
+ * Manual entries lead, then any priority entry not already present. Both the
+ * legacy text and vision entries are merged into one unified chain, preserving
+ * order where possible and removing duplicates. The seeded mode is `manual`,
+ * which is what the legacy manual-selection behaviour actually was (the last
+ * good target of the selection led the next request, then the rest of the
+ * selection) — and it is also what the seed's non-empty entries derive to, so
+ * an upgrade preserves routing rather than changing it.
  *
  * Neither the old file nor the env vars are read again once a chain is saved.
  */
 export function readLegacyConfig({ manualFile = null, env = {} } = {}) {
-  const byPool = { text: [], vision: [] };
+  const allEntries = [];
 
   if (manualFile) {
     try {
       const parsed = JSON.parse(fs.readFileSync(path.resolve(manualFile), "utf8"));
-      for (const pool of FALLBACK_POOLS) byPool[pool].push(...normalizeEntries(parsed?.[pool]));
+      // Legacy format: { text: [...], vision: [...] }
+      // Merge both pools into one chain, text first then vision.
+      for (const pool of ["text", "vision"]) {
+        allEntries.push(...normalizeEntries(parsed?.[pool]));
+      }
     } catch (error) {
       if (error?.code !== "ENOENT") {
         console.warn(`fallback chain: could not read legacy ${path.basename(String(manualFile))}`);
@@ -427,16 +425,15 @@ export function readLegacyConfig({ manualFile = null, env = {} } = {}) {
     }
   }
 
-  for (const pool of FALLBACK_POOLS) {
-    const raw = pool === "vision" ? env.VISION_PRIORITY_MODELS : env.TEXT_PRIORITY_MODELS;
-    byPool[pool].push(...parseLegacyPriority(raw));
-  }
+  // Legacy priority env vars: TEXT_PRIORITY_MODELS and VISION_PRIORITY_MODELS
+  const textPriority = parseLegacyPriority(env.TEXT_PRIORITY_MODELS);
+  const visionPriority = parseLegacyPriority(env.VISION_PRIORITY_MODELS);
+  allEntries.push(...textPriority, ...visionPriority);
 
   const dedupe = (entries) => normalizeEntries(entries);
   return {
     mode: FALLBACK_MODES.MANUAL,
-    text: dedupe(byPool.text),
-    vision: dedupe(byPool.vision)
+    entries: dedupe(allEntries)
   };
 }
 
@@ -463,7 +460,8 @@ export function hasLegacyConfig({ manualFile = null, env = {} } = {}) {
   if (!manualFile) return false;
   try {
     const parsed = JSON.parse(fs.readFileSync(path.resolve(manualFile), "utf8"));
-    return FALLBACK_POOLS.some((pool) => normalizeEntries(parsed?.[pool]).length > 0);
+    const all = [...normalizeEntries(parsed?.text), ...normalizeEntries(parsed?.vision)];
+    return all.length > 0;
   } catch {
     return false;
   }

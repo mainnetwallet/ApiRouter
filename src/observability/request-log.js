@@ -20,14 +20,6 @@ export const ATTEMPT_STATES = Object.freeze({
   FAILED: "failed"
 });
 
-/** The routing pool a request was served from. Anything unrecognised is text. */
-export const POOLS = Object.freeze({
-  TEXT: "text",
-  VISION: "vision"
-});
-
-const normalizePool = (value) => (value === POOLS.VISION ? POOLS.VISION : POOLS.TEXT);
-
 /**
  * In-flight requests are kept apart from completed ones (`entries`), so
  * analytics, the model catalogue and the Requests page never see a request

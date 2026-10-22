@@ -623,10 +623,9 @@ export class ModelConfigStore {
       const stored = this.overrideFor(group.provider, group.model);
       const pools = [...group.pools];
       const protocols = [...group.protocols];
-      // Suffix for inference: a model that serves the vision pool has been
-      // explicitly configured to accept images, otherwise it is a text model.
-      const inferredPool = pools.includes("vision") ? "vision" : "text";
-      const capabilities = stored ? [...stored.capabilities] : inferCapabilities({ pool: inferredPool, protocols });
+      // Capabilities come from the stored declaration, or default to
+      // text_input + text_output for models nobody has declared yet.
+      const capabilities = stored ? [...stored.capabilities] : inferCapabilities({ protocols });
       const executable = protocols.length > 0
         ? capabilities.filter((capability) => !unsupportedCapabilities([capability], protocols).length)
         : [];
@@ -640,9 +639,6 @@ export class ModelConfigStore {
       }
       if (stored && unsupported.length > 0) {
         warnings.push(`No adapter can execute: ${unsupported.join(", ")}.`);
-      }
-      if (stored && stored.capabilities.includes("image_input") && !pools.includes("vision")) {
-        warnings.push("Image input is declared, but this model is only in the text pool; image requests are routed to vision-pool models.");
       }
       if (stored?.protocol && protocols.length > 0 && !protocols.includes(stored.protocol)) {
         warnings.push(`The provider does not offer the configured ${stored.protocol} protocol.`);

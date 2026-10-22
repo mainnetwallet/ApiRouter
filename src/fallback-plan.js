@@ -582,71 +582,55 @@ export function effectiveOrder(steps, isEligible = () => true) {
 }
 
 /**
- * The deterministic order for a mixed target list, one pool at a time, as the
- * router would walk it for a request that names no model and carries no
- * session. Used by the health endpoints so `ranked` is the real route order.
+ * The deterministic order for a mixed target list, as the router would walk it
+ * for a request that names no model and carries no session. Used by the health
+ * endpoints so `ranked` is the real route order.
  */
 export function routeOrderByPool(targets, {
-  chains = {},
+  chain = [],
   health = null,
   isEligible = () => true,
   now = Date.now()
 } = {}) {
   const all = Array.isArray(targets) ? targets : [];
-  const out = [];
-  for (const pool of ["text", "vision"]) {
-    const inPool = all.filter((target) => (target.pool ?? "text") === pool);
-    const { steps } = buildRoutePlan({
-      targets: inPool,
-      chain: chains?.[pool] ?? [],
-      health,
-      now,
-      cacheKey: `pool:${pool}`
-    });
-    out.push(...effectiveOrder(steps, isEligible).map((step) => step.target));
-  }
-  return out;
+  const { steps } = buildRoutePlan({
+    targets: all,
+    chain,
+    health,
+    now,
+    cacheKey: "unified"
+  });
+  return effectiveOrder(steps, isEligible).map((step) => step.target);
 }
 
 /**
- * Per-pool routing status, for the health surface.
+ * Routing status for the unified chain.
  *
- * `ranked` alone cannot say WHY a pool is empty: an unusable Fallback Chain and
- * a provider that is simply down both leave the ranked list without that pool's
- * targets. Monitoring needs to tell them apart — one is a configuration fault
- * that every request for that pool will fail on, the other is ordinary weather.
+ * `ranked` alone cannot say WHY the chain is empty: an unusable Fallback Chain
+ * and a provider that is simply down both leave the ranked list without targets.
+ * Monitoring needs to tell them apart — one is a configuration fault that every
+ * request will fail on, the other is ordinary weather.
  *
  * Derived from the same `buildRoutePlan` the proxy calls, so this can never
  * describe a state the router would not actually be in.
  */
 export function chainStatusByPool(targets, {
-  chains = {},
+  chain = [],
   health = null,
   now = Date.now()
 } = {}) {
   const all = Array.isArray(targets) ? targets : [];
-  const out = {};
-  for (const pool of ["text", "vision"]) {
-    const inPool = all.filter((target) => (target.pool ?? "text") === pool);
-    const plan = buildRoutePlan({
-      targets: inPool,
-      chain: chains?.[pool] ?? [],
-      health,
-      now,
-      cacheKey: `status:${pool}`
-    });
-    out[pool] = {
-      // Saved entries that permit nothing: requests for this pool fail rather
-      // than route to a model outside the selection. This is the signal that
-      // separates a configuration fault from a provider being down.
-      failClosed: plan.failClosed,
-      // Saved entries, and how many of them name a target this pool can reach.
-      // Both are about the SELECTION, not about the pool: an empty selection
-      // reports 0/0 while still routing every target automatically.
-      entries: plan.entries,
-      resolved: plan.configured,
-      source: plan.source
-    };
-  }
-  return out;
+  const plan = buildRoutePlan({
+    targets: all,
+    chain,
+    health,
+    now,
+    cacheKey: "status:unified"
+  });
+  return {
+    failClosed: plan.failClosed,
+    entries: plan.entries,
+    resolved: plan.configured,
+    source: plan.source
+  };
 }

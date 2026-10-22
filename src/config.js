@@ -62,9 +62,13 @@ export function isProviderConfigured(provider) {
   return Boolean(provider && provider.apiKeys.length > 0 && provider.models.length > 0 && provider.baseUrl);
 }
 
-export const VISION_POOL = "vision";
-
-export function buildTargets(providers, pool = "text") {
+/**
+ * Every reachable `provider + model + keyIndex` combination, from the ONE
+ * provider configuration. There is no text/vision split: a model is simply a
+ * model, and whether it can serve a request is decided by its declared
+ * capabilities in the Model Configurator.
+ */
+export function buildTargets(providers) {
   const targets = [];
   for (const [providerId, provider] of Object.entries(providers)) {
     if (!isProviderConfigured(provider)) continue;
@@ -73,7 +77,6 @@ export function buildTargets(providers, pool = "text") {
         const baseUrl = Array.isArray(provider.baseUrls) ? provider.baseUrls[keyIndex] : provider.baseUrl;
         if (!baseUrl) continue;
         targets.push({
-          ...(pool === VISION_POOL ? { id: `vision:${providerId}:${model}:key-${keyIndex}`, pool: VISION_POOL } : {}),
           provider: providerId,
           model,
           baseUrl,
@@ -88,10 +91,10 @@ export function buildTargets(providers, pool = "text") {
   return targets;
 }
 
-export function readProviders(env, { vision = false } = {}) {
+export function readProviders(env) {
   const providers = {};
   for (const id of PROVIDER_IDS) {
-    const key = id.toUpperCase() + (vision ? "_VISION" : "");
+    const key = id.toUpperCase();
     providers[id] = {
       apiKeys: split(env[key + "_API_KEYS"]),
       models: split(env[key + "_MODELS"]),
@@ -104,8 +107,20 @@ export function readProviders(env, { vision = false } = {}) {
       } : {}
     };
   }
-  applyCloudflareAccounts(providers.cloudflare, env, vision ? "CLOUDFLARE_VISION" : "CLOUDFLARE");
+  applyCloudflareAccounts(providers.cloudflare, env, "CLOUDFLARE");
   return providers;
+}
+
+/**
+ * Provider prefixes that carry the retired `*_VISION_*` configuration. They are
+ * read only to warn the operator: no route, key, model or base URL is taken
+ * from them any more. The variables themselves are left untouched in `.env`.
+ */
+export function legacyVisionPrefixes(env = {}) {
+  return PROVIDER_IDS
+    .map((id) => id.toUpperCase())
+    .filter((prefix) => Object.keys(env ?? {}).some((name) =>
+      name.startsWith(prefix + "_VISION_") || name === prefix + "_VISION"));
 }
 
 /**
@@ -141,11 +156,9 @@ function assertPlainBaseUrls(providers, envSuffix) {
 
 export function loadConfig(env = process.env) {
   const providers = readProviders(env);
-  const visionProviders = readProviders(env, { vision: true });
   // Refused before anything else is built: a base URL that cannot carry an
   // appended endpoint path would produce a malformed URL on every request.
   assertPlainBaseUrls(providers, "BASE_URL");
-  assertPlainBaseUrls(visionProviders, "VISION_BASE_URL");
   const retryRaw = env.RETRY_STATUS_CODES;
   const retrySource = retryRaw === undefined || String(retryRaw).trim() === ""
     ? DEFAULT_RETRY_STATUS_CODES.join(",")
@@ -176,8 +189,8 @@ export function loadConfig(env = process.env) {
     // endpoint calls whatever URL it is given from the gateway's own network.
     playgroundAllowPrivateHosts: ["1", "true", "yes"].includes(String(env.PLAYGROUND_ALLOW_PRIVATE_HOSTS ?? "").trim().toLowerCase()),
     maxBodyBytes: readNumber(env, "MAX_REQUEST_BODY_BYTES", 10 * 1024 * 1024, { min: 1, max: 100 * 1024 * 1024, expected: "an integer from 1 to 104857600" }),
-    // The Fallback Chain: the single source of truth for routing order, per
-    // pool, plus the selected operating mode. Written by the control panel.
+    // The Fallback Chain: the single source of truth for routing order, plus
+    // the selected operating mode. Written by the control panel.
     fallbackChainFile: String(env.FALLBACK_CHAIN_FILE || "").trim() || "data/fallback-chain.json",
     gatewayStateFile: String(env.GATEWAY_STATE_FILE || "").trim() || "data/gateway-state.json",
     // Models the operator switched OFF from the control panel (ids only). A
@@ -219,7 +232,6 @@ export function loadConfig(env = process.env) {
     // yet. Never consulted again afterwards: the old systems cannot override
     // the configured chain.
     legacyManualSelectionFile: String(env.MANUAL_SELECTION_FILE || "").trim() || "data/manual-selection.json",
-    providers,
-    visionProviders
+    providers
   };
 }

@@ -6,8 +6,8 @@
  * module keeps them apart on purpose:
  *
  *   declared     what the operator says a model can do (the checkbox)
- *   inferred     what the environment implies (pool membership + protocol),
- *                always provisional and never a substitute for an adapter
+ *   inferred     what this build assumes for a model nobody has declared yet:
+ *                text in and text out only
  *   executable   what the adapter on the wire can actually carry
  *
  * A capability is only routable when the request requires it, the model
@@ -174,20 +174,19 @@ export function unsupportedCapabilities(capabilities, protocols) {
 /**
  * Provisional capabilities implied by the existing configuration.
  *
- * A model in the text pool is treated as a text model that can stream, call
- * tools and honour a structured response, because the protocol can and that is
- * what the gateway has always assumed. A vision-pool model additionally accepts
- * images — that is precisely why it is in that pool. Nothing else is inferred:
- * audio, video, files, generated media, embeddings, web search and code
- * execution stay undeclared until the operator declares them, and even then the
- * adapter must be able to execute them.
+ * A newly discovered or undeclared model defaults to text_input and text_output
+ * only. No other capabilities are inferred from model name, provider, protocol,
+ * or legacy pool membership. Optional capabilities (tool_calling, image_input,
+ * audio_input, video_input, file_input, structured_output, streaming, reasoning,
+ * embeddings, web_search, code_execution) remain false until the operator
+ * explicitly declares them in the Model Configurator, and even then the adapter
+ * must be able to execute them.
  *
  * `source` is "inferred" so every surface can say the claim is provisional.
  */
-export function inferCapabilities({ pool = "text", protocols = [] } = {}) {
+export function inferCapabilities({ protocols = [] } = {}) {
   const executable = adapterCapabilities(protocols);
-  const base = ["text_input", "text_output", "streaming", "tool_calling", "structured_output", "reasoning"];
-  if (pool === "vision") base.push("image_input");
+  const base = ["text_input", "text_output"];
   return base.filter((id) => executable.has(id));
 }
 

@@ -197,7 +197,6 @@ const orderCapabilities = (set) => CAPABILITY_IDS.filter((id) => set.has(id));
  *
  * @returns {{
  *   operation: string,
- *   pool: "text"|"vision",
  *   required: string[],
  *   preferred: string[],
  *   media: {image:boolean,audio:boolean,video:boolean,file:boolean},
@@ -259,13 +258,8 @@ export function analyzeRequest({ protocol = null, pathname = "", body = {}, stre
     || (protocol === "gemini" && /:streamGenerateContent$/i.test(String(pathname || "")));
   if (wantsStream) { required.add("streaming"); reasons.push("streaming"); }
 
-  // The existing vision pool is the only pool split; audio, video and files are
-  // capabilities of a text-pool model, not a third pool.
-  const pool = media.image ? "vision" : "text";
-
   return {
     operation,
-    pool,
     required: orderCapabilities(required),
     preferred: orderCapabilities(preferred),
     media,

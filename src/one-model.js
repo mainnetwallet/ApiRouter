@@ -97,7 +97,7 @@ export class OneModelStore {
     this.provider = "";
     // The models of the provider, in priority order: the first leads.
     this.models = [];
-    // "model::pool:keyIndex" -> cooldown ms. A key with no entry has no cooldown.
+    // "model::keyIndex" -> cooldown ms. A key with no entry has no cooldown.
     this.cooldowns = new Map();
     this.listeners = new Set();
     this.load();
@@ -136,7 +136,7 @@ export class OneModelStore {
     return this.cooldowns.get(oneModelKeyId(target)) ?? 0;
   }
 
-  /** Every key cooldown that is set, as { "model::pool:keyIndex": ms }. */
+  /** Every key cooldown that is set, as { "model::keyIndex": ms }. */
   getCooldowns() {
     return Object.fromEntries(this.cooldowns);
   }
@@ -148,7 +148,7 @@ export class OneModelStore {
       : null;
   }
 
-  /** True for a target of the chosen provider whose model is in the list (every key, every pool). */
+  /** True for a target of the chosen provider whose model is in the list. */
   matches(target) {
     return Boolean(target)
       && target.provider === this.provider
@@ -280,13 +280,13 @@ export class KeyPacer {
     this.readyAtById.delete(targetId(target));
   }
 
-  /** The key that answered last for this model and pool leads that model's next request. */
+  /** The key that answered last for this model leads that model's next request. */
   markGood(target) {
-    this.goodKeyIndexByModel.set(`${target.model}\u0000${target.pool ?? "text"}`, target.keyIndex);
+    this.goodKeyIndexByModel.set(target.model, target.keyIndex);
   }
 
-  preferredKeyIndex(model, pool = "text") {
-    return this.goodKeyIndexByModel.get(`${model}\u0000${pool}`);
+  preferredKeyIndex(model) {
+    return this.goodKeyIndexByModel.get(model);
   }
 
   /** Forgets every cooldown and the preferred keys (used when the provider changes). */
@@ -366,8 +366,8 @@ export async function withOneModel(
   const ordered = [...byModel.entries()]
     .sort((a, b) => rankOf(a[1][0]) - rankOf(b[1][0]) || a[0].localeCompare(b[0]))
     .flatMap(([model, keys]) => {
-      const sorted = keys.sort((a, b) => (a.pool ?? "text").localeCompare(b.pool ?? "text") || (a.keyIndex ?? 0) - (b.keyIndex ?? 0));
-      const preferred = pacer.preferredKeyIndex?.(model, sorted[0]?.pool ?? "text");
+      const sorted = keys.sort((a, b) => (a.keyIndex ?? 0) - (b.keyIndex ?? 0));
+      const preferred = pacer.preferredKeyIndex?.(model);
       const at = sorted.findIndex((target) => target.keyIndex === preferred);
       return at > 0 ? [...sorted.slice(at), ...sorted.slice(0, at)] : sorted;
     });
