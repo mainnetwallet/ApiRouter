@@ -4,7 +4,7 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { loadConfig, buildTargets } from "./config.js";
+import { loadConfig, buildTargets, legacyVisionPrefixes } from "./config.js";
 import {
   describeHealth,
   rankTargets,
@@ -31,7 +31,7 @@ import {
   requestedModelCapabilityMessage,
   validateRequestedModel
 } from "./model-capabilities.js";
-import { buildRoutePlan, chainStatusByPool, routeOrderByPool, resetAutomaticOrderCache } from "./fallback-plan.js";
+import { buildRoutePlan, chainStatus, routeOrder, resetAutomaticOrderCache } from "./fallback-plan.js";
 import { ModelSwitchStore, modelSwitchId } from "./model-switch.js";
 import { OneModelStore, KeyPacer, withOneModel, oneModelKeyId } from "./one-model.js";
 import {
@@ -106,7 +106,7 @@ applyCustomEndpoints(config, customEndpoints.list());
 if (customEndpointsRemote) console.log(`custom endpoints: stored in ${customEndpointsRemote.location} (encrypted)`);
 
 // The Unified Model Configurator. It is an OVERLAY on the provider configuration
-// above, not a second provider system: keys, base URLs, protocols and pools keep
+// above, not a second provider system: keys, base URLs and protocols keep
 // coming from the environment or a saved custom endpoint, while this store holds
 // what the operator declared — enabled flags and capabilities — as plain JSON
 // (never a credential) in `data/model-config.json` and, when configured, a
@@ -225,8 +225,15 @@ if (fallbackChain.migrated) {
 }
 if (hasLegacyConfig({ manualFile: config.legacyManualSelectionFile, env: process.env })) {
   console.warn(
-    "fallback chain: MANUAL_SELECTION_FILE / TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS are legacy and are now ignored. "
-    + "Configure the fallback chain in the control panel instead."
+    "fallback chain: MANUAL_SELECTION_FILE / TEXT_PRIORITY_MODELS / VISION_PRIORITY_MODELS are legacy: they only seed the "
+    + "unified chain once, when none is saved, and are never read again. Configure the fallback chain in the control panel."
+  );
+}
+const retiredVisionPrefixes = legacyVisionPrefixes(process.env);
+if (retiredVisionPrefixes.length > 0) {
+  console.warn(
+    `config: ${retiredVisionPrefixes.map((prefix) => `${prefix}_VISION_*`).join(", ")} is retired and ignored. `
+    + "List those models under the provider's *_MODELS and declare image_input for them in the Model Configurator."
   );
 }
 const targets = buildTargets(config.providers);
@@ -510,7 +517,7 @@ async function proxy(req, res, protocol, pathname) {
     return json(res, error.status || 400, { error: { message: clientMessage(error.message), type: "invalid_request_error" } });
   }
 
-  // Basic request-shape check, before the pool, session or any target is
+  // Basic request-shape check, before the session or any target is
   // chosen: a request no adapter can read must fail here, locally, as a 400 and
   // never reach routing, an upstream or the fallback walk.
   const shapeError = validateRequestShape(protocol, body);
@@ -711,7 +718,7 @@ async function proxy(req, res, protocol, pathname) {
     : bridgeKind === "chat"
       ? { inputTokens: estimateChatInputTokens(body), includeUsage: body.stream_options?.include_usage === true }
       : null;
-  // The saved Manual Model Selection for this request's own pool: those models
+  // The saved Manual Model Selection: those models
   // in their saved order (the remembered target leading when it is one of them),
   // then every model not selected, by health — or the automatic health-based
   // order when nothing is selected. Either way the remembered target
@@ -1466,7 +1473,7 @@ async function handleRequest(req, res) {
     const routable = targets.filter((target) =>
       !modelSwitch.isDisabled(target.provider, target.model)
       && !modelConfig.explicitlyDisabled(target.provider, target.model));
-    const ranked = routeOrderByPool(routable, {
+    const ranked = routeOrder(routable, {
       chain: fallbackChain.get(),
       health: healthRegistry,
       isEligible: (target) => healthRegistry.isAvailable(target)
@@ -1486,7 +1493,7 @@ async function handleRequest(req, res) {
         mode: fallbackChain.mode,
         remembersSuccess: remembersSuccess(fallbackChain.mode),
         chains: fallbackChain.get().length,
-        status: chainStatusByPool(routable, {
+        status: chainStatus(routable, {
           chain: fallbackChain.get(),
           health: healthRegistry
         })

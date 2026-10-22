@@ -2,12 +2,12 @@ import { targetId, validLatencyMs } from "./health.js";
 import { FALLBACK_MODES, activeEntries, allEntries, allowedKeyIndexes, entryId } from "./fallback-chain.js";
 
 /**
- * The one routing planner. Text and vision use this same code; they differ only
- * in the target list and the chain they are given, both of which are already
- * scoped to one pool by the caller.
+ * The one routing planner. Every request, whatever it carries, uses this code
+ * with the ONE shared chain; the caller has already narrowed the target list to
+ * the models whose declared capabilities can serve the request.
  *
- * There is no mode switch any more; the plan follows from whether a Manual Model
- * Selection is saved for the pool, and the mode it reports is derived from that:
+ * There is no mode switch; the plan follows from whether a Manual Model
+ * Selection is saved, and the mode it reports is derived from that:
  *
  *   AUTO    no selection saved: every reachable model, ordered by measured
  *           health and latency, led by the remembered target
@@ -81,14 +81,14 @@ export function groupTargets(targets) {
 }
 
 /**
- * The configured order. Every enabled entry that has a target in this pool, in
+ * The configured order. Every enabled entry that has a target in the list, in
  * the order the operator saved, each expanded to its eligible keys — or to
  * every configured key when the entry names no subset.
  *
  * Two ways an entry can contribute nothing to the ORDER, and they must not be
  * confused:
  *
- *   - The model is not reachable for this request at all (not in this pool, not
+ *   - The model is not reachable for this request at all (not capable of it, not
  *     speaking this protocol, or its provider no longer configured). It adds no
  *     group, because there is nothing to walk. The chain still COUNTS as
  *     configured, though — see `savedEntries` below: an entry the router cannot
@@ -98,7 +98,7 @@ export function groupTargets(targets) {
  *     is kept as a group with NO targets, so it keeps its position and the model
  *     is simply not routable.
  *
- * Either way, dropping an entry must never leave the pool looking unconfigured:
+ * Either way, dropping an entry must never leave the chain looking unconfigured:
  * an empty chain means the automatic order over EVERY target, which would
  * quietly route to models the operator did not name and keys they excluded.
  */
@@ -433,15 +433,15 @@ function buildManualPlan({ grouped, configured, savedEntries, cacheKey, health, 
 /**
  * Builds the order a request will walk.
  *
- * There is no mode argument: the shape of the plan follows from whether the pool
- * has a saved Manual Model Selection. A non-empty selection is walked as the
+ * There is no mode argument: the shape of the plan follows from whether a
+ * Manual Model Selection is saved. A non-empty selection is walked as the
  * alternating Manual/Health plan above; an empty one (or a pinned request) falls
  * through to the ordered path below. The `mode` reported on the plan is derived
  * from the same fact, so a caller can never be told a mode the walk disagrees
  * with.
  *
- * @param targets         protocol-reachable targets of the request's own pool
- * @param chain           this pool's saved Manual Model Selection
+ * @param targets         protocol-reachable, capability-eligible targets of the request
+ * @param chain           the saved Manual Model Selection
  * @param stickyTargetId  remembered target id, already TTL-checked by the caller
  * @param pinned          a pinned request bypasses the selection entirely
  */
@@ -452,7 +452,7 @@ export function buildRoutePlan({
   health = null,
   now = Date.now(),
   pinned = false,
-  cacheKey = "pool"
+  cacheKey = "unified"
 } = {}) {
   const all = Array.isArray(targets) ? targets : [];
   const grouped = groupTargets(all);
@@ -493,7 +493,7 @@ export function buildRoutePlan({
   const base = toSteps(ordered, phase);
 
   /**
-   * No selection is saved for this pool, so there is nothing that can fail
+   * No selection is saved, so there is nothing that can fail
    * closed: the automatic order covers every reachable target.
    */
   const meta = {
@@ -586,7 +586,7 @@ export function effectiveOrder(steps, isEligible = () => true) {
  * for a request that names no model and carries no session. Used by the health
  * endpoints so `ranked` is the real route order.
  */
-export function routeOrderByPool(targets, {
+export function routeOrder(targets, {
   chain = [],
   health = null,
   isEligible = () => true,
@@ -614,7 +614,7 @@ export function routeOrderByPool(targets, {
  * Derived from the same `buildRoutePlan` the proxy calls, so this can never
  * describe a state the router would not actually be in.
  */
-export function chainStatusByPool(targets, {
+export function chainStatus(targets, {
   chain = [],
   health = null,
   now = Date.now()

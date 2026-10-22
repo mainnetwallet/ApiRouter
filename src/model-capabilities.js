@@ -172,22 +172,26 @@ export function unsupportedCapabilities(capabilities, protocols) {
 }
 
 /**
- * Provisional capabilities implied by the existing configuration.
+ * The capabilities a model has until somebody declares otherwise: text_input
+ * and text_output, and NOTHING else.
  *
- * A newly discovered or undeclared model defaults to text_input and text_output
- * only. No other capabilities are inferred from model name, provider, protocol,
- * or legacy pool membership. Optional capabilities (tool_calling, image_input,
- * audio_input, video_input, file_input, structured_output, streaming, reasoning,
- * embeddings, web_search, code_execution) remain false until the operator
- * explicitly declares them in the Model Configurator, and even then the adapter
- * must be able to execute them.
+ * Optional capabilities (tool_calling, image_input, image_output, audio_*,
+ * video_*, file_input, structured_output, streaming, reasoning, embeddings,
+ * web_search, code_execution) are never inferred from a model name, a
+ * provider, a protocol or a former pool membership. They stay false until the
+ * operator declares them in the Model Configurator, and even then a request
+ * only reaches the model when an adapter it speaks can execute them (see
+ * `evaluateCandidate`). The default does not depend on the model's protocols:
+ * an undeclared model is text-in/text-out whether or not a provider currently
+ * configures it.
  *
- * `source` is "inferred" so every surface can say the claim is provisional.
+ * `capabilitiesSource` is "inferred" so every surface can say the claim is
+ * provisional.
  */
-export function inferCapabilities({ protocols = [] } = {}) {
-  const executable = adapterCapabilities(protocols);
-  const base = ["text_input", "text_output"];
-  return base.filter((id) => executable.has(id));
+export const DEFAULT_CAPABILITIES = Object.freeze(["text_input", "text_output"]);
+
+export function inferCapabilities() {
+  return [...DEFAULT_CAPABILITIES];
 }
 
 /**
@@ -262,18 +266,17 @@ export function filterTargetsByRequirements(targets, required = [], lookup = () 
 }
 
 /** A safe, bounded message for "no model can serve this". */
-export function noCapableRouteMessage(required, pool = "text") {
+export function noCapableRouteMessage(required) {
   const needs = normalizeRequirements(required);
   const list = needs.map(capabilityLabel).join(", ");
-  return `No configured ${pool} model can serve this request: it requires ${list || "capabilities no model declares"}.`
+  return `No configured model can serve this request: it requires ${list || "capabilities no model declares"}.`
     + " Configure a compatible model in the Model Configurator.";
 }
 
 /**
  * Capability validation for a client that named a model explicitly.
  *
- * Mirrors the existing pool rule in capabilities.js: a model the router knows
- * nothing about keeps the historical "widen to every compatible target"
+ * A model the router knows nothing about keeps the historical "widen to every compatible target"
  * behaviour (custom and freshly released ids must keep working), while a model
  * the unified configuration DOES know is rejected clearly when none of its
  * provider entries can satisfy the request. Silently answering with a different
@@ -299,7 +302,7 @@ export function validateRequestedModel(index, modelId, required = []) {
       declared: row.capabilities,
       protocols: row.protocols
     });
-    return { provider: row.provider, pool: row.pools?.[0] ?? "text", eligible: verdict.eligible, reason: verdict.reason, missing: verdict.missing };
+    return { provider: row.provider, eligible: verdict.eligible, reason: verdict.reason, missing: verdict.missing };
   });
 
   if (providers.some((entry) => entry.eligible)) return null;

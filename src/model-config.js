@@ -11,7 +11,7 @@ import { CAPABILITY_IDS, inferCapabilities, normalizeCapabilities, unsupportedCa
  * Two layers, deliberately:
  *
  *   environment   every provider/model that `buildTargets` can reach: its keys,
- *                 base URL, protocols and pool still come from the existing
+ *                 base URL and protocols still come from the existing
  *                 provider configuration (env or a saved custom endpoint). These
  *                 entries are synthesized on every read and are marked
  *                 `capabilitiesSource: "inferred"`.
@@ -595,7 +595,6 @@ export class ModelConfigStore {
         groups.set(id, {
           provider,
           model,
-          pools: new Set(),
           protocols: new Set(),
           keyCount: 0,
           configuredInEnvironment: false
@@ -607,7 +606,6 @@ export class ModelConfigStore {
     for (const target of Array.isArray(targets) ? targets : []) {
       if (!target?.provider || !target?.model) continue;
       const group = touch(target.provider, target.model);
-      group.pools.add(target.pool ?? "text");
       for (const protocol of target.protocols ?? []) group.protocols.add(protocol);
       group.keyCount += 1;
       group.configuredInEnvironment = true;
@@ -621,7 +619,6 @@ export class ModelConfigStore {
     const index = new Map();
     for (const [id, group] of groups) {
       const stored = this.overrideFor(group.provider, group.model);
-      const pools = [...group.pools];
       const protocols = [...group.protocols];
       // Capabilities come from the stored declaration, or default to
       // text_input + text_output for models nobody has declared yet.
@@ -664,7 +661,6 @@ export class ModelConfigStore {
         unsupportedCapabilities: unsupported,
         protocol: stored?.protocol ?? null,
         metadata: stored ? structuredClone(stored.metadata ?? {}) : {},
-        pools,
         protocols,
         keyCount: group.keyCount,
         configuredInEnvironment: group.configuredInEnvironment,

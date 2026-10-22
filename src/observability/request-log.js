@@ -203,7 +203,6 @@ export class RequestLog {
       const row = plainAttempt(raw, index);
       row.requestId = ctx.requestId;
       row.requestSeq = ctx.requestSeq;
-      row.pool = ctx.pool;
 
       if (row.skipped) return { ...row, attemptId: null, attemptSeq: null, callIndex: null };
 
@@ -222,7 +221,6 @@ export class RequestLog {
           requestId: ctx.requestId,
           requestSeq: ctx.requestSeq,
           sessionId: ctx.sessionId,
-          pool: ctx.pool,
           requestedModel: ctx.requestedModel ?? null,
           protocol: row.protocol ?? ctx.protocol ?? null,
           phase: row.phase,
@@ -283,7 +281,6 @@ export class RequestLog {
       id: entry.id ?? null,
       receivedAt: Number.isFinite(entry.receivedAt) ? entry.receivedAt : Date.now(),
       protocol: entry.protocol ?? null,
-      pool: normalizePool(entry.pool),
       requestedModel: sanitizeMessage(entry.requestedModel, { maxLength: 120 }),
       // What this request needs, so a route that was not taken can be explained
       // without recording the payload.
@@ -310,7 +307,7 @@ export class RequestLog {
     if (!pending) return;
     if (attempts !== undefined) {
       pending.attempts = this.#normalizeAttempts(attempts, {
-        requestId: pending.requestId, requestSeq: startSeq, sessionId: pending.id, pool: pending.pool,
+        requestId: pending.requestId, requestSeq: startSeq, sessionId: pending.id,
         protocol: pending.protocol, requestedModel: pending.requestedModel
       }, pending.attempts);
       const real = pending.attempts.filter((a) => !a.skipped).length;
@@ -355,7 +352,6 @@ export class RequestLog {
       requestId: pending.requestId,
       requestSeq: startSeq,
       sessionId: pending.id,
-      pool: pending.pool,
       requestedModel: pending.requestedModel,
       protocol,
       phase: PHASES.includes(target.phase) ? target.phase : null,
@@ -467,13 +463,12 @@ export class RequestLog {
    * `afterSeq` resumes after an attempt; `limit` keeps the newest N matches.
    * These are the very same events the live stream pushes as `attempt`.
    */
-  listAttempts({ limit = 200, afterSeq = 0, requestId = null, pool = null, state = null, provider = null } = {}) {
+  listAttempts({ limit = 200, afterSeq = 0, requestId = null, state = null, provider = null } = {}) {
     const size = Math.max(1, Math.min(Number(limit) || 200, this.maxAttemptEvents));
     const after = Number.isFinite(Number(afterSeq)) ? Number(afterSeq) : 0;
     const filtered = [...this.attemptEvents.values()].filter((event) => {
       if (event.attemptSeq <= after) return false;
       if (requestId && event.requestId !== requestId) return false;
-      if ((pool === POOLS.TEXT || pool === POOLS.VISION) && event.pool !== pool) return false;
       if (state && event.state !== state) return false;
       if (provider && event.provider !== provider) return false;
       return true;
@@ -513,10 +508,9 @@ export class RequestLog {
     const requestId = pending?.requestId
       ?? (typeof entry.requestId === "string" && entry.requestId ? entry.requestId : this.#mintRequestId());
     const requestSeq = startSeq ?? this.sequence;
-    const pool = normalizePool(entry.pool ?? pending?.pool);
 
     const attempts = this.#normalizeAttempts(entry.attempts, {
-      requestId, requestSeq, sessionId: entry.id ?? pending?.id ?? null, pool,
+      requestId, requestSeq, sessionId: entry.id ?? pending?.id ?? null,
       protocol: entry.protocol ?? pending?.protocol ?? null,
       requestedModel: sanitizeMessage(entry.requestedModel ?? pending?.requestedModel, { maxLength: 120 })
     }, pending?.attempts);
@@ -539,7 +533,6 @@ export class RequestLog {
       receivedAt: entry.receivedAt ?? null,
       completedAt: entry.completedAt ?? null,
       protocol: entry.protocol ?? null,
-      pool,
       requestedModel: sanitizeMessage(entry.requestedModel, { maxLength: 120 }),
       // The request's capability requirements and the candidates routing ruled
       // out (and why). Fixed vocabulary only; never a body or a credential.
@@ -604,7 +597,7 @@ export class RequestLog {
    * `nextCursor` never sees a shifting window: new requests arriving
    * mid-pagination have higher sequence numbers and cannot reorder the page.
    */
-  list({ limit = 50, cursor = null, status = null, provider = null, protocol = null, outcome = null, pool = null } = {}) {
+  list({ limit = 50, cursor = null, status = null, provider = null, protocol = null, outcome = null } = {}) {
     const size = Math.max(1, Math.min(Number(limit) || 50, this.maxEntries));
 
     // `Number(null)` is 0, which would match every sequence number and return
@@ -618,9 +611,6 @@ export class RequestLog {
       if (outcome && entry.outcome !== outcome) return false;
       if (protocol && entry.protocol !== protocol) return false;
       if (provider && entry.finalProvider !== provider) return false;
-      // "text"/"vision" are the only pools; any other value is ignored rather
-      // than treated as an empty filter, so a typo cannot silently hide rows.
-      if ((pool === POOLS.TEXT || pool === POOLS.VISION) && entry.pool !== pool) return false;
       if (status && String(entry.httpStatus) !== String(status)) return false;
       return true;
     });

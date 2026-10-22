@@ -143,7 +143,7 @@ export function normalizeMode(value) {
  * hand-edited `keys: [true]`, `keys: ["1"]`, `keys: []` or `keys: "1"` would
  * quietly route to keys the file never granted. An empty restriction instead
  * resolves to zero eligible keys, so the entry is walked as unusable and the
- * pool fails closed — which is the safe reading of a configuration nobody can
+ * chain fails closed — which is the safe reading of a configuration nobody can
  * interpret.
  *
  * This reader stays forgiving in the sense that matters at startup: it never
@@ -196,6 +196,32 @@ export function normalizeEntries(value) {
     if (entries.length >= MAX_ENTRIES) break;
   }
   return entries;
+}
+
+/**
+ * LEGACY MIGRATION. Before the pools were unified a saved chain file, and the
+ * manual-selection file, held two lists: `{ text: [...], vision: [...] }`. The
+ * active router has ONE chain, so such a document is folded into it once:
+ *
+ *  - the text entries lead, in their saved order, with their key restrictions;
+ *  - a vision entry whose model is not already in the chain follows, in its
+ *    saved order. Its key restriction is dropped (`keys: null`), because the
+ *    vision key list it indexed no longer exists — an index from it could
+ *    otherwise point at a different, unrelated key;
+ *  - a model listed in both keeps its text entry.
+ *
+ * Returns null for a document that is not in the legacy shape, so the current
+ * `{ entries: [...] }` format is never second-guessed.
+ */
+export function legacyPooledEntries(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data.entries)) return null;
+  if (!Array.isArray(data.text) && !Array.isArray(data.vision)) return null;
+  const text = normalizeEntries(data.text);
+  const known = new Set(text.map(entryId));
+  const vision = normalizeEntries(data.vision)
+    .filter((entry) => !known.has(entryId(entry)))
+    .map((entry) => ({ ...entry, keys: null }));
+  return normalizeEntries([...text, ...vision]);
 }
 
 /** Entries the walker may attempt: enabled, and naming a model id. */
@@ -263,7 +289,15 @@ export class FallbackChainStore {
     }
     try {
       const parsed = JSON.parse(fs.readFileSync(this.file, "utf8"));
-      this.apply(parsed);
+      const migrated = legacyPooledEntries(parsed);
+      this.apply(migrated ? { entries: migrated } : parsed);
+      if (migrated) {
+        // A file saved by the two-pool build: fold it into the one chain and
+        // rewrite it once, in the current format. A failed rewrite must not
+        // stop the gateway; the in-memory chain is already correct.
+        this.migrated = true;
+        try { this.persist(); } catch (error) { console.warn(`fallback chain: could not rewrite migrated chain (${error?.message || error})`); }
+      }
       return;
     } catch (error) {
       // Missing file is the normal first run; a corrupt file must not stop the
@@ -413,11 +447,8 @@ export function readLegacyConfig({ manualFile = null, env = {} } = {}) {
   if (manualFile) {
     try {
       const parsed = JSON.parse(fs.readFileSync(path.resolve(manualFile), "utf8"));
-      // Legacy format: { text: [...], vision: [...] }
-      // Merge both pools into one chain, text first then vision.
-      for (const pool of ["text", "vision"]) {
-        allEntries.push(...normalizeEntries(parsed?.[pool]));
-      }
+      // Legacy format: { text: [...], vision: [...] } — folded into one list.
+      allEntries.push(...(legacyPooledEntries(parsed) ?? normalizeEntries(parsed?.entries)));
     } catch (error) {
       if (error?.code !== "ENOENT") {
         console.warn(`fallback chain: could not read legacy ${path.basename(String(manualFile))}`);
@@ -460,7 +491,7 @@ export function hasLegacyConfig({ manualFile = null, env = {} } = {}) {
   if (!manualFile) return false;
   try {
     const parsed = JSON.parse(fs.readFileSync(path.resolve(manualFile), "utf8"));
-    const all = [...normalizeEntries(parsed?.text), ...normalizeEntries(parsed?.vision)];
+    const all = legacyPooledEntries(parsed) ?? normalizeEntries(parsed?.entries);
     return all.length > 0;
   } catch {
     return false;

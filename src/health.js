@@ -76,7 +76,6 @@ export class HealthRegistry {
         provider: target.provider,
         model: target.model,
         keyIndex: target.keyIndex,
-        pool: target.pool ?? "text",
         status: HEALTH_STATES.UNKNOWN,
         score: 50,
         cooldownUntil: 0,
@@ -147,10 +146,6 @@ export class HealthRegistry {
    * Reporting view for a concrete target list. Built as an explicit allow-list
    * so credentials or upstream bodies can never reach `/health`, even if the
    * internal state grows new fields later.
-   *
-   * `pool` is included because the two pools are independent: a reader has to
-   * be able to tell a text target from a vision target, or a provider's text
-   * health and its vision health cannot be reported apart.
    */
   describe(targets, now = Date.now()) {
     return (Array.isArray(targets) ? targets : []).map((target) => {
@@ -160,7 +155,6 @@ export class HealthRegistry {
         provider: state.provider,
         model: state.model,
         keyIndex: state.keyIndex,
-        pool: state.pool,
         protocols: Array.isArray(target.protocols) ? [...target.protocols] : [],
         status: healthState(state, now),
         score: state.score,
