@@ -8,12 +8,12 @@ import {
   buildRoutePlan,
   effectiveOrder,
   resetAutomaticOrderCache,
-  routeOrderByPool
+  routeOrder
 } from "../src/fallback-plan.js";
 import { RouteSession, STICKY_TTL_MS, withFallback } from "../src/router.js";
 
 const MIN = 60 * 1000;
-const t = (provider, model, keyIndex = 0, pool = "text") => ({ provider, model, keyIndex, pool, protocols: ["openai-chat"] });
+const t = (provider, model, keyIndex = 0) => ({ provider, model, keyIndex, protocols: ["openai-chat"] });
 const entry = (provider, model, extra = {}) => ({ provider, model, keys: null, enabled: true, ...extra });
 const fail = (status, extra = {}) => Object.assign(new Error(`boom ${status}`), { status, ...extra });
 const label = (target) => `${target.provider}/${target.model}#${target.keyIndex}`;
@@ -265,20 +265,20 @@ test("a remembered target that is NOT selected leads the Health batch, ahead of 
   assert.ok(firstManual > lastHealthLike, "no selected model is tried before the Health batch has been exhausted");
 });
 
-test("text and vision pools stay separate under manual selection", () => {
+test("one shared selection orders every model, capability-narrowed or not", () => {
   const text = [t("p", "T1", 0), t("q", "T2", 0), t("p", "T3", 0)];
-  const vision = [t("p", "V1", 0, "vision"), t("q", "V2", 0, "vision")];
-  const order = routeOrderByPool([...text, ...vision], {
-    chains: {
-      text: [entry("q", "T2"), entry("p", "T1")],
-      vision: [entry("q", "V2")]
-    },
-    health: new HealthRegistry()
-  });
-  const textOrder = order.filter((target) => target.pool === "text").map(label);
-  const visionOrder = order.filter((target) => target.pool === "vision").map(label);
-  assert.deepEqual(textOrder, ["q/T2#0", "p/T1#0", "p/T3#0"], "T3 is the text pool's only phase-2 model");
-  assert.deepEqual(visionOrder, ["q/V2#0", "p/V1#0"], "no text model leaks into the vision pool");
+  const image = [t("p", "V1", 0), t("q", "V2", 0)];
+  const chain = [entry("q", "T2"), entry("p", "T1"), entry("q", "V2")];
+
+  // A text request sees every model; the single chain orders all of them.
+  const textOrder = routeOrder([...text, ...image], { chain, health: new HealthRegistry() }).map(label);
+  assert.deepEqual(textOrder.slice(0, 3), ["q/T2#0", "p/T1#0", "q/V2#0"], "the selection leads, in its saved order");
+  assert.deepEqual([...textOrder.slice(3)].sort(), ["p/T3#0", "p/V1#0"], "unselected models follow the selection");
+
+  // An image request has been narrowed (by capability) to the image-capable
+  // models only: the SAME chain applies, and no incapable model leaks in.
+  const imageOrder = routeOrder(image, { chain, health: new HealthRegistry() }).map(label);
+  assert.deepEqual(imageOrder, ["q/V2#0", "p/V1#0"], "only capable models are routed, still in chain order");
 });
 
 // ---------------------------------------------------------------------------
