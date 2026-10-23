@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "cbbdec9b-a4ad-4412-b6d0-3faaea4b8aeb",
-  "updatedAt": "2026-10-23T19:01:33.519Z",
+  "revision": "ef2b6d34-9c98-409c-9b89-4d179f7c71cc",
+  "updatedAt": "2026-10-23T19:02:15.835Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -238,6 +238,27 @@
       "version": 1,
       "createdAt": 1792782093519,
       "updatedAt": 1792782093519
+    },
+    {
+      "id": "mc_94753efb6b31aa65",
+      "provider": "cohere",
+      "model": "command-a-reasoning-08-2025",
+      "displayName": "command-a-reasoning-08-2025",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792782135835,
+      "updatedAt": 1792782135835
     }
   ]
 }
