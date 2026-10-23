@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "4e37ff70-cc36-4919-bf12-6c824933b486",
-  "updatedAt": "2026-10-23T18:45:20.437Z",
+  "revision": "657ec9ba-8721-414e-a0be-c5213969654e",
+  "updatedAt": "2026-10-23T18:46:39.687Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -82,6 +82,25 @@
       "version": 1,
       "createdAt": 1792781120437,
       "updatedAt": 1792781120437
+    },
+    {
+      "id": "mc_58d51167851d5d19",
+      "provider": "openrouter",
+      "model": "poolside/laguna-s-2.1:free",
+      "displayName": "poolside/laguna-s-2.1:free",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792781199687,
+      "updatedAt": 1792781199687
     }
   ]
 }
