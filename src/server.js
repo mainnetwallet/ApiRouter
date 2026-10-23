@@ -229,13 +229,6 @@ if (hasLegacyConfig({ manualFile: config.legacyManualSelectionFile, env: process
     + "unified chain once, when none is saved, and are never read again. Configure the fallback chain in the control panel."
   );
 }
-const retiredVisionPrefixes = legacyVisionPrefixes(process.env);
-if (retiredVisionPrefixes.length > 0) {
-  console.warn(
-    `config: ${retiredVisionPrefixes.map((prefix) => `${prefix}_VISION_*`).join(", ")} is retired and ignored. `
-    + "List those models under the provider's *_MODELS and declare image_input for them in the Model Configurator."
-  );
-}
 // The Text/Vision split is gone: `<PROVIDER>_VISION_*` variables are no longer
 // read. Say so once at startup (provider names only, never a value) so an
 // operator who still has them knows those models are not being routed to. The
@@ -683,7 +676,10 @@ async function proxy(req, res, protocol, pathname) {
   // Every model is switched off in the Model Configurator. This is not a
   // capability failure: the operator explicitly disabled them, and that is
   // the reason the client is told.
-  if (!pinnedRequest && enabledTargets.length > 0 && capableTargets.length === 0) {
+  // `enabledTargets` already has the switched-off models removed, so "everything
+  // is off" is configured-but-none-enabled. Comparing capable against enabled
+  // here would report a capability gap as "switched off" and miss real shutoffs.
+  if (!pinnedRequest && configuredTargets.length > 0 && enabledTargets.length === 0) {
     const message = "Every model is switched off in the Model Configurator";
     recordRequest({
       pendingSeq: liveSeq,
