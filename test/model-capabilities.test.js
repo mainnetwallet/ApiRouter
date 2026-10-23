@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   ADAPTER_CAPABILITIES,
   CAPABILITY_IDS,
+  DEFAULT_CAPABILITIES,
   adapterCapabilities,
   evaluateCandidate,
   filterTargetsByRequirements,
@@ -30,9 +31,10 @@ test("reasoning can never be a hard requirement", () => {
   assert.deepEqual(normalizeRequirements(["reasoning", "text_input", "reasoning"]), ["text_input"]);
 });
 
-test("an undeclared model is text in / text out only: nothing is inferred from a pool, a name or a protocol", () => {
-  const expected = ["text_input", "text_output"];
+test("an undeclared model defaults to text in, text out and streaming: nothing else is inferred from a pool, a name or a protocol", () => {
+  const expected = ["text_input", "text_output", "streaming"];
 
+  assert.deepEqual(DEFAULT_CAPABILITIES, expected);
   // The legacy arguments are accepted and ignored: they carry no evidence.
   assert.deepEqual(inferCapabilities(), expected);
   assert.deepEqual(inferCapabilities({ protocols: ["openai-chat"] }), expected);
@@ -54,6 +56,7 @@ test("adapter compatibility is separate from declaration, and no adapter claims 
   // to make a model an image candidate; declaring it is never done for you.
   for (const protocol of Object.keys(ADAPTER_CAPABILITIES)) {
     assert.ok(ADAPTER_CAPABILITIES[protocol].includes("image_input"), `${protocol} can carry image input`);
+    assert.ok(ADAPTER_CAPABILITIES[protocol].includes("streaming"), `${protocol} can carry streaming`);
     for (const generated of ["image_output", "audio_output", "video_output", "embeddings"]) {
       assert.ok(!ADAPTER_CAPABILITIES[protocol].includes(generated), `${protocol} must not claim ${generated}`);
     }
@@ -63,6 +66,7 @@ test("adapter compatibility is separate from declaration, and no adapter claims 
 test("an unknown protocol executes nothing rather than assuming OpenAI", () => {
   assert.equal(adapterCapabilities(["mystery-wire"]).size, 0);
   assert.deepEqual(unsupportedCapabilities(["text_input"], ["mystery-wire"]), ["text_input"]);
+  assert.deepEqual(unsupportedCapabilities(["streaming"], ["mystery-wire"]), ["streaming"]);
 });
 
 test("eligibility requires enabled, declared and executable", () => {
@@ -83,6 +87,24 @@ test("eligibility requires enabled, declared and executable", () => {
   assert.deepEqual(evaluateCandidate({
     required: ["image_output"], declared: ["image_output"], protocols: ["openai-chat"]
   }), { eligible: false, reason: "adapter_unsupported", missing: ["image_output"] });
+
+  // Default inferred streaming is eligible when adapter can execute it
+  assert.deepEqual(
+    evaluateCandidate({ required: ["streaming"], declared: inferCapabilities(), protocols: ["openai-chat"] }),
+    { eligible: true, reason: null, missing: [] }
+  );
+
+  // Even with declared streaming, an adapter that cannot stream is never routed
+  assert.deepEqual(
+    evaluateCandidate({ required: ["streaming"], declared: inferCapabilities(), protocols: ["mystery-wire"] }),
+    { eligible: false, reason: "adapter_unsupported", missing: ["streaming"] }
+  );
+
+  // Operator explicitly declared model without streaming: capability_not_configured
+  assert.deepEqual(
+    evaluateCandidate({ required: ["streaming"], declared: ["text_input", "text_output"], protocols: ["openai-chat"] }),
+    { eligible: false, reason: "capability_not_configured", missing: ["streaming"] }
+  );
 });
 
 test("a request with no requirements leaves every candidate eligible", () => {

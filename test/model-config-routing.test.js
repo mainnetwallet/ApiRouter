@@ -112,9 +112,9 @@ test("the configurator lists every environment model with default capabilities a
       const row = payload.models.find((entry) => entry.model === model);
       assert.equal(row.source, "environment");
       assert.equal(row.capabilitiesSource, "inferred", "provisional until the operator declares it");
-      // A model nobody has declared is text in, text out and nothing else. Its
+      // A model nobody has declared is text in, text out, streaming and nothing else. Its
       // NAME is never evidence: "vision-model" gets no image_input.
-      assert.deepEqual([...row.capabilities].sort(), ["text_input", "text_output"], `${model}: defaults only`);
+      assert.deepEqual([...row.capabilities].sort(), ["streaming", "text_input", "text_output"], `${model}: defaults only`);
       assert.ok(!("pools" in row), `${model}: a row carries no pool membership`);
     }
     // No credential of any kind may appear in the payload.

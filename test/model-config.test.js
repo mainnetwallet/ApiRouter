@@ -159,14 +159,14 @@ test("the effective index overlays declarations on the environment", () => {
     target("gemini", "flash", { protocols: ["gemini"] })
   ];
 
-  // Before any save every model is inferred as text in / text out and nothing
-  // else. A name ("vision-model"), a provider or a protocol (gemini) earns no
+  // Before any save every model is inferred as text in / text out / streaming
+  // and nothing else. A name ("vision-model"), a provider or a protocol (gemini) earns no
   // image_input: only a declaration does.
   let index = store.index(targets);
   assert.equal(index.get("groq/text-model").capabilitiesSource, "inferred");
   assert.equal(index.get("groq/text-model").keyCount, 2);
   for (const id of ["groq/text-model", "groq/vision-model", "gemini/flash"]) {
-    assert.deepEqual([...index.get(id).capabilities].sort(), ["text_input", "text_output"], `${id}: defaults only`);
+    assert.deepEqual([...index.get(id).capabilities].sort(), ["streaming", "text_input", "text_output"], `${id}: defaults only`);
   }
 
   // After a save the declaration replaces the inference for that pair only.

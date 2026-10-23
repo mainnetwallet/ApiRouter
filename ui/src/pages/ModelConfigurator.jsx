@@ -222,33 +222,51 @@ export default function ModelConfigurator() {
       render: (row) => (
         <div className="row row--wrap" style={{ gap: "var(--sp-2)", alignItems: "center" }}>
           <CapabilityChips row={row} />
-          {!row.capabilities.includes("streaming") || !row.capabilities.includes("tool_calling") ? (
-            <button
-              type="button"
-              className="btn btn--sm"
-              disabled={busy}
-              onClick={(event) => {
-                event.stopPropagation();
-                run(async () => {
-                  const next = [...new Set([...row.capabilities, "streaming", "tool_calling"])];
-                  if (row.stored && row.configId) {
-                    await updateModelConfig(row.configId, { capabilities: next });
-                  } else {
-                    await createModelConfig({
-                      provider: row.provider,
-                      model: row.model,
-                      capabilities: next,
-                      enabled: row.enabled
-                    });
-                  }
-                  await config.reload();
-                  toast.success("Declared streaming + tool calling");
-                });
-              }}
-            >
-              Declare streaming + tool calling
-            </button>
-          ) : null}
+          {(() => {
+            const missingStreaming = !row.capabilities.includes("streaming");
+            const missingTools = !row.capabilities.includes("tool_calling");
+            if (!missingStreaming && !missingTools) return null;
+            const label = missingStreaming && missingTools
+              ? "Declare streaming + tool calling"
+              : missingStreaming
+                ? "Declare streaming"
+                : "Declare tool calling";
+            const toastMessage = missingStreaming && missingTools
+              ? "Declared streaming + tool calling"
+              : missingStreaming
+                ? "Declared streaming"
+                : "Declared tool calling";
+            return (
+              <button
+                type="button"
+                className="btn btn--sm"
+                disabled={busy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  run(async () => {
+                    const toAdd = [];
+                    if (missingStreaming) toAdd.push("streaming");
+                    if (missingTools) toAdd.push("tool_calling");
+                    const next = [...new Set([...row.capabilities, ...toAdd])];
+                    if (row.stored && row.configId) {
+                      await updateModelConfig(row.configId, { capabilities: next });
+                    } else {
+                      await createModelConfig({
+                        provider: row.provider,
+                        model: row.model,
+                        capabilities: next,
+                        enabled: row.enabled
+                      });
+                    }
+                    await config.reload();
+                    toast.success(toastMessage);
+                  });
+                }}
+              >
+                {label}
+              </button>
+            );
+          })()}
         </div>
       )
     },

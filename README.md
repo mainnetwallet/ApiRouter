@@ -237,8 +237,8 @@ code_execution
 ```
 
 - A model that comes only from `.env` (or a saved custom endpoint) is **inferred**:
-  its capabilities default to `text_input` and `text_output` only. Any other
-  capability (`image_input`, `tool_calling`, `streaming`, `structured_output`, …)
+  its capabilities default to `text_input`, `text_output` and `streaming`. Any other
+  capability (`image_input`, `tool_calling`, `structured_output`, …)
   must be declared on the Model Configurator before it can be used. The page marks
   these rows as environment-provided.
 - Saving the row makes it **configured**, and its checkboxes become authoritative for

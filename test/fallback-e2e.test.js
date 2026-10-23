@@ -31,8 +31,8 @@ const resetFallback = (router) => router.request("/api/fallback/reset", { method
 
 /**
  * Capabilities are DECLARED through the unified Model Configurator, never
- * inferred. A model nobody declared is text in / text out only, so a test that
- * sends images or asks for a stream declares exactly what it needs.
+ * inferred by name. A model nobody declared gets text_input / text_output /
+ * streaming by default, so a test that sends images declares exactly what it needs.
  */
 const TEXT = ["text_input", "text_output"];
 const IMAGE = [...TEXT, "image_input"];
@@ -485,7 +485,8 @@ test("streaming, authentication and the request log are unaffected", async () =>
     assert.equal((await saveChain(router, [{ provider: "groq", model: "m1" }])).status, 401);
 
     const headers = { authorization: "Bearer client-token" };
-    // A stream needs `streaming`, which an undeclared model does not have.
+    // Explicitly declare m1 with streaming so the test is independent of
+    // inference defaults (streaming is now a default, but explicit > inferred).
     await declare(router, "groq", "m1", STREAMING, headers);
     assert.equal((await saveChain(router, [{ provider: "groq", model: "m1" }], headers)).status, 200);
 

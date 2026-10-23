@@ -7,7 +7,7 @@
  *
  *   declared     what the operator says a model can do (the checkbox)
  *   inferred     what this build assumes for a model nobody has declared yet:
- *                text in and text out only
+ *                text in, text out, and streaming
  *   executable   what the adapter on the wire can actually carry
  *
  * A capability is only routable when the request requires it, the model
@@ -172,23 +172,23 @@ export function unsupportedCapabilities(capabilities, protocols) {
 }
 
 /**
- * The capabilities a model has until somebody declares otherwise: text_input
- * and text_output, and NOTHING else.
+ * The capabilities a model has until somebody declares otherwise: text_input,
+ * text_output, and streaming, and NOTHING else.
  *
  * Optional capabilities (tool_calling, image_input, image_output, audio_*,
- * video_*, file_input, structured_output, streaming, reasoning, embeddings,
+ * video_*, file_input, structured_output, reasoning, embeddings,
  * web_search, code_execution) are never inferred from a model name, a
  * provider, a protocol or a former pool membership. They stay false until the
  * operator declares them in the Model Configurator, and even then a request
  * only reaches the model when an adapter it speaks can execute them (see
  * `evaluateCandidate`). The default does not depend on the model's protocols:
- * an undeclared model is text-in/text-out whether or not a provider currently
+ * an undeclared model is text-in/text-out/streaming whether or not a provider currently
  * configures it.
  *
  * `capabilitiesSource` is "inferred" so every surface can say the claim is
  * provisional.
  */
-export const DEFAULT_CAPABILITIES = Object.freeze(["text_input", "text_output"]);
+export const DEFAULT_CAPABILITIES = Object.freeze(["text_input", "text_output", "streaming"]);
 
 export function inferCapabilities() {
   return [...DEFAULT_CAPABILITIES];

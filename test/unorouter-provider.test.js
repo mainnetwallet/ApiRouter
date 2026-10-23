@@ -51,10 +51,10 @@ test("the retired UNOROUTER_VISION_* variables add no target, no pool and no vis
   assert.ok(!targets.some((t) => "pool" in t), "targets carry no pool");
 });
 
-test("an unorouter model defaults to text only: image input is never inferred from the provider, the model name or the old vision list", () => {
+test("an unorouter model defaults to text, streaming and nothing else: image input is never inferred from the provider, the model name or the old vision list", () => {
   const config = loadConfig(ENV);
   const protocols = buildTargets(config.providers).find((t) => t.provider === "unorouter").protocols;
-  assert.deepEqual(inferCapabilities({ protocols }), ["text_input", "text_output"]);
+  assert.deepEqual(inferCapabilities({ protocols }), ["text_input", "text_output", "streaming"]);
 });
 
 test("chat and health URLs resolve to /v1 for every spelling of the base URL", () => {

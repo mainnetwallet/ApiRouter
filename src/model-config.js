@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CAPABILITY_IDS, inferCapabilities, normalizeCapabilities, unsupportedCapabilities } from "./model-capabilities.js";
+import { CAPABILITY_IDS, DEFAULT_CAPABILITIES, inferCapabilities, normalizeCapabilities, unsupportedCapabilities } from "./model-capabilities.js";
 
 /**
  * The unified model configuration: ONE normalized source for which provider/model
@@ -246,7 +246,7 @@ function buildEntry(input, { existing = null, now = Date.now() } = {}) {
     throw bad("provider and model cannot be changed; remove this configuration and add the new model instead", "identity_immutable");
   }
 
-  const capabilitiesInput = input.capabilities === undefined ? (existing?.capabilities ?? ["text_input", "text_output"]) : input.capabilities;
+  const capabilitiesInput = input.capabilities === undefined ? (existing?.capabilities ?? DEFAULT_CAPABILITIES) : input.capabilities;
   if (!Array.isArray(capabilitiesInput)) throw bad("capabilities must be an array of capability ids");
   const { capabilities, unknown } = normalizeCapabilities(capabilitiesInput);
 
