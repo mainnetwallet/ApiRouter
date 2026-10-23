@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "e60eedce-af95-42b2-8039-384fc5f128ec",
-  "updatedAt": "2026-10-23T18:56:12.159Z",
+  "revision": "ac9c3f75-5141-4604-b858-978561729a13",
+  "updatedAt": "2026-10-23T18:56:28.978Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -198,6 +198,25 @@
       "version": 1,
       "createdAt": 1792781772159,
       "updatedAt": 1792781772159
+    },
+    {
+      "id": "mc_38f1d57ea164cc40",
+      "provider": "cloudflare",
+      "model": "@cf/qwen/qwen3-30b-a3b-fp8",
+      "displayName": "@cf/qwen/qwen3-30b-a3b-fp8",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792781788978,
+      "updatedAt": 1792781788978
     }
   ]
 }
