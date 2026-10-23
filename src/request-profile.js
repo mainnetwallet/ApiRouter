@@ -127,7 +127,11 @@ export function requestOperation(pathname, protocol = null) {
   if (path === "/v1/embeddings" || path.endsWith("/embeddings")) return "embeddings";
   if (path === "/v1/images/generations") return "image_generation";
   if (path === "/v1/audio/speech") return "audio_generation";
-  if (path === "/v1/audio/transcriptions" || path === "/v1/audio/translations") return "audio_transcription";
+  if (path === "/v1/audio/transcriptions") return "audio_transcription";
+  if (path === "/v1/audio/translations") return "audio_translation";
+  if (path === "/v1/realtime" || path.endsWith("/realtime")) return "realtime_audio";
+  if (path === "/v1/rerank" || path.endsWith("/rerank")) return "reranking";
+  if (path === "/v1/moderations" || path.endsWith("/moderations")) return "moderation";
   if (path === "/v1/videos" || path === "/v1/videos/generations") return "video_generation";
   if (protocol) return "chat";
   return "unknown";
@@ -142,9 +146,15 @@ function serverToolRequirements(tools) {
     const marker = `${type} ${name}`;
     if (/web[_-]?search/.test(marker)) required.add("web_search");
     if (/code[_-]?(execution|interpreter)/.test(marker)) required.add("code_execution");
+    if (/file[_-]?search/.test(marker)) required.add("file_search");
+    if (/web[_-]?fetch/.test(marker)) required.add("web_fetch");
+    if (/computer([_-]?use)?/.test(marker) || type.startsWith("computer_") || name === "computer") required.add("computer_use");
+    if (/url[_-]?context/.test(marker)) required.add("url_context");
     // Gemini declares server tools as an empty object key.
     if (isObject(tool?.googleSearch) || isObject(tool?.google_search)) required.add("web_search");
     if (isObject(tool?.codeExecution) || isObject(tool?.code_execution)) required.add("code_execution");
+    if (isObject(tool?.urlContext) || isObject(tool?.url_context)) required.add("url_context");
+    if (isObject(tool?.fileSearch) || isObject(tool?.file_search)) required.add("file_search");
   }
   return required;
 }
@@ -218,8 +228,15 @@ export function analyzeRequest({ protocol = null, pathname = "", body = {}, stre
   } else if (operation === "audio_generation") {
     required.add("audio_output");
   } else if (operation === "audio_transcription") {
-    required.add("audio_input");
-    required.add("text_output");
+    required.add("audio_transcription");
+  } else if (operation === "audio_translation") {
+    required.add("audio_translation");
+  } else if (operation === "realtime_audio") {
+    required.add("realtime_audio");
+  } else if (operation === "reranking") {
+    required.add("reranking");
+  } else if (operation === "moderation") {
+    required.add("moderation");
   } else if (operation === "video_generation") {
     required.add("video_output");
   } else {

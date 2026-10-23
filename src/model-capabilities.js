@@ -34,7 +34,16 @@ export const CAPABILITY_IDS = Object.freeze([
   "reasoning",
   "embeddings",
   "web_search",
-  "code_execution"
+  "code_execution",
+  "audio_transcription",
+  "audio_translation",
+  "realtime_audio",
+  "url_context",
+  "file_search",
+  "web_fetch",
+  "computer_use",
+  "reranking",
+  "moderation"
 ]);
 
 const CAPABILITY_SET = new Set(CAPABILITY_IDS);
@@ -57,6 +66,10 @@ export const CAPABILITY_INFO = Object.freeze([
     description: "Can answer as server-sent events." },
   { id: "reasoning", label: "Reasoning", group: "Tools and formats", requestable: false,
     description: "Supports a reasoning / thinking control. A preference, never a hard filter." },
+  { id: "file_search", label: "File search", group: "Tools and formats", requestable: true,
+    description: "Runs a provider-side file search / retrieval tool (e.g. OpenAI Responses file_search)." },
+  { id: "computer_use", label: "Computer use", group: "Tools and formats", requestable: true,
+    description: "Controls a computer desktop or browser via Anthropic's computer use tools." },
   { id: "image_input", label: "Image input", group: "Media", requestable: true,
     description: "Accepts image content parts." },
   { id: "image_output", label: "Image output", group: "Media", requestable: true,
@@ -65,6 +78,12 @@ export const CAPABILITY_INFO = Object.freeze([
     description: "Accepts inline audio content parts." },
   { id: "audio_output", label: "Audio output", group: "Media", requestable: true,
     description: "Generates speech/audio. No adapter in this gateway can execute it yet." },
+  { id: "audio_transcription", label: "Audio transcription", group: "Media", requestable: true,
+    description: "Transcribes speech/audio into text (e.g. Whisper models). No adapter in this gateway can execute it yet." },
+  { id: "audio_translation", label: "Audio translation", group: "Media", requestable: true,
+    description: "Translates audio into English text. No adapter in this gateway can execute it yet." },
+  { id: "realtime_audio", label: "Realtime audio", group: "Media", requestable: true,
+    description: "Low-latency bidirectional audio streaming (WebSocket / WebRTC). No adapter in this gateway can execute it yet." },
   { id: "video_input", label: "Video input", group: "Media", requestable: true,
     description: "Accepts video content parts." },
   { id: "video_output", label: "Video output", group: "Media", requestable: true,
@@ -73,10 +92,18 @@ export const CAPABILITY_INFO = Object.freeze([
     description: "Accepts document/file content parts (for example PDFs)." },
   { id: "embeddings", label: "Embeddings", group: "Advanced", requestable: true,
     description: "Produces embeddings. The gateway exposes no embeddings route yet." },
+  { id: "reranking", label: "Reranking", group: "Advanced", requestable: true,
+    description: "Reranks candidate search results or documents (e.g. Cohere / Jina). The gateway exposes no reranking route yet." },
+  { id: "moderation", label: "Moderation", group: "Advanced", requestable: true,
+    description: "Checks text against safety and content moderation policies. The gateway exposes no moderation route yet." },
   { id: "web_search", label: "Web search", group: "Advanced", requestable: true,
     description: "Runs a provider-side web-search tool." },
+  { id: "web_fetch", label: "Web fetch", group: "Advanced", requestable: true,
+    description: "Fetches web page content. No adapter in this gateway can execute it yet." },
   { id: "code_execution", label: "Code execution", group: "Advanced", requestable: true,
-    description: "Runs a provider-side code-execution tool." }
+    description: "Runs a provider-side code-execution tool." },
+  { id: "url_context", label: "URL context", group: "Advanced", requestable: true,
+    description: "Retrieves and grounds responses using URL context. No adapter in this gateway can execute it yet." }
 ]);
 
 const INFO_BY_ID = new Map(CAPABILITY_INFO.map((entry) => [entry.id, entry]));
@@ -131,9 +158,15 @@ export function normalizeRequirements(value) {
  * conservative: a capability is listed only when the adapter (or the bridge
  * that speaks this protocol) has a wire form for it today.
  *
- * No protocol lists image_output, audio_output, video_output or embeddings:
- * the gateway has no route or adapter that can produce them, so those
- * checkboxes are declarations of intent, not working features.
+ * Capabilities without working wire adapters in this gateway (image_output,
+ * audio_output, video_output, embeddings, audio_transcription,
+ * audio_translation, realtime_audio, web_fetch, url_context, reranking,
+ * moderation) are marked non-executable: those checkboxes are declarations of
+ * intent until dedicated routes or wire adapters exist.
+ *
+ * Supported provider features:
+ *   - anthropic: computer_use (via native Anthropic tools like computer_20241022)
+ *   - openai-responses: file_search (via native Responses API file_search tool)
  */
 const CHAT_LIKE = [
   "text_input", "text_output", "streaming", "tool_calling", "structured_output",
@@ -142,10 +175,10 @@ const CHAT_LIKE = [
 
 export const ADAPTER_CAPABILITIES = Object.freeze({
   "openai-chat": Object.freeze([...CHAT_LIKE]),
-  "openai-responses": Object.freeze([...CHAT_LIKE]),
+  "openai-responses": Object.freeze([...CHAT_LIKE, "file_search"]),
   anthropic: Object.freeze([
     "text_input", "text_output", "streaming", "tool_calling",
-    "image_input", "file_input", "reasoning", "web_search"
+    "image_input", "file_input", "reasoning", "web_search", "computer_use"
   ]),
   gemini: Object.freeze([
     "text_input", "text_output", "streaming", "tool_calling", "structured_output",

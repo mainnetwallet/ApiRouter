@@ -19,8 +19,8 @@ import {
 const target = (provider, model, protocols = ["openai-chat"]) => ({ provider, model, protocols });
 
 test("the capability schema is stable and ordered", () => {
-  assert.equal(CAPABILITY_IDS.length, 16);
-  assert.equal(new Set(CAPABILITY_IDS).size, 16);
+  assert.equal(CAPABILITY_IDS.length, 25);
+  assert.equal(new Set(CAPABILITY_IDS).size, 25);
   assert.deepEqual(normalizeCapabilities(["streaming", "unknown-thing", "text_input", "text_input"]).capabilities, [
     "text_input", "streaming"
   ]);
@@ -49,7 +49,7 @@ test("an undeclared model defaults to text in, text out and streaming: nothing e
   assert.deepEqual(inferCapabilities(), expected);
 });
 
-test("adapter compatibility is separate from declaration, and no adapter claims generated media", () => {
+test("adapter compatibility is separate from declaration, and unsupported capabilities are non-executable", () => {
   // The anthropic adapter has no structured-output wire form today.
   assert.ok(!ADAPTER_CAPABILITIES.anthropic.includes("structured_output"));
   // Image input IS executable by every real adapter, so declaring it is enough
@@ -57,10 +57,26 @@ test("adapter compatibility is separate from declaration, and no adapter claims 
   for (const protocol of Object.keys(ADAPTER_CAPABILITIES)) {
     assert.ok(ADAPTER_CAPABILITIES[protocol].includes("image_input"), `${protocol} can carry image input`);
     assert.ok(ADAPTER_CAPABILITIES[protocol].includes("streaming"), `${protocol} can carry streaming`);
-    for (const generated of ["image_output", "audio_output", "video_output", "embeddings"]) {
-      assert.ok(!ADAPTER_CAPABILITIES[protocol].includes(generated), `${protocol} must not claim ${generated}`);
+    for (const nonExec of [
+      "image_output", "audio_output", "video_output", "embeddings",
+      "audio_transcription", "audio_translation", "realtime_audio",
+      "web_fetch", "url_context", "reranking", "moderation"
+    ]) {
+      assert.ok(!ADAPTER_CAPABILITIES[protocol].includes(nonExec), `${protocol} must not claim ${nonExec}`);
     }
   }
+
+  // computer_use is supported on anthropic only
+  assert.ok(ADAPTER_CAPABILITIES.anthropic.includes("computer_use"));
+  assert.ok(!ADAPTER_CAPABILITIES["openai-chat"].includes("computer_use"));
+  assert.ok(!ADAPTER_CAPABILITIES["openai-responses"].includes("computer_use"));
+  assert.ok(!ADAPTER_CAPABILITIES.gemini.includes("computer_use"));
+
+  // file_search is supported on openai-responses only
+  assert.ok(ADAPTER_CAPABILITIES["openai-responses"].includes("file_search"));
+  assert.ok(!ADAPTER_CAPABILITIES["openai-chat"].includes("file_search"));
+  assert.ok(!ADAPTER_CAPABILITIES.anthropic.includes("file_search"));
+  assert.ok(!ADAPTER_CAPABILITIES.gemini.includes("file_search"));
 });
 
 test("an unknown protocol executes nothing rather than assuming OpenAI", () => {
@@ -104,6 +120,36 @@ test("eligibility requires enabled, declared and executable", () => {
   assert.deepEqual(
     evaluateCandidate({ required: ["streaming"], declared: ["text_input", "text_output"], protocols: ["openai-chat"] }),
     { eligible: false, reason: "capability_not_configured", missing: ["streaming"] }
+  );
+
+  // computer_use is eligible on anthropic, but adapter_unsupported on openai-chat
+  assert.deepEqual(
+    evaluateCandidate({ required: ["computer_use"], declared: ["computer_use"], protocols: ["anthropic"] }),
+    { eligible: true, reason: null, missing: [] }
+  );
+  assert.deepEqual(
+    evaluateCandidate({ required: ["computer_use"], declared: ["computer_use"], protocols: ["openai-chat"] }),
+    { eligible: false, reason: "adapter_unsupported", missing: ["computer_use"] }
+  );
+
+  // file_search is eligible on openai-responses, but adapter_unsupported on openai-chat
+  assert.deepEqual(
+    evaluateCandidate({ required: ["file_search"], declared: ["file_search"], protocols: ["openai-responses"] }),
+    { eligible: true, reason: null, missing: [] }
+  );
+  assert.deepEqual(
+    evaluateCandidate({ required: ["file_search"], declared: ["file_search"], protocols: ["openai-chat"] }),
+    { eligible: false, reason: "adapter_unsupported", missing: ["file_search"] }
+  );
+
+  // Capabilities marked non-executable (e.g. reranking, audio_transcription) are adapter_unsupported even if declared
+  assert.deepEqual(
+    evaluateCandidate({ required: ["reranking"], declared: ["reranking"], protocols: ["openai-chat"] }),
+    { eligible: false, reason: "adapter_unsupported", missing: ["reranking"] }
+  );
+  assert.deepEqual(
+    evaluateCandidate({ required: ["audio_transcription"], declared: ["audio_transcription"], protocols: ["openai-chat"] }),
+    { eligible: false, reason: "adapter_unsupported", missing: ["audio_transcription"] }
   );
 });
 

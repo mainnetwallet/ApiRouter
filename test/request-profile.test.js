@@ -163,11 +163,27 @@ test("endpoint-only operations are classified even though no route serves them y
   assert.equal(requestOperation("/v1/images/generations"), "image_generation");
   assert.equal(requestOperation("/v1/audio/speech"), "audio_generation");
   assert.equal(requestOperation("/v1/audio/transcriptions"), "audio_transcription");
+  assert.equal(requestOperation("/v1/audio/translations"), "audio_translation");
+  assert.equal(requestOperation("/v1/realtime"), "realtime_audio");
+  assert.equal(requestOperation("/v1/rerank"), "reranking");
+  assert.equal(requestOperation("/v1/moderations"), "moderation");
   assert.equal(requestOperation("/v1/videos"), "video_generation");
   assert.equal(requestOperation("/v1/chat/completions", "openai-chat"), "chat");
 
   assert.deepEqual(analyzeRequest({ pathname: "/v1/embeddings", body: {} }).required, ["embeddings"]);
   assert.deepEqual(analyzeRequest({ pathname: "/v1/images/generations", body: {} }).required, ["image_output"]);
-  const transcription = analyzeRequest({ pathname: "/v1/audio/transcriptions", body: {} });
-  assert.deepEqual(transcription.required, ["text_output", "audio_input"]);
+  assert.deepEqual(analyzeRequest({ pathname: "/v1/audio/transcriptions", body: {} }).required, ["audio_transcription"]);
+  assert.deepEqual(analyzeRequest({ pathname: "/v1/audio/translations", body: {} }).required, ["audio_translation"]);
+  assert.deepEqual(analyzeRequest({ pathname: "/v1/realtime", body: {} }).required, ["realtime_audio"]);
+  assert.deepEqual(analyzeRequest({ pathname: "/v1/rerank", body: {} }).required, ["reranking"]);
+  assert.deepEqual(analyzeRequest({ pathname: "/v1/moderations", body: {} }).required, ["moderation"]);
+});
+
+test("server-side tools require their corresponding capabilities", () => {
+  assert.ok(analyzeRequest({ body: { tools: [{ type: "file_search" }] } }).required.includes("file_search"));
+  assert.ok(analyzeRequest({ body: { tools: [{ type: "computer_20241022", name: "computer" }] } }).required.includes("computer_use"));
+  assert.ok(analyzeRequest({ body: { tools: [{ type: "web_fetch" }] } }).required.includes("web_fetch"));
+  assert.ok(analyzeRequest({ body: { tools: [{ type: "url_context" }] } }).required.includes("url_context"));
+  assert.ok(analyzeRequest({ body: { tools: [{ urlContext: {} }] } }).required.includes("url_context"));
+  assert.ok(analyzeRequest({ body: { tools: [{ fileSearch: {} }] } }).required.includes("file_search"));
 });

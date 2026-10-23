@@ -230,10 +230,13 @@ being configured separately for text and vision.
 The capability vocabulary is intentionally broader than what any one adapter can do:
 
 ```text
-text_input   text_output   tool_calling   image_input   image_output
-video_input  video_output  audio_input    audio_output  file_input
-structured_output  streaming  reasoning   embeddings    web_search
-code_execution
+text_input          text_output          tool_calling         structured_output
+streaming           reasoning            file_search          computer_use
+image_input         image_output         audio_input          audio_output
+audio_transcription audio_translation    realtime_audio       video_input
+video_output        file_input           embeddings           reranking
+moderation          web_search           web_fetch            code_execution
+url_context
 ```
 
 - A model that comes only from `.env` (or a saved custom endpoint) is **inferred**:
