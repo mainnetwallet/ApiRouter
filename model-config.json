@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "ed15730d-759b-42a4-b908-4f852dd8ca48",
-  "updatedAt": "2026-10-23T19:19:35.623Z",
+  "revision": "6d2c70bb-3f00-4c92-b8f7-77917a6ef5af",
+  "updatedAt": "2026-10-23T19:20:06.807Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -607,6 +607,25 @@
       "version": 1,
       "createdAt": 1792783175623,
       "updatedAt": 1792783175623
+    },
+    {
+      "id": "mc_7102a1a636fe30b2",
+      "provider": "vercel",
+      "model": "inclusionai/ling-3.1-flash-free",
+      "displayName": "inclusionai/ling-3.1-flash-free",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792783206807,
+      "updatedAt": 1792783206807
     }
   ]
 }
