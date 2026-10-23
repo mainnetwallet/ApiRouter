@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "2241e591-6aab-4448-a7e0-be125d976d49",
-  "updatedAt": "2026-10-23T18:33:10.966Z",
+  "revision": "e6be2073-94ce-42be-a67f-0cf0424bb5be",
+  "updatedAt": "2026-10-23T18:41:47.579Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -43,6 +43,26 @@
       "version": 1,
       "createdAt": 1792780390965,
       "updatedAt": 1792780390965
+    },
+    {
+      "id": "mc_6e792560a28677ae",
+      "provider": "openrouter",
+      "model": "minimax/minimax-m3.1-flash:free",
+      "displayName": "minimax/minimax-m3.1-flash:free",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "video_input",
+        "streaming"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792780907578,
+      "updatedAt": 1792780907578
     }
   ]
 }
