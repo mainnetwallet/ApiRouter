@@ -1,8 +1,8 @@
 import { CUSTOM_PROTOCOLS } from "./custom-playground.js";
 import { createHash } from "node:crypto";
 import { describeHealth, HEALTH_STATES } from "./health.js";
-import { ONE_MODEL_MAX_COOLDOWN_MS, ONE_PROVIDER_MAX_MODELS, oneModelKeyId } from "./one-model.js";
-import { modelLatency, resetAutomaticOrderCache, routeOrderByPool } from "./fallback-plan.js";
+import { ONE_MODEL_MAX_COOLDOWN_MS, ONE_PROVIDER_MAX_MODELS, normalizeKeyId, oneModelKeyId } from "./one-model.js";
+import { modelLatency, resetAutomaticOrderCache, routeOrder } from "./fallback-plan.js";
 import {
   FALLBACK_MODE_INFO,
   FALLBACK_MODES,
@@ -213,7 +213,7 @@ export function createApi({
     const entries = describeAll(now);
     // The real route order, exactly as the saved selection produces it;
     // health only removes cooling targets. Not a health-score sort.
-    const ranked = routeOrderByPool(routableTargets(), {
+    const ranked = routeOrder(routableTargets(), {
       chain: fallbackSnapshot(),
       health,
       now,
@@ -243,7 +243,7 @@ export function createApi({
 
   // --- /api/providers ----------------------------------------------------
   /**
-   * The rollup a provider gets when it has no targets in a pool. Same shape as
+   * The rollup a provider gets when it has no targets. Same shape as
    * `providerRollup`, so the UI renders one table for both.
    */
   const emptyRollup = (provider) => ({
@@ -422,7 +422,7 @@ export function createApi({
   // --- /api/fallback -----------------------------------------------------
   /**
    * Everything the Fallback Configuration page needs, in one payload: the saved
-   * chain per pool, the selected mode, and the catalogue of models that can be
+   * chain, the selected mode, and the catalogue of models that can be
    * added — each with its per-key health and its measured latency.
    *
    * Latency is reported WITH its source (`request` = a real generation, `probe`
@@ -544,11 +544,11 @@ export function createApi({
 
     // One Provider Fallback: only the chosen provider's listed models are routed.
     const activeOneModel = oneModelActive();
-    const poolTargets = activeOneModel
+    const routableForPreview = activeOneModel
       ? switchedOnTargets.filter((target) => oneModel.matches(target))
       : switchedOnTargets;
 
-    if (activeOneModel && switchedOnTargets.length > 0 && poolTargets.length === 0) {
+    if (activeOneModel && switchedOnTargets.length > 0 && routableForPreview.length === 0) {
       return {
         status: 503,
         type: "one_model_unavailable",
@@ -556,7 +556,7 @@ export function createApi({
       };
     }
 
-    if (poolTargets.length === 0) {
+    if (routableForPreview.length === 0) {
       return {
         status: 503,
         type: "no_route",
@@ -567,7 +567,7 @@ export function createApi({
     // A client protocol is servable if any target can be reached for it —
     // natively, or through a bridge (so a chat client is servable by a
     // Gemini-only configuration).
-    const supported = servableProtocols(poolTargets);
+    const supported = servableProtocols(routableForPreview);
     if (!supported.has(protocol)) {
       return {
         error: `protocol "${protocol}" is not served by any configured target`,
@@ -579,7 +579,7 @@ export function createApi({
       generatedAt: new Date(now).toISOString(),
       protocols: [...supported].sort(),
       ...describeRouting({
-        targets: poolTargets,
+        targets: routableForPreview,
         health,
         protocol,
         chain: fallbackChain?.get?.() ?? [],
@@ -664,7 +664,7 @@ export function createApi({
    * base URL and no credential ever leaves the gateway through this payload.
    *
    * Each row is the EFFECTIVE entry for one provider/model: the environment's
-   * keys/protocols/pool, the persisted declaration when there is one, and the
+   * keys/protocols, the persisted declaration when there is one, and the
    * live Model Switch state. `enabled` therefore answers "may the router pick
    * this at all", while `enabledByConfig` is only the persisted checkbox — so
    * the page can say WHY a model is off instead of guessing.
@@ -760,9 +760,7 @@ export function createApi({
     const row = modelConfig?.index(targets).get(`${normalizedProvider}/${normalizedModel}`);
     if (!row) return null;
     return {
-      capabilities: inferCapabilities({
-        protocols: row.protocols
-      })
+      capabilities: inferCapabilities()
     };
   }
 
@@ -981,7 +979,7 @@ export function createApi({
         /*
          * Everything is validated BEFORE anything is written. A rejected save
          * must leave the configuration exactly as it was — including the case
-         * where one request carries both a mode and a pool and only the second
+         * where one request carries both a mode and entries and only the second
          * is invalid, which used to persist the mode on the way to the error.
          */
         const hasMode = body?.mode !== undefined;
@@ -1001,6 +999,14 @@ export function createApi({
           if (requested !== "" && !isKnownMode(requested)) {
             return fail(req, res, 400, `unknown mode "${body.mode}"`, "invalid_request", { modes: FALLBACK_MODES });
           }
+        }
+
+        // A body that names only a (valid) mode carries no selection to save.
+        // The mode is derived from the saved entries, so there is nothing to
+        // write: answer with the state in force instead of walking an entries
+        // list that was never sent.
+        if (!Array.isArray(body?.entries)) {
+          return sendJson(req, res, 200, fallbackPayload(now));
         }
 
         // What the chain can actually be routed to: the models configured, and
@@ -1137,7 +1143,7 @@ export function createApi({
 
     /*
      * The Provider Switch: turn a whole provider off or on. While it is off none
-     * of its models (any key, either pool) is planned, fallen back to or
+     * of its models (any key) is planned, fallen back to or
      * previewed, and requests already waiting on it are aborted and fall back to
      * the next model. Nothing is cooled down and no model's own switch or health
      * data changes, so enabling the provider restores exactly the previous
@@ -1219,16 +1225,17 @@ export function createApi({
           return fail(req, res, 400, "provider and models must be sent together", "invalid_request");
         }
 
-        // Per-key cooldowns: { "model::text:0": 60000, "model::text:1": null }. A number sets a
+        // Per-key cooldowns: { "model::0": 60000, "model::1": null }. A number sets a
         // key's cooldown in ms, null (or 0) removes it, a key left out is kept.
         let cooldowns = {};
         if (body?.cooldowns !== undefined) {
           if (body.cooldowns === null || typeof body.cooldowns !== "object" || Array.isArray(body.cooldowns)) {
-            return fail(req, res, 400, "cooldowns must be an object of \"model::pool:keyIndex\" to milliseconds", "invalid_request");
+            return fail(req, res, 400, "cooldowns must be an object of \"model::keyIndex\" to milliseconds", "invalid_request");
           }
           for (const [id, ms] of Object.entries(body.cooldowns)) {
-            if (!/^(.{1,300}::)?(text|vision):\d{1,4}$/.test(id)) {
-              return fail(req, res, 400, `invalid key id "${id.slice(0, 20)}": use "model::text:0" or "model::vision:0"`, "invalid_request");
+            // The current "model::0" form, plus legacy ids ("text:0", "model::text:0").
+            if (normalizeKeyId(id, ["_"]) === null) {
+              return fail(req, res, 400, `invalid key id "${id.slice(0, 20)}": use "model::0" (the model, then the key index)`, "invalid_request");
             }
             const ok = ms === null || ms === 0
               || (Number.isSafeInteger(ms) && ms >= 1 && ms <= ONE_MODEL_MAX_COOLDOWN_MS);
@@ -1260,11 +1267,12 @@ export function createApi({
         }
 
         // Cooldowns are for the chosen models' keys; one for a key that is not
-        // there would sit in the file doing nothing and nobody could see it. An
-        // old-style "text:0" means that key of the first model.
+        // there would sit in the file doing nothing and nobody could see it.
+        // Legacy ids ("text:0", "model::text:0", "model::vision:0") are accepted
+        // and rewritten to the current "model::index" form.
         const resolvedCooldowns = {};
         for (const [id, ms] of Object.entries(cooldowns)) {
-          resolvedCooldowns[/^(text|vision):\d{1,4}$/.test(id) && next.models.length > 0 ? `${next.models[0]}::${id}` : id] = ms;
+          resolvedCooldowns[normalizeKeyId(id, next.models) ?? id] = ms;
         }
         cooldowns = resolvedCooldowns;
         if (Object.keys(cooldowns).length > 0) {
@@ -1343,7 +1351,6 @@ export function createApi({
           status: searchParams.get("status"),
           provider: searchParams.get("provider"),
           protocol: searchParams.get("protocol"),
-          pool: searchParams.get("pool"),
           outcome: searchParams.get("outcome")
         }),
         // Requests still running, so the Live Logs view can show them before
@@ -1369,7 +1376,6 @@ export function createApi({
           limit: searchParams.get("limit") ?? undefined,
           afterSeq: searchParams.get("afterSeq") ?? 0,
           requestId: searchParams.get("requestId"),
-          pool: searchParams.get("pool"),
           state: searchParams.get("state"),
           provider: searchParams.get("provider")
         })

@@ -4,18 +4,16 @@ import { HealthRegistry } from "../src/health.js";
 import {
   PHASES,
   buildRoutePlan,
-  chainStatusByPool,
+  chainStatus,
   effectiveOrder,
   resetAutomaticOrderCache,
-  routeOrderByPool
+  routeOrder
 } from "../src/fallback-plan.js";
 
-const t = (provider, model, keyIndex = 0, pool = "text") => ({
-  ...(pool === "vision" ? { id: `vision:${provider}:${model}:key-${keyIndex}` } : {}),
+const t = (provider, model, keyIndex = 0) => ({
   provider,
   model,
   keyIndex,
-  pool,
   protocols: ["openai-chat"]
 });
 
@@ -76,7 +74,7 @@ test("every eligible key of a selected model is tried before the next model", ()
   ]);
 });
 
-test("an entry naming a model this pool does not serve contributes nothing", () => {
+test("an entry naming a model the request cannot be served by contributes nothing", () => {
   resetAutomaticOrderCache();
   const { steps, configured } = buildRoutePlan({
     targets: twoKeyTargets,
@@ -410,33 +408,29 @@ test("after the Health batch fails the Manual batch is walked, then Health again
 });
 
 // ---------------------------------------------------------------------------
-// Pool separation
+// One chain, capability-narrowed targets
 // ---------------------------------------------------------------------------
 
-test("a plan can only ever contain targets of the pool it was built for", () => {
+test("a plan only contains targets the caller already narrowed to, and never substitutes for a missing one", () => {
   resetAutomaticOrderCache();
-  const textTargets = [t("a", "A"), t("b", "B")];
-  const visionTargets = [t("a", "VA", 0, "vision"), t("b", "VB", 0, "vision")];
-  const all = [...textTargets, ...visionTargets];
+  // The caller narrows the target list by capability BEFORE planning. A chain
+  // entry naming a model outside that list resolves to nothing: the plan fails
+  // closed rather than reaching an unrelated model in its place.
+  const capable = [t("a", "A"), t("b", "B")];
+  const missing = buildRoutePlan({ targets: capable, chain: entries(["a", "ImageOnly"]), cacheKey: "cap-missing" });
+  assert.deepEqual(missing.steps, [], "a model the request cannot use cannot enter the plan or be substituted for");
+  assert.equal(missing.failClosed, true);
+  assert.ok(missing.groups.every((group) => group.targets.length === 0));
 
-  // The text selection names a VISION model. It resolves to nothing for the text
-  // pool, so the text plan is empty: neither the vision model nor any unrelated
-  // text model may be reached in its place.
-  const text = buildRoutePlan({ targets: textTargets, chain: entries(["a", "VA"]), cacheKey: "pool-text" });
-  assert.deepEqual(text.steps, [], "a vision-only model cannot enter the text plan, and cannot be substituted for");
-  assert.equal(text.failClosed, true);
-  assert.ok(text.groups.every((group) => group.targets.length === 0));
+  // The same single chain, against a wider (image-capable) target list, honours it.
+  const imageCapable = [t("a", "ImageOnly"), t("b", "VB")];
+  const image = buildRoutePlan({ targets: imageCapable, chain: entries(["b", "VB"], ["a", "ImageOnly"]), cacheKey: "cap-image" });
+  assert.deepEqual(labels(phaseSteps(image.steps, PHASES.MANUAL)), ["manual-selection:b/VB#0", "manual-selection:a/ImageOnly#0"]);
 
-  const vision = buildRoutePlan({ targets: visionTargets, chain: entries(["b", "VB"], ["a", "VA"]), cacheKey: "pool-vision" });
-  assert.ok(vision.steps.every((step) => step.target.pool === "vision"));
-  assert.deepEqual(labels(phaseSteps(vision.steps, PHASES.MANUAL)), ["manual-selection:b/VB#0", "manual-selection:a/VA#0"]);
-
-  // The pooled view keeps the two apart as well. The vision selection names only
-  // VB, so VA is unselected — reachable, but only after the whole selection.
-  const ranked = routeOrderByPool(all, { chains: { vision: entries(["b", "VB"]) } });
-  assert.deepEqual(ranked.map((target) => `${target.pool ?? "text"}:${target.model}`), [
-    "text:A", "text:B", "vision:VB", "vision:VA"
-  ]);
+  // routeOrder takes one chain. VB is selected; ImageOnly is unselected —
+  // reachable, but only after the whole selection.
+  const ranked = routeOrder(imageCapable, { chain: entries(["b", "VB"]) });
+  assert.deepEqual(ranked.map((target) => target.model), ["VB", "ImageOnly"]);
 });
 
 test("an unselected model is reached only after the whole saved selection", () => {
@@ -733,7 +727,7 @@ test("a selection that is wholly unservable is not silently replaced by routing 
 // ---------------------------------------------------------------------------
 // Fail-closed routing
 //
-// A pool with NO saved entries is free to route automatically. A pool that has
+// A router with NO saved entries is free to route automatically. One that has
 // saved entries but no USABLE ones must not: widening to models the selection
 // does not name, or to keys an entry excludes, is exactly the silent fallback
 // the selection exists to prevent.
@@ -796,17 +790,14 @@ test("an unusable selection fails closed rather than reaching past it", () => {
   assert.deepEqual(result.steps, []);
 });
 
-test("an unusable text selection does not affect the vision pool", () => {
+test("an unusable selection routes nothing, however many targets exist", () => {
   resetAutomaticOrderCache();
-  const text = [t("a", "A"), t("b", "B")];
-  const vision = [t("a", "VA", 0, "vision"), t("b", "VB", 0, "vision")];
-  // The text selection names a model that is gone; vision has no selection.
-  const ranked = routeOrderByPool([...text, ...vision], { chains: { text: entries(["ghost", "Gone"]) } });
+  const targets = [t("a", "A"), t("b", "B"), t("a", "VA"), t("b", "VB")];
+  const ranked = routeOrder(targets, { chain: entries(["ghost", "Gone"]) });
+  assert.equal(ranked.length, 0, "the unusable selection routes nothing");
 
-  assert.equal(ranked.filter((target) => (target.pool ?? "text") === "text").length, 0,
-    "the unusable text selection routes nothing");
-  assert.equal(ranked.filter((target) => target.pool === "vision").length, 2,
-    "vision has no selection, so it still routes automatically");
+  const unconfigured = routeOrder(targets, { chain: [] });
+  assert.equal(unconfigured.length, 4, "no selection at all routes every target automatically");
 });
 
 test("pinned requests are unaffected by an unusable selection", () => {
@@ -867,41 +858,38 @@ test("reordering the target list takes effect immediately", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Per-pool status, for the health surface
+// Chain status, for the health surface
 // ---------------------------------------------------------------------------
 
-test("chainStatusByPool reports an unusable selection per pool, without touching the other pool", () => {
+test("chainStatus reports an unusable selection as fail-closed, and no selection as unconfigured", () => {
   resetAutomaticOrderCache();
-  const text = [t("a", "A"), t("b", "B")];
-  const vision = [t("a", "VA", 0, "vision")];
+  const targets = [t("a", "A"), t("b", "B")];
 
-  const status = chainStatusByPool([...text, ...vision], {
-    chains: { text: entries(["ghost", "Gone"]) }
-  });
-
-  assert.deepEqual(status.text, { failClosed: true, entries: 1, resolved: 0, source: "manual" });
-  // Vision has no selection at all, so it is unconfigured rather than broken —
-  // and `entries`/`resolved` describe the SELECTION, so an unconfigured pool is
-  // 0/0 even though it routes every one of its targets automatically.
-  assert.deepEqual(status.vision, { failClosed: false, entries: 0, resolved: 0, source: "auto" });
+  assert.deepEqual(chainStatus(targets, { chain: entries(["ghost", "Gone"]) }),
+    { failClosed: true, entries: 1, resolved: 0, source: "manual" });
+  // No selection at all is unconfigured rather than broken — and `entries` /
+  // `resolved` describe the SELECTION, so it is 0/0 even though every target
+  // still routes automatically.
+  assert.deepEqual(chainStatus(targets, { chain: [] }),
+    { failClosed: false, entries: 0, resolved: 0, source: "auto" });
 });
 
-test("chainStatusByPool separates an unusable selection from ordinary unavailability", () => {
+test("chainStatus separates an unusable selection from ordinary unavailability", () => {
   resetAutomaticOrderCache();
   const all = [t("a", "A")];
 
   // A saved, usable selection is neither fail-closed nor unconfigured.
-  const healthy = chainStatusByPool(all, { chains: { text: entries(["a", "A"]) } });
-  assert.deepEqual(healthy.text, { failClosed: false, entries: 1, resolved: 1, source: "manual" });
+  const healthy = chainStatus(all, { chain: entries(["a", "A"]) });
+  assert.deepEqual(healthy, { failClosed: false, entries: 1, resolved: 1, source: "manual" });
 
   // No selection at all is unconfigured, which is a different state again.
-  const none = chainStatusByPool(all, { chains: {} });
-  assert.deepEqual(none.text, { failClosed: false, entries: 0, resolved: 0, source: "auto" });
+  const none = chainStatus(all, { chain: [] });
+  assert.deepEqual(none, { failClosed: false, entries: 0, resolved: 0, source: "auto" });
 
   // Every target cooling down is NOT fail-closed: the configuration is fine.
   const health = new HealthRegistry();
   health.markFailure(t("a", "A"), 500, { cooldownMs: 60_000 });
-  const cooling = chainStatusByPool(all, { chains: { text: entries(["a", "A"]) }, health });
-  assert.equal(cooling.text.failClosed, false, "provider trouble must not read as a configuration fault");
-  assert.equal(cooling.text.resolved, 1, "the entry still resolves; it is the provider that is unavailable");
+  const cooling = chainStatus(all, { chain: entries(["a", "A"]), health });
+  assert.equal(cooling.failClosed, false, "provider trouble must not read as a configuration fault");
+  assert.equal(cooling.resolved, 1, "the entry still resolves; it is the provider that is unavailable");
 });

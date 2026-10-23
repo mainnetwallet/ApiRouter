@@ -17,9 +17,9 @@ import { CUSTOM_PROTOCOLS, PlaygroundError, isBlockedAddress, validateEndpointBa
  * Keys live in the data file (like the other `data/*.json` state) and are never
  * returned by `describe()`: the control panel only ever sees a key COUNT.
  *
- * An endpoint serves one unified pool: its `models`, `apiKeys` and `baseUrl`.
- * Whether a model can serve a request is decided by its declared capabilities
- * in the Model Configurator, not by pool membership.
+ * An endpoint has ONE model list, ONE API-key list and ONE base URL. Whether a
+ * model can serve a request (an image, a tool call, ...) is decided by its
+ * declared capabilities in the Model Configurator, never by the endpoint.
  */
 
 export const CUSTOM_PROVIDER_PREFIX = "custom-";
@@ -79,7 +79,7 @@ function cleanName(value) {
 }
 
 /** An endpoint must serve at least one model, and every model needs a key. */
-function assertPools(endpoint, { createMessage = false } = {}) {
+function assertServable(endpoint, { createMessage = false } = {}) {
   if (endpoint.models.length === 0) throw bad("At least one model is required");
   if (endpoint.apiKeys.length === 0) {
     throw bad(createMessage
@@ -114,6 +114,46 @@ async function assertPublicHost(baseUrl, { allowPrivateHosts, lookup }) {
   }
 }
 
+/**
+ * LEGACY MIGRATION, read-side only. Files saved while the router had a separate
+ * vision pool may carry `visionModels`, `visionApiKeys` and `visionBaseUrl`.
+ * The active model is one list, one key list and one base URL, so on load:
+ *
+ *  - `visionModels` are appended to `models` (ids kept, duplicates dropped);
+ *  - `visionApiKeys` are appended AFTER the existing keys, so every existing key
+ *    keeps its index (Fallback Chain key restrictions refer to indexes) — but
+ *    only when the vision pool used the same base URL (or none), because a key
+ *    must never be sent to a host it was not issued for;
+ *  - a different `visionBaseUrl` cannot be expressed on one endpoint, so its
+ *    models and keys are not merged and a warning says so.
+ *
+ * Nothing is inferred: a migrated model has the default text capabilities until
+ * the operator declares `image_input` for it. The fields are not written back
+ * (see `serialize`), so the next save leaves a unified file.
+ */
+export function migrateLegacyVision(entry) {
+  const notes = [];
+  const models = toList(entry?.models);
+  const apiKeys = toList(entry?.apiKeys);
+  const legacyModels = toList(entry?.visionModels);
+  const legacyKeys = toList(entry?.visionApiKeys);
+  if (legacyModels.length === 0 && legacyKeys.length === 0 && !entry?.visionBaseUrl) {
+    return { models, apiKeys, notes };
+  }
+  const sameHost = !entry?.visionBaseUrl
+    || String(entry.visionBaseUrl).trim().replace(/\/+$/, "") === String(entry?.baseUrl ?? "").trim().replace(/\/+$/, "");
+  if (!sameHost) {
+    notes.push(`"${String(entry?.id ?? "").slice(0, 60)}" had a separate vision base URL; its vision models and keys were not merged. Add them as their own endpoint.`);
+    return { models, apiKeys, notes };
+  }
+  const mergedModels = [...new Set([...models, ...legacyModels])];
+  const mergedKeys = [...new Set([...apiKeys, ...legacyKeys])];
+  if (legacyModels.length > 0) {
+    notes.push(`"${String(entry?.id ?? "").slice(0, 60)}": legacy vision models were merged into its single model list; declare image_input in the Model Configurator where needed.`);
+  }
+  return { models: mergedModels, apiKeys: mergedKeys, notes };
+}
+
 /** Parses saved JSON text into the valid endpoints it holds; anything invalid is skipped, never fatal. */
 function parseEndpoints(text, { allowPrivateHosts }) {
   let parsed;
@@ -129,19 +169,17 @@ function parseEndpoints(text, { allowPrivateHosts }) {
       const id = String(entry?.id ?? "");
       if (!isCustomProviderId(id) || seen.has(id)) continue;
       if (!CUSTOM_PROTOCOLS.includes(entry.protocol)) continue;
-      // Legacy saved files carried `visionModels` / `visionApiKeys` /
-      // `visionBaseUrl` for the retired vision pool. They are ignored now: a
-      // model's capability is declared in the Model Configurator, not by which
-      // pool it was saved in. The text fields are the only ones read.
+      const { models, apiKeys, notes } = migrateLegacyVision(entry);
+      for (const note of notes) console.warn(`custom endpoints: ${note}`);
       const endpoint = {
         id,
         name: cleanName(entry.name),
         baseUrl: validateEndpointBaseUrl(entry.baseUrl, { allowPrivateHosts }),
         protocol: entry.protocol,
-        models: cleanModels(entry.models, { required: false }),
-        apiKeys: cleanKeys(entry.apiKeys)
+        models: cleanModels(models, { required: false }),
+        apiKeys: cleanKeys(apiKeys)
       };
-      assertPools(endpoint);
+      assertServable(endpoint);
       endpoints.push(endpoint);
       seen.add(id);
     } catch (error) {
@@ -355,7 +393,7 @@ export class CustomEndpointStore {
       const models = cleanModels(input.models ?? input.model, { required: false });
       const apiKeys = cleanKeys(input.apiKeys ?? input.apiKey);
       const endpoint = { id: this.uniqueId(name), name, baseUrl, protocol, models, apiKeys };
-      assertPools(endpoint, { createMessage: true });
+      assertServable(endpoint, { createMessage: true });
       await this.commit(() => this.endpoints.push(endpoint), () => this.endpoints.splice(this.endpoints.indexOf(endpoint), 1));
       return this.describe(endpoint);
     });
@@ -388,7 +426,7 @@ export class CustomEndpointStore {
       if (input.models !== undefined) next.models = cleanModels(input.models, { required: false });
       if (input.apiKeys !== undefined) next.apiKeys = cleanKeys(input.apiKeys);
       if (input.addApiKeys !== undefined) next.apiKeys = [...new Set([...next.apiKeys, ...cleanKeys(input.addApiKeys)])];
-      assertPools(next);
+      assertServable(next);
 
       const index = this.endpoints.indexOf(current);
       await this.commit(() => { this.endpoints[index] = next; }, () => { this.endpoints[index] = current; });

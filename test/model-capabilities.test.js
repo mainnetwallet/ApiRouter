@@ -15,7 +15,7 @@ import {
   validateRequestedModel
 } from "../src/model-capabilities.js";
 
-const target = (provider, model, protocols = ["openai-chat"], pool = "text") => ({ provider, model, protocols, pool });
+const target = (provider, model, protocols = ["openai-chat"]) => ({ provider, model, protocols });
 
 test("the capability schema is stable and ordered", () => {
   assert.equal(CAPABILITY_IDS.length, 16);
@@ -30,19 +30,30 @@ test("reasoning can never be a hard requirement", () => {
   assert.deepEqual(normalizeRequirements(["reasoning", "text_input", "reasoning"]), ["text_input"]);
 });
 
-test("inference is pool- and adapter-aware, and never invents generated media", () => {
-  const text = inferCapabilities({ pool: "text", protocols: ["openai-chat"] });
-  assert.ok(text.includes("text_input"));
-  assert.ok(text.includes("tool_calling"));
-  assert.ok(!text.includes("image_input"));
+test("an undeclared model is text in / text out only: nothing is inferred from a pool, a name or a protocol", () => {
+  const expected = ["text_input", "text_output"];
 
-  const vision = inferCapabilities({ pool: "vision", protocols: ["openai-chat"] });
-  assert.ok(vision.includes("image_input"));
-
-  // The anthropic adapter has no structured-output wire form today.
-  assert.ok(!inferCapabilities({ pool: "text", protocols: ["anthropic"] }).includes("structured_output"));
-
+  // The legacy arguments are accepted and ignored: they carry no evidence.
+  assert.deepEqual(inferCapabilities(), expected);
+  assert.deepEqual(inferCapabilities({ protocols: ["openai-chat"] }), expected);
+  assert.deepEqual(inferCapabilities({ pool: "vision", protocols: ["openai-chat"] }), expected,
+    "a former vision-pool membership earns no image_input");
   for (const protocol of Object.keys(ADAPTER_CAPABILITIES)) {
+    assert.deepEqual(inferCapabilities({ protocols: [protocol] }), expected, `${protocol}: defaults only`);
+  }
+
+  // The defaults are a fresh copy each time, so a caller cannot mutate them for everyone.
+  inferCapabilities().push("image_input");
+  assert.deepEqual(inferCapabilities(), expected);
+});
+
+test("adapter compatibility is separate from declaration, and no adapter claims generated media", () => {
+  // The anthropic adapter has no structured-output wire form today.
+  assert.ok(!ADAPTER_CAPABILITIES.anthropic.includes("structured_output"));
+  // Image input IS executable by every real adapter, so declaring it is enough
+  // to make a model an image candidate; declaring it is never done for you.
+  for (const protocol of Object.keys(ADAPTER_CAPABILITIES)) {
+    assert.ok(ADAPTER_CAPABILITIES[protocol].includes("image_input"), `${protocol} can carry image input`);
     for (const generated of ["image_output", "audio_output", "video_output", "embeddings"]) {
       assert.ok(!ADAPTER_CAPABILITIES[protocol].includes(generated), `${protocol} must not claim ${generated}`);
     }
@@ -111,16 +122,16 @@ test("an explicitly requested known model is rejected only when none of its prov
   const index = new Map([
     ["groq/text", {
       provider: "groq", model: "text", capabilities: ["text_input", "text_output"],
-      protocols: ["openai-chat"], pools: ["text"], enabled: true, configuredInEnvironment: true
+      protocols: ["openai-chat"], enabled: true, configuredInEnvironment: true
     }],
     ["groq/audio", {
       provider: "groq", model: "audio", capabilities: ["text_input", "text_output", "audio_input"],
-      protocols: ["openai-chat"], pools: ["text"], enabled: true, configuredInEnvironment: true
+      protocols: ["openai-chat"], enabled: true, configuredInEnvironment: true
     }],
     // Switched off, but capable: that is a routing decision, not a mismatch.
     ["groq/off", {
       provider: "groq", model: "off", capabilities: ["text_input", "text_output"],
-      protocols: ["openai-chat"], pools: ["text"], enabled: false, configuredInEnvironment: true
+      protocols: ["openai-chat"], enabled: false, configuredInEnvironment: true
     }]
   ]);
 

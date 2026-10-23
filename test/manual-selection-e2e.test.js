@@ -91,7 +91,7 @@ async function startFleet(behavior, extraEnv = {}) {
 const down = { status: 500, body: { error: "down" } };
 
 async function manual(fleet, entries = SELECTION) {
-  assert.equal((await putFallback(fleet.router, { pool: "text", entries })).status, 200);
+  assert.equal((await putFallback(fleet.router, { entries })).status, 200);
   assert.equal((await putFallback(fleet.router, { mode: "manual" })).status, 200);
   // The startup health monitor has settled (the harness waits); start counting from zero.
   fleet.reset();
@@ -302,7 +302,7 @@ test("a pinned request stays strict under manual mode and does not touch session
     assert.ok(fleet.calls.every((id) => id.startsWith("groq/") && id.endsWith("#1")), `pin leaked: ${fleet.calls}`);
     for (const id of new Set(fleet.calls)) assert.equal(fleet.counts.get(id), 1, `${id} retried under a pin`);
     const state = await fleet.router.request("/api/fallback").then(json);
-    assert.equal(state.remembered.remembered.text.length, 0, "a pin never writes the session's memory");
+    assert.equal(state.remembered.remembered.length, 0, "a pin never writes the session's memory");
   } finally { await fleet.close(); }
 });
 
@@ -310,7 +310,7 @@ test("the mode is derived from the selection: a mode field in the body is ignore
   for (const mode of ["fixed", "last-success", "auto", "manual"]) {
     const fleet = await startFleet(() => down);
     try {
-      assert.equal((await putFallback(fleet.router, { pool: "text", entries: SELECTION })).status, 200);
+      assert.equal((await putFallback(fleet.router, { entries: SELECTION })).status, 200);
       assert.equal((await putFallback(fleet.router, { mode })).status, 200, `${mode} is still a known id`);
       fleet.reset();
 
@@ -335,7 +335,7 @@ test("Reset Fallback leaves manual mode and the selection alone", async () => {
     const state = await fleet.router.request("/api/fallback").then(json);
     assert.equal(state.mode, "manual");
     assert.deepEqual(
-      state.chain.text.map((item) => `${item.provider}/${item.model}`),
+      state.chain.map((item) => `${item.provider}/${item.model}`),
       SELECTION.map((item) => `${item.provider}/${item.model}`),
       "the saved selection is untouched, in order"
     );
@@ -395,7 +395,7 @@ test("a failed model cools down for 12 minutes by default; 400 for 8 and a 408 f
   for (const [status, expected] of cases) {
     const fleet = await startFleet(() => ({ status, body: { error: "x" } }));
     try {
-      assert.equal((await putFallback(fleet.router, { pool: "text", entries: [entry("cerebras", "Z")] })).status, 200);
+      assert.equal((await putFallback(fleet.router, { entries: [entry("cerebras", "Z")] })).status, 200);
       const before = Date.now();
       await chat(fleet.router);
       const health = await fleet.router.request("/api/health").then(json);

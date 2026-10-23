@@ -18,7 +18,7 @@ const put = (router, route, body) => router.request(route, {
   method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
 });
 const setSwitch = (router, provider, model, disabled) => put(router, "/api/models/switch", { provider, model, disabled });
-const saveChain = (router, entries) => put(router, "/api/fallback", { pool: "text", entries });
+const saveChain = (router, entries) => put(router, "/api/fallback", { entries });
 
 async function start({ groqScript, mistralScript } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "model-switch-"));
@@ -118,7 +118,7 @@ test("the switch API validates input and the state is reported", async () => {
     assert.deepEqual(body.disabledModels, [{ provider: "groq", model: "m1" }]);
 
     const fallback = await (await router.request("/api/fallback")).json();
-    assert.equal(fallback.catalogue.text.find((group) => group.provider === "groq").disabled, true);
+    assert.equal(fallback.catalogue.find((group) => group.provider === "groq").disabled, true);
 
     const saved = JSON.parse(fs.readFileSync(path.join(dir, "disabled-models.json"), "utf8"));
     assert.deepEqual(saved.disabled, [{ provider: "groq", model: "m1" }]);
@@ -249,7 +249,7 @@ test("the provider switch API validates input and persists", async () => {
     assert.deepEqual(get.disabledProviders, [{ provider: "groq" }]);
 
     const fallback = await (await router.request("/api/fallback")).json();
-    const group = fallback.catalogue.text.find((entry) => entry.provider === "groq");
+    const group = fallback.catalogue.find((entry) => entry.provider === "groq");
     assert.equal(group.disabled, true);
     assert.equal(group.providerDisabled, true);
 

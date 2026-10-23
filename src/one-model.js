@@ -48,11 +48,22 @@ export const ONE_MODEL_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 export const ONE_MODEL_MAX_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 export const ONE_PROVIDER_MAX_MODELS = 50;
 
-/** A key's id inside the chosen provider: its model, pool and key index. */
-export const oneModelKeyId = (target) => `${target?.model}::${target?.pool ?? "text"}:${target?.keyIndex}`;
-const KEY_ID_PATTERN = /^(.{1,300})::(text|vision):\d{1,4}$/;
-// Before the provider could have several models a key was just "text:0".
-const LEGACY_KEY_ID_PATTERN = /^(text|vision):\d{1,4}$/;
+/**
+ * A key's id inside the chosen provider: its model and key index, "model::N".
+ * There is one model registry, so the id carries no pool segment.
+ */
+export const oneModelKeyId = (target) => `${target?.model}::${target?.keyIndex}`;
+const KEY_ID_PATTERN = /^(.{1,300})::(\d{1,4})$/;
+
+/*
+ * LEGACY, migration only. Ids persisted before the pools were unified carried a
+ * pool segment: "model::text:0" / "model::vision:0", and before a provider could
+ * have several models just "text:0". They are accepted when a saved file is read
+ * and when a client sends one, and are rewritten to the current form; nothing
+ * the active router does reads or produces a pool segment.
+ */
+const LEGACY_POOLED_KEY_ID_PATTERN = /^(.{1,300})::(?:text|vision):(\d{1,4})$/;
+const LEGACY_BARE_KEY_ID_PATTERN = /^(?:text|vision):(\d{1,4})$/;
 const validCooldown = (value) =>
   Number.isSafeInteger(value) && value >= 1 && value <= ONE_MODEL_MAX_COOLDOWN_MS;
 
@@ -78,12 +89,18 @@ function normModels(value) {
 }
 
 /**
- * Turns a saved or requested key id into the current "model::pool:index" form.
- * An old "text:0" belongs to the first model. Returns null for anything else.
+ * Turns a saved or requested key id into the current "model::index" form.
+ * Legacy pooled ids ("model::text:0", "model::vision:0") lose their pool
+ * segment, and an even older bare "text:0" belongs to the first model.
+ * Returns null for anything else.
  */
-function normalizeKeyId(id, models) {
-  if (KEY_ID_PATTERN.test(id)) return id;
-  if (LEGACY_KEY_ID_PATTERN.test(id) && models.length > 0) return `${models[0]}::${id}`;
+export function normalizeKeyId(id, models = []) {
+  const text = String(id ?? "");
+  if (KEY_ID_PATTERN.test(text)) return text;
+  const pooled = LEGACY_POOLED_KEY_ID_PATTERN.exec(text);
+  if (pooled) return `${pooled[1]}::${pooled[2]}`;
+  const bare = LEGACY_BARE_KEY_ID_PATTERN.exec(text);
+  if (bare && models.length > 0) return `${models[0]}::${bare[1]}`;
   return null;
 }
 
@@ -117,7 +134,9 @@ export class OneModelStore {
         this.enabled = parsed?.enabled === true;
         for (const [rawId, ms] of Object.entries(parsed?.cooldowns ?? {})) {
           const id = normalizeKeyId(rawId, models);
-          if (id && models.includes(modelOfKeyId(id)) && validCooldown(ms)) this.cooldowns.set(id, ms);
+          if (!id || !models.includes(modelOfKeyId(id)) || !validCooldown(ms)) continue;
+          // "model::text:0" and "model::vision:0" now name the same key: keep the longer pause.
+          this.cooldowns.set(id, Math.max(ms, this.cooldowns.get(id) ?? 0));
         }
       }
     } catch (error) {
@@ -175,7 +194,7 @@ export class OneModelStore {
   /**
    * Updates the selection, the on/off flag, the model list and/or key cooldowns,
    * and persists it. `models` is the whole ordered list (`model` is shorthand for
-   * a list of one). `cooldowns` is a partial { "model::pool:keyIndex": ms | null }:
+   * a list of one). `cooldowns` is a partial { "model::keyIndex": ms | null }:
    * a number sets that key's cooldown, null (or 0) removes it, a key left out is
    * untouched. Choosing a different provider clears every cooldown, and dropping a
    * model from the list clears that model's. Memory only changes once the write has
@@ -239,7 +258,7 @@ export class OneModelStore {
     if (!this.file) return;
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 2, ...state, cooldowns: Object.fromEntries(cooldowns) }, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify({ version: 3, ...state, cooldowns: Object.fromEntries(cooldowns) }, null, 2));
     fs.renameSync(tmp, this.file);
   }
 }

@@ -29,6 +29,24 @@ const saveChain = (router, entries, headers = {}) => router.request("/api/fallba
 const getFallback = (router) => router.request("/api/fallback").then(json);
 const resetFallback = (router) => router.request("/api/fallback/reset", { method: "POST" }).then(json);
 
+/**
+ * Capabilities are DECLARED through the unified Model Configurator, never
+ * inferred. A model nobody declared is text in / text out only, so a test that
+ * sends images or asks for a stream declares exactly what it needs.
+ */
+const TEXT = ["text_input", "text_output"];
+const IMAGE = [...TEXT, "image_input"];
+const STREAMING = [...TEXT, "streaming"];
+const declare = async (router, provider, model, capabilities, headers = {}) => {
+  const response = await router.request("/api/model-config", {
+    method: "POST", headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ provider, model, capabilities })
+  });
+  const text = await response.text();
+  assert.ok(response.status >= 200 && response.status < 300, `declaring ${provider}/${model}: ${response.status} ${text}`);
+  return JSON.parse(text);
+};
+
 const tmpDir = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `fallback-${name}-`));
 
 /** Two pooled providers: groq (two keys) and mistral (one key). */
@@ -263,59 +281,96 @@ test("the chain, and so the derived mode, survive a restart, while remembered st
 });
 
 // ---------------------------------------------------------------------------
-// Text and vision
+// Text and images: ONE chain, ONE model list, capabilities decide eligibility
 // ---------------------------------------------------------------------------
 
 const image = [{ type: "text", text: "what is this?" }, { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } }];
 const chatImage = (router) => router.request("/v1/chat/completions", postJson({ model: "anything", messages: [{ role: "user", content: image }] }));
 
-test("text and vision keep separate chains, separate orders and separate memory", async () => {
-  const groq = await startMockUpstream((record) => (["t0", "v0"].includes(bearer(record)) ? down : ok("m1")));
+test("one chain serves text and images: an image skips models that did not declare image_input, and keys still rotate", async () => {
+  // One provider, one key list, one model list. `vm1` differs from `m1` only
+  // in what it DECLARES. Its first key is down, so the key walk is visible.
+  const groq = await startMockUpstream((record) => (bearer(record) === "k0" && record.body?.model === "vm1" ? down : ok(record.body?.model ?? "m1")));
   const router = await startRouter({
-    GROQ_API_KEYS: "t0,t1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
-    GROQ_VISION_API_KEYS: "v0,v1", GROQ_VISION_MODELS: "vm1", GROQ_VISION_BASE_URL: `${groq.baseUrl}/v1`
+    GROQ_API_KEYS: "k0,k1", GROQ_MODELS: "m1,vm1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
   });
   try {
-    await saveChain(router, [{ provider: "groq", model: "m1" }]);
-    await saveChain(router, [{ provider: "groq", model: "vm1" }]);
+    await declare(router, "groq", "vm1", IMAGE);
+    assert.equal((await saveChain(router, [{ provider: "groq", model: "m1" }, { provider: "groq", model: "vm1" }])).status, 200);
 
-    // Vision: its own keys, its own multi-key retry.
+    // The image is routed down the one chain: m1 is first but cannot carry it,
+    // so it is never called; vm1 tries every eligible key in order.
     assert.equal((await chatImage(router)).status, 200);
-    assert.deepEqual(posts(groq), ["v0", "v1"], "vision tries every eligible key of its own chain");
+    assert.deepEqual(groq.apiRequests.map((record) => `${record.body?.model}:${bearer(record)}`), ["vm1:k0", "vm1:k1"],
+      "the image reached only the image-capable model, trying each of its keys");
 
     const state = await getFallback(router);
-    assert.equal(state.chain[0].model, "vm1");
-    assert.equal(state.chain[0].model, "m1");
-    assert.deepEqual(state.remembered.remembered, [], "a vision success must not become a text preference");
-    assert.equal(state.remembered.remembered.length, 1);
-    assert.match(state.remembered.remembered[0].targetId, /^vision:groq:vm1:key-1$/);
-
-    // Text is untouched by the vision pool's state and starts from its own chain.
-    assert.equal((await chat(router)).status, 200);
-    assert.deepEqual(posts(groq).slice(2), ["t0", "t1"], "text starts at its own first key");
+    assert.deepEqual(state.chain.map((entry) => entry.model), ["m1", "vm1"], "there is one shared chain");
+    assert.ok(!("text" in state) && !("vision" in state), "the payload carries no per-pool chains");
+    assert.deepEqual(state.remembered.remembered.map((item) => item.targetId), ["groq:vm1:key-1"],
+      "the success is remembered under the one session, with no pool prefix");
   } finally {
     await router.close(); await groq.close();
   }
 });
 
-test("a vision request never reaches a text-only model", async () => {
+test("a text request after an image success follows the same chain and the same memory", async () => {
+  const groq = await startMockUpstream((record) => ok(record.body?.model ?? "m1"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "k0", GROQ_MODELS: "m1,vm1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+  });
+  try {
+    await declare(router, "groq", "vm1", IMAGE);
+    await saveChain(router, [{ provider: "groq", model: "m1" }, { provider: "groq", model: "vm1" }]);
+
+    assert.equal((await chatImage(router)).status, 200);
+    assert.deepEqual(postModels(groq), ["vm1"]);
+
+    // Text may use ANY model of the one list; the remembered target (vm1) is a
+    // text candidate too and leads the next request of the same session.
+    assert.equal((await chat(router)).status, 200);
+    assert.deepEqual(postModels(groq), ["vm1", "vm1"], "the remembered target leads, whatever kind of request set it");
+    assert.equal((await getFallback(router)).remembered.remembered.length, 1, "one session, one remembered target");
+  } finally {
+    await router.close(); await groq.close();
+  }
+});
+
+test("an image request never reaches a text-only model, on any provider", async () => {
   const textOnly = await startMockUpstream(() => ok("m1"));
   const vision = await startMockUpstream(() => ok("vm1"));
   const router = await startRouter({
     GROQ_API_KEYS: "t0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${textOnly.baseUrl}/v1`,
-    MISTRAL_VISION_API_KEYS: "s0", MISTRAL_VISION_MODELS: "vm1", MISTRAL_VISION_BASE_URL: `${vision.baseUrl}/v1`
+    MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "vm1", MISTRAL_BASE_URL: `${vision.baseUrl}/v1`
   });
   try {
-    // Even with a text chain that names the text model, the vision request
-    // cannot be routed to it: the pools are separate target lists.
-    await saveChain(router, [{ provider: "groq", model: "m1" }]);
-    await saveChain(router, [{ provider: "mistral", model: "vm1" }]);
+    await declare(router, "mistral", "vm1", IMAGE);
+    // The chain names the text model first. Capability, not chain position and
+    // not provider, decides who may receive the image.
+    await saveChain(router, [{ provider: "groq", model: "m1" }, { provider: "mistral", model: "vm1" }]);
 
     assert.equal((await chatImage(router)).status, 200);
-    assert.deepEqual(posts(textOnly), [], "a text-only provider must never receive a vision request");
+    assert.deepEqual(posts(textOnly), [], "a text-only model must never receive an image");
     assert.deepEqual(posts(vision), ["s0"]);
   } finally {
     await router.close(); await textOnly.close(); await vision.close();
+  }
+});
+
+test("no model declares image_input: the image is refused, nothing is called, and a model's NAME earns nothing", async () => {
+  const groq = await startMockUpstream(() => ok("vm1"));
+  const router = await startRouter({
+    GROQ_API_KEYS: "g0", GROQ_MODELS: "vision-vm1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+  });
+  try {
+    await saveChain(router, [{ provider: "groq", model: "vision-vm1" }]);
+    const response = await chatImage(router);
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.ok(body.error.required_capabilities.includes("image_input"));
+    assert.deepEqual(posts(groq), [], "an undeclared model is text only, whatever it is called");
+  } finally {
+    await router.close(); await groq.close();
   }
 });
 
@@ -395,13 +450,11 @@ test("the configuration API validates what it is given", async () => {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
     });
 
-    assert.equal((await put({ pool: "video", entries: [] })).status, 400);
     assert.equal((await put({})).status, 400, "entries must be an array");
+    assert.equal((await put({ entries: "groq/m1" })).status, 400, "entries must be an array, not a string");
     assert.equal((await put({ mode: "chaos" })).status, 400);
     assert.equal((await put({ entries: [{ provider: "groq", model: "not-configured" }] })).status, 400,
       "a model that is not configured is refused");
-    assert.equal((await put({ entries: [{ provider: "groq", model: "m1" }] })).status, 400,
-      "a text model cannot be saved into the vision chain");
     assert.equal((await put({})).status, 400);
 
     // Nothing above was saved.
@@ -432,6 +485,8 @@ test("streaming, authentication and the request log are unaffected", async () =>
     assert.equal((await saveChain(router, [{ provider: "groq", model: "m1" }])).status, 401);
 
     const headers = { authorization: "Bearer client-token" };
+    // A stream needs `streaming`, which an undeclared model does not have.
+    await declare(router, "groq", "m1", STREAMING, headers);
     assert.equal((await saveChain(router, [{ provider: "groq", model: "m1" }], headers)).status, 200);
 
     const streamed = await router.request("/v1/chat/completions", postJson(
@@ -473,6 +528,10 @@ test("a stream that fails after output starts never switches models", async () =
     FALLBACK_CHAIN_FILE: path.join(tmpDir("stream-no-switch"), "fallback-chain.json")
   });
   try {
+    // Both models can stream, so a switch after the cut would be possible if the
+    // gateway were willing to make one; the assertion below is only meaningful then.
+    await declare(router, "groq", "m1", STREAMING);
+    await declare(router, "mistral", "m2", STREAMING);
     assert.equal((await saveChain(router, [
       { provider: "groq", model: "m1" },
       { provider: "mistral", model: "m2" }
@@ -580,7 +639,7 @@ test("a model added to the selection is used on the very next request, without w
   });
   try {
     const order = async () => [...new Set(
-      (await router.request("/api/router/preview?pool=text&protocol=openai-chat").then(json))
+      (await router.request("/api/router/preview?protocol=openai-chat").then(json))
         .fallbackOrder.map((item) => item.model)
     )];
 
@@ -634,7 +693,7 @@ test("disabling an entry removes it from the effective order immediately", async
 test("the derived mode follows the selection immediately", async () => {
   const { router, groq, mistral } = await startTwoProviderRouter();
   try {
-    const preview = () => router.request("/api/router/preview?pool=text&protocol=openai-chat").then(json);
+    const preview = () => router.request("/api/router/preview?protocol=openai-chat").then(json);
 
     // Nothing selected: the automatic order, with no switch to set.
     const automatic = await preview();
@@ -672,7 +731,7 @@ test("saving a chain re-plans immediately, with no health change and no new buck
   try {
     // fallbackOrder is per TARGET (one row per key), so read the distinct models.
     const order = async () => [...new Set(
-      (await router.request("/api/router/preview?pool=text&protocol=openai-chat").then(json))
+      (await router.request("/api/router/preview?protocol=openai-chat").then(json))
         .fallbackOrder.map((item) => item.model)
     )];
 
@@ -767,36 +826,41 @@ test("a chain whose only provider is gone fails closed with a 503 and routes now
   }
 });
 
-test("an unusable chain is per-pool: vision keeps routing automatically", async () => {
-  const dir = tmpDir("pool-isolation");
-  const groq = await startMockUpstream(() => ok("m1"));
-  const mistral = await startMockUpstream(() => ok("m2"));
-  const vision = await startMockUpstream(() => ok("vm1"));
-  // mistral is a TEXT provider that the chain does NOT name, so a router that
-  // widened would happily serve the request through it.
-  const afterEnv = {
-    MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`,
-    GROQ_VISION_API_KEYS: "v0", GROQ_VISION_MODELS: "vm1", GROQ_VISION_BASE_URL: `${vision.baseUrl}/v1`
+test("a chain naming no image-capable model does not block images; a chain that cannot be honoured never widens", async () => {
+  const dir = tmpDir("one-chain-failclosed");
+  const groq = await startMockUpstream((record) => ok(record.body?.model ?? "m1"));
+  const mistral = await startMockUpstream((record) => ok(record.body?.model ?? "m2"));
+  const mistralEnv = {
+    MISTRAL_API_KEYS: "s0", MISTRAL_MODELS: "m2,vm1", MISTRAL_BASE_URL: `${mistral.baseUrl}/v1`
   };
 
+  // First start: the chain names only groq's text model m1. Images are not
+  // blocked by a chain that names nothing able to carry them: the router
+  // routes them automatically, and only to a model that declared image_input.
   const first = await startRouter(chainEnv(dir, {
-    ...afterEnv, GROQ_API_KEYS: "g0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
+    ...mistralEnv, GROQ_API_KEYS: "g0", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
   }));
   try {
+    await declare(first, "mistral", "vm1", IMAGE);
     assert.equal((await saveChain(first, [{ provider: "groq", model: "m1" }])).status, 200);
-    // No vision chain is saved at all.
+    assert.equal((await chat(first)).status, 200, "text follows the chain");
+    assert.deepEqual(postModels(groq), ["m1"]);
+    assert.equal((await chatImage(first)).status, 200, "an image the chain cannot carry is routed automatically");
+    assert.deepEqual(postModels(mistral), ["vm1"], "...to the only image-capable model, never to the text model m2");
   } finally {
     await first.close();
   }
 
-  const second = await startRouter(chainEnv(dir, afterEnv));
+  // Second start: groq is gone from the environment but the chain still names it.
+  const second = await startRouter(chainEnv(dir, mistralEnv));
   try {
-    assert.equal((await chat(second)).status, 503, "the text chain is unusable and must not widen to mistral");
-    assert.deepEqual(posts(mistral), [], "an unnamed text model must not be substituted");
-    assert.equal((await chatImage(second)).status, 200, "vision has no chain, so it still routes automatically");
-    assert.deepEqual(posts(vision), ["v0"]);
+    const before = postModels(mistral).length;
+    const response = await chat(second);
+    assert.equal(response.status, 503, "the chain is unusable and must not widen to mistral");
+    assert.equal((await response.json()).error.type, "fallback_chain_unusable");
+    assert.equal(postModels(mistral).length, before, "an unnamed model must not be substituted");
   } finally {
-    await second.close(); await groq.close(); await mistral.close(); await vision.close();
+    await second.close(); await groq.close(); await mistral.close();
   }
 });
 
@@ -838,7 +902,7 @@ test("the preview reports the fail-closed state instead of an automatic order", 
 
   const second = await startRouter(chainEnv(dir, mistralEnv));
   try {
-    const preview = await second.request("/api/router/preview?pool=text&protocol=openai-chat").then(json);
+    const preview = await second.request("/api/router/preview?protocol=openai-chat").then(json);
     assert.equal(preview.chainFailClosed, true);
     assert.equal(preview.chainEntries, 1);
     assert.deepEqual(preview.fallbackOrder, [], "nothing is planned");
@@ -848,7 +912,7 @@ test("the preview reports the fail-closed state instead of an automatic order", 
 
     // And it recovers the moment the chain is cleared.
     assert.equal((await saveChain(second, [])).status, 200);
-    const after = await second.request("/api/router/preview?pool=text&protocol=openai-chat").then(json);
+    const after = await second.request("/api/router/preview?protocol=openai-chat").then(json);
     assert.equal(after.chainFailClosed, false);
     assert.ok(after.fallbackOrder.length > 0, "the automatic order is planned again");
   } finally {
@@ -857,7 +921,7 @@ test("the preview reports the fail-closed state instead of an automatic order", 
 });
 
 // ---------------------------------------------------------------------------
-// Per-pool fail-closed diagnostics on /health
+// Fail-closed diagnostics on /health (one chain, one status)
 // ---------------------------------------------------------------------------
 
 const healthPayload = (router) => router.request("/health").then(json);
@@ -881,12 +945,12 @@ test("/health distinguishes an unusable chain from ordinary provider unavailabil
   try {
     const payload = await healthPayload(second);
     // The chain is saved and cannot be honoured: a configuration fault.
-    assert.equal(payload.fallback.failClosed, true);
-    assert.equal(payload.fallback.entries, 1);
-    assert.equal(payload.fallback.resolved, 0);
-    // And it is reported per pool, not globally.
-    assert.equal(payload.fallback.failClosed, false);
-    assert.equal(payload.fallback, 1);
+    assert.equal(payload.fallback.status.failClosed, true);
+    assert.equal(payload.fallback.status.entries, 1);
+    assert.equal(payload.fallback.status.resolved, 0);
+    // There is one chain, so there is one status: no per-pool breakdown.
+    assert.ok(!("pools" in payload.fallback), "health reports one chain, not pools");
+    assert.equal(payload.fallback.chains, 1);
   } finally {
     await second.close(); await groq.close(); await mistral.close();
   }
@@ -896,10 +960,9 @@ test("/health reports an empty chain as unconfigured, not as a fault", async () 
   const { router, groq, mistral } = await startTwoProviderRouter();
   try {
     const payload = await healthPayload(router);
-    for (const pool of ["text", "vision"]) {
-      assert.equal(payload.fallback.pools[pool].failClosed, false, `${pool} is unconfigured, not broken`);
-      assert.equal(payload.fallback.pools[pool].entries, 0);
-    }
+    assert.equal(payload.fallback.status.failClosed, false, "an empty chain is unconfigured, not broken");
+    assert.equal(payload.fallback.status.entries, 0);
+    assert.equal(payload.fallback.chains, 0);
     assert.ok(payload.rankedTargets.length > 0, "an unconfigured router still routes");
   } finally {
     await router.close(); await groq.close(); await mistral.close();
@@ -913,10 +976,10 @@ test("/health keeps failClosed false when a configured chain is merely unavailab
     assert.equal((await chat(router)).status, 200);
 
     const payload = await healthPayload(router);
-    assert.equal(payload.fallback.failClosed, false,
+    assert.equal(payload.fallback.status.failClosed, false,
       "a provider being unavailable is not a configuration fault");
-    assert.equal(payload.fallback.entries, 1);
-    assert.equal(payload.fallback.resolved, 1);
+    assert.equal(payload.fallback.status.entries, 1);
+    assert.equal(payload.fallback.status.resolved, 1);
   } finally {
     await router.close(); await groq.close(); await mistral.close();
   }
@@ -1186,10 +1249,10 @@ for (const { label, keys } of MALFORMED_KEY_FORMS) {
       assert.equal((await response.json()).error.type, "fallback_chain_unusable");
       assert.deepEqual(posts(groq), [], `${label} must not route through any key`);
 
-      // And the health surface reports it as a configuration fault, per pool.
+      // And the health surface reports it as a configuration fault.
       const payload = await healthPayload(router);
-      assert.equal(payload.fallback.failClosed, true);
-      assert.equal(payload.fallback.resolved, 1);
+      assert.equal(payload.fallback.status.failClosed, true);
+      assert.equal(payload.fallback.status.resolved, 1);
     } finally {
       await router.close(); await groq.close();
     }
@@ -1287,8 +1350,8 @@ test("a persisted key index the provider no longer has fails closed and is repor
 
     // And /health agrees the chain, not the provider, is at fault.
     const payload = await healthPayload(router);
-    assert.equal(payload.fallback.failClosed, true);
-    assert.equal(payload.fallback.resolved, 1);
+    assert.equal(payload.fallback.status.failClosed, true);
+    assert.equal(payload.fallback.status.resolved, 1);
   } finally {
     await router.close(); await groq.close();
   }
@@ -1411,8 +1474,8 @@ test("agentrouter: an account-level 402 (empty balance) cools the whole key, so 
 // A remembered target must not outlive the chain it was remembered under
 // ---------------------------------------------------------------------------
 
-const rememberedIds = async (router, pool = "text") => (await getFallback(router)).remembered.remembered[pool].map((item) => item.targetId);
-const putChain = (router, pool, entries) => saveChain(router, pool, entries);
+const rememberedIds = async (router) => (await getFallback(router)).remembered.remembered.map((item) => item.targetId);
+const putChain = (router, entries) => saveChain(router, entries);
 const GROQ_M1 = { provider: "groq", model: "m1" };
 const MISTRAL_M2 = { provider: "mistral", model: "m2" };
 
@@ -1531,31 +1594,32 @@ test("a rejected or unpersisted chain update does not clear what is remembered",
   }
 });
 
-test("a text chain edit clears only text, and a vision chain edit clears only vision", async () => {
+test("one chain edit clears every remembered target, whichever kind of request set it", async () => {
   const groq = await startMockUpstream((record) => ok(bodyModel(record)));
   const router = await startRouter({
-    GROQ_API_KEYS: "t0", GROQ_MODELS: "m1,m3", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
-    GROQ_VISION_API_KEYS: "v0", GROQ_VISION_MODELS: "vm1,vm2", GROQ_VISION_BASE_URL: `${groq.baseUrl}/v1`
+    GROQ_API_KEYS: "k0", GROQ_MODELS: "m1,m3,vm1,vm2", GROQ_BASE_URL: `${groq.baseUrl}/v1`
   });
   try {
-    await putChain(router, [GROQ_M1]);
-    await putChain(router, [{ provider: "groq", model: "vm1" }]);
-    assert.equal((await chat(router)).status, 200);
-    assert.equal((await chatImage(router)).status, 200);
-    assert.equal((await rememberedIds(router, "text")).length, 1);
-    assert.equal((await rememberedIds(router, "vision")).length, 1);
+    await declare(router, "groq", "vm1", IMAGE);
+    await declare(router, "groq", "vm2", IMAGE);
+    await putChain(router, [GROQ_M1, { provider: "groq", model: "vm1" }]);
 
-    // Text edit: text is dropped, vision is untouched.
-    assert.equal((await putChain(router, [{ provider: "groq", model: "m3" }, GROQ_M1])).status, 200);
-    assert.deepEqual(await rememberedIds(router, "text"), []);
-    assert.equal((await rememberedIds(router, "vision")).length, 1, "a text edit never clears vision");
+    // A text success and an image success, in two sessions of the one chain.
+    assert.equal((await chatAs(router, "texter")).status, 200);
+    assert.equal((await chatImageAs(router, "viewer")).status, 200);
+    const remembered = (await getFallback(router)).remembered.remembered;
+    assert.deepEqual(remembered.map((item) => item.sessionId).sort(), ["texter", "viewer"]);
+    assert.deepEqual(remembered.map((item) => item.targetId).sort(), ["groq:m1:key-0", "groq:vm1:key-0"],
+      "no pool prefix on any remembered target");
 
-    // Re-remember text, then edit vision: vision is dropped, text is untouched.
-    assert.equal((await chat(router)).status, 200);
-    assert.equal((await rememberedIds(router, "text")).length, 1);
-    assert.equal((await putChain(router, [{ provider: "groq", model: "vm2" }, { provider: "groq", model: "vm1" }])).status, 200);
-    assert.deepEqual(await rememberedIds(router, "vision"), []);
-    assert.equal((await rememberedIds(router, "text")).length, 1, "a vision edit never clears text");
+    // There is one chain, so an edit invalidates the preference for ALL of it.
+    assert.equal((await putChain(router, [{ provider: "groq", model: "vm2" }, { provider: "groq", model: "m3" }, GROQ_M1, { provider: "groq", model: "vm1" }])).status, 200);
+    assert.deepEqual(await rememberedIds(router), [], "a chain edit drops every remembered target");
+
+    // And both kinds of request remember again on the next success.
+    assert.equal((await chatAs(router, "texter")).status, 200);
+    assert.equal((await chatImageAs(router, "viewer")).status, 200);
+    assert.equal((await rememberedIds(router)).length, 2);
   } finally {
     await closeAll(router, groq);
   }
@@ -1621,6 +1685,9 @@ test("Reset Fallback clears the remembered target, keeps the chain and cooldowns
 
 const modelKey = (record) => `${bodyModel(record)}:${bearer(record)}`;
 const modelPosts = (mock) => mock.requests.filter((record) => record.method === "POST").map(modelKey);
+const chatImageAs = (router, sessionId) => router.request("/v1/chat/completions", postJson(
+  { model: "anything", messages: [{ role: "user", content: image }] }, { "x-multi-ai-session-id": sessionId }
+));
 const chatAs = (router, sessionId) => router.request("/v1/chat/completions", postJson(
   { model: "anything", messages: [{ role: "user", content: "hello" }] }, { "x-multi-ai-session-id": sessionId }
 ));
@@ -1699,35 +1766,34 @@ test("Manual Model Selection records every success, keeps strict order, and a Re
   }
 });
 
-test("Manual Model Selection keeps sessions apart, and the text and vision pools apart", async () => {
+test("Manual Model Selection keeps sessions apart; text and image successes share the one chain", async () => {
   const groq = await startMockUpstream((record) => ok(bodyModel(record)));
   const router = await startRouter({
-    GROQ_API_KEYS: "t0,t1", GROQ_MODELS: "m1", GROQ_BASE_URL: `${groq.baseUrl}/v1`,
-    GROQ_VISION_API_KEYS: "v0,v1", GROQ_VISION_MODELS: "vm1", GROQ_VISION_BASE_URL: `${groq.baseUrl}/v1`
+    GROQ_API_KEYS: "k0,k1", GROQ_MODELS: "m1,vm1", GROQ_BASE_URL: `${groq.baseUrl}/v1`
   });
   try {
-    await putChain(router, [{ provider: "groq", model: "m1" }]);
-    await putChain(router, [{ provider: "groq", model: "vm1" }]);
+    await declare(router, "groq", "vm1", IMAGE);
+    await putChain(router, [{ provider: "groq", model: "m1" }, { provider: "groq", model: "vm1" }]);
     assert.equal((await getFallback(router)).mode, "manual");
 
     assert.equal((await chatAs(router, "alice")).status, 200);
     let remembered = (await getFallback(router)).remembered.remembered;
-    assert.deepEqual(remembered.text.map((item) => item.sessionId), ["alice"]);
-    assert.deepEqual(remembered.vision, [], "a text success is not a vision preference");
+    assert.deepEqual(remembered.map((item) => item.sessionId), ["alice"]);
+    assert.deepEqual(remembered.map((item) => item.targetId), ["groq:m1:key-0"]);
 
     assert.equal((await chatAs(router, "bob")).status, 200);
-    assert.equal((await chatImage(router)).status, 200);
+    assert.equal((await chatImageAs(router, "carol")).status, 200);
     remembered = (await getFallback(router)).remembered.remembered;
-    assert.deepEqual(remembered.text.map((item) => item.sessionId).sort(), ["alice", "bob"], "each session has its own memory");
-    assert.equal(remembered.vision.length, 1);
-    assert.match(remembered.vision[0].targetId, /^vision:groq:vm1:key-0$/);
-    assert.ok(remembered.text.every((item) => /^groq:m1:key-\d$/.test(item.targetId)), "no vision target sits in a text session");
+    const byId = Object.fromEntries(remembered.map((item) => [item.sessionId, item.targetId]));
+    assert.deepEqual(Object.keys(byId).sort(), ["alice", "bob", "carol"], "each session has its own memory");
+    assert.equal(byId.alice, "groq:m1:key-0");
+    assert.equal(byId.bob, "groq:m1:key-0");
+    assert.equal(byId.carol, "groq:vm1:key-0", "the image session remembers the image-capable model");
+    assert.ok(remembered.every((item) => /^groq:[^:]+:key-\d$/.test(item.targetId)), "no pool prefix on any target id");
 
-    // A text chain edit drops the text memory only.
-    await putChain(router, [{ provider: "groq", model: "m1", keys: [1] }]);
-    remembered = (await getFallback(router)).remembered.remembered;
-    assert.deepEqual(remembered.text, []);
-    assert.equal(remembered.vision.length, 1);
+    // One chain: narrowing it clears the memory of every session.
+    await putChain(router, [{ provider: "groq", model: "m1", keys: [1] }, { provider: "groq", model: "vm1" }]);
+    assert.deepEqual((await getFallback(router)).remembered.remembered, []);
   } finally {
     await closeAll(router, groq);
   }

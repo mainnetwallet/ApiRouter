@@ -308,8 +308,7 @@ export const STICKY_TTL_MS = 20 * 60 * 1000;
 
 /**
  * Per-session "remember last successful". Scoped by the caller's key (protocol
- * + pool + session id), so a text success can never become a vision preference
- * and the two pools' remembered targets stay independent.
+ * + session id).
  */
 export class RouteSession {
   constructor({ targetId = null, expiresAt = null, ttlMs = STICKY_TTL_MS } = {}) {
@@ -354,7 +353,7 @@ export class RouteSession {
  * all tried, in key order, before the walk advances to the next model, and the
  * next model starts at its own first eligible key.
  *
- * Per request, a target (pool + provider + model + keyIndex) is invoked at most
+ * Per request, a target (provider + model + keyIndex) is invoked at most
  * once; a repeat is reported through `onSkip`, never called. Targets cooling
  * down in the shared health registry are skipped the same way.
  *
@@ -520,7 +519,6 @@ export async function withFallback(
       const reason = `${status} on ${target.model} applies to the whole ${scope === FAILURE_SCOPE.PROVIDER ? "provider" : "key"}`;
       for (const sibling of allTargets) {
         if (health.key(sibling) === id) continue;
-        if ((sibling.pool ?? "text") !== (target.pool ?? "text")) continue;
         if (sibling.provider !== target.provider) continue;
         if (scope === FAILURE_SCOPE.KEY && sibling.keyIndex !== target.keyIndex) continue;
         health.markFailure(sibling, status, { reason });

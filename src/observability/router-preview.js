@@ -27,9 +27,6 @@ function describeCandidate(target, health, { rank = null, available, status, pha
     provider: target.provider,
     model: target.model,
     keyIndex: target.keyIndex,
-    // Every candidate belongs to exactly one pool. Carried explicitly so a
-    // reader never has to infer it from the id prefix.
-    pool: target.pool ?? "text",
     protocols: [...(target.protocols ?? [])],
     rank,
     phase,
@@ -58,14 +55,12 @@ export function describeRouting({
   model = "",
   stickyTargetId = null,
   now = Date.now(),
-  pool = "text",
   chain = [],
   retryableStatus = []
 } = {}) {
   const selection = selectTargetsForProtocol(targets, protocol, model);
   const { compatible, exact, selected, modelMatched } = selection;
   const bridged = BRIDGED_PROTOCOLS.has(protocol);
-  const poolLabel = pool === "vision" ? "VISION" : "TEXT";
 
   // The same plan the proxy walks: a saved Manual Model Selection when there is
   // one, otherwise the automatic health-based order — either way led by the
@@ -77,7 +72,7 @@ export function describeRouting({
     stickyTargetId,
     health,
     now,
-    cacheKey: `preview:${pool}`
+    cacheKey: "preview"
   });
   // The mode is the plan's, not a caller's: there is no switch left to disagree
   // with what would actually be walked.
@@ -146,7 +141,6 @@ export function describeRouting({
       provider: target.provider,
       model: target.model,
       keyIndex: target.keyIndex,
-      pool: target.pool ?? "text",
       protocols: [...(target.protocols ?? [])],
       reason: `does not support protocol "${protocol}"`
     }));
@@ -158,9 +152,7 @@ export function describeRouting({
     {
       key: "received",
       label: "Incoming request",
-      // The pool is decided before anything else and never changes: an image
-      // request is served by the vision pool or not at all.
-      detail: `${protocol} request · ${poolLabel} pool`,
+      detail: `${protocol} request`,
       state: "info"
     },
     {
@@ -223,7 +215,7 @@ export function describeRouting({
         : plan.sticky
           ? `the target that last answered (20-minute TTL) is tried first, then the rest of the plan resumes (mode: ${fallbackModeLabel(mode)})`
           : stickyTargetId
-            ? "the given target is not part of this request's plan, pool or protocol, so it is ignored"
+            ? "the given target is not part of this request's plan or protocol, so it is ignored"
             : mode === FALLBACK_MODES.MANUAL
               ? `nothing remembered for this session yet, so the saved selection order is used (mode: ${fallbackModeLabel(mode)})`
               : `nothing remembered for this session yet, so the automatic order is used (mode: ${fallbackModeLabel(mode)})`,
@@ -246,8 +238,6 @@ export function describeRouting({
 
   return {
     protocol,
-    pool,
-    poolLabel,
     requestedModel: selection.requestedModel,
     modelMatched,
     targetIdentity: "provider + model + keyIndex",

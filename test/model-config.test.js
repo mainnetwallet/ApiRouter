@@ -10,7 +10,7 @@ import { startMockGithub } from "../test-helpers/mock-github.js";
 const tmpFile = (name = "model-config.json") => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "model-config-")), name);
 
 const target = (provider, model, extra = {}) => ({
-  provider, model, protocols: ["openai-chat"], pool: "text", keyIndex: 0, ...extra
+  provider, model, protocols: ["openai-chat"], keyIndex: 0, ...extra
 });
 
 const quiet = { warn() {}, error() {} };
@@ -155,16 +155,19 @@ test("the effective index overlays declarations on the environment", () => {
   const targets = [
     target("groq", "text-model"),
     target("groq", "text-model", { keyIndex: 1 }),
-    target("groq", "vision-model", { pool: "vision" }),
+    target("groq", "vision-model"),
     target("gemini", "flash", { protocols: ["gemini"] })
   ];
 
-  // Before any save: inferred, and a vision-pool model accepts images.
+  // Before any save every model is inferred as text in / text out and nothing
+  // else. A name ("vision-model"), a provider or a protocol (gemini) earns no
+  // image_input: only a declaration does.
   let index = store.index(targets);
   assert.equal(index.get("groq/text-model").capabilitiesSource, "inferred");
   assert.equal(index.get("groq/text-model").keyCount, 2);
-  assert.ok(index.get("groq/vision-model").capabilities.includes("image_input"));
-  assert.ok(index.get("gemini/flash").capabilities.includes("image_input") === false);
+  for (const id of ["groq/text-model", "groq/vision-model", "gemini/flash"]) {
+    assert.deepEqual([...index.get(id).capabilities].sort(), ["text_input", "text_output"], `${id}: defaults only`);
+  }
 
   // After a save the declaration replaces the inference for that pair only.
   store.entries = [{
@@ -213,7 +216,7 @@ test("a declaration whose model is no longer configured stays visible and warns"
   assert.match(rows[0].warnings.join(" "), /No provider currently configures this model/);
 });
 
-test("image input on a text-only model is reported as a routing dead end", () => {
+test("image input is a routing dead end only when no adapter can carry it, never because of a pool", () => {
   const store = new ModelConfigStore({ logger: quiet });
   store.entries = [{
     id: modelConfigId("groq", "text-model"),
@@ -229,8 +232,19 @@ test("image input on a text-only model is reported as a routing dead end", () =>
     updatedAt: 1
   }];
 
+  // Declared on a model whose adapter can carry images: this is how a model is
+  // made an image candidate, so there is nothing to warn about.
   const row = store.index([target("groq", "text-model")]).get("groq/text-model");
-  assert.match(row.warnings.join(" "), /only in the text pool/);
+  assert.deepEqual(row.warnings, []);
+  assert.ok(row.executableCapabilities.includes("image_input"));
+  assert.deepEqual(row.unsupportedCapabilities, []);
+
+  // Declared on a model that only speaks a wire format no adapter can execute:
+  // the declaration is a dead end, and the row says so.
+  const stuck = store.index([target("groq", "text-model", { protocols: ["mystery-wire"] })]).get("groq/text-model");
+  assert.ok(stuck.unsupportedCapabilities.includes("image_input"));
+  assert.ok(!stuck.executableCapabilities.includes("image_input"));
+  assert.match(stuck.warnings.join(" "), /No adapter can execute: .*image_input/);
 });
 
 test("declared capabilities no adapter can execute are reported, not silently trusted", () => {

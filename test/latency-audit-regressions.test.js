@@ -29,12 +29,10 @@ import { createApi } from "../src/api.js";
 const BASE = Math.floor(Date.now() / 30_000) * 30_000 + 1_000;
 const PROTOCOL = "openai-chat";
 
-const t = (provider, model, keyIndex = 0, pool = "text") => ({
-  ...(pool === "vision" ? { id: `vision:${provider}:${model}:key-${keyIndex}` } : {}),
+const t = (provider, model, keyIndex = 0) => ({
   provider,
   model,
   keyIndex,
-  pool,
   protocols: [PROTOCOL]
 });
 const entry = (provider, model, extra = {}) => ({ provider, model, keys: null, enabled: true, ...extra });
@@ -132,27 +130,38 @@ test("BUG 1: a probe that arrives first and a request that arrives later still l
 // BUG 2 — the catalogue orders a key-restricted entry by its eligible keys only
 // ---------------------------------------------------------------------------
 
-for (const pool of ["text", "vision"]) {
-  test(`BUG 2 (${pool}): the catalogue reports a key-restricted entry's eligible-key latency, matching the planner`, async () => {
-    const k0 = t("a", "A", 0, pool);
-    const k1 = t("a", "A", 1, pool);
+// One chain and one catalogue now cover every model, whatever capabilities it
+// declares, so the former text/vision variants are two models of the SAME list:
+// each is key-restricted in the one chain, and each must be reported exactly as
+// the planner orders it.
+for (const model of ["A", "V"]) {
+  test(`BUG 2 (model ${model} in the one catalogue): the catalogue reports a key-restricted entry's eligible-key latency, matching the planner`, async () => {
+    // Both models exist, each measured 50 ms on key 0 and 900 ms on key 1, and
+    // each is restricted to key 1: neither may borrow the other's figures.
+    const targets = [];
     const health = new HealthRegistry();
-    health.markSuccess(k0, { latencyMs: 50 }, tick());
-    health.markSuccess(k1, { latencyMs: 900 }, tick());
+    for (const name of ["A", "V"]) {
+      const k0 = t("a", name, 0);
+      const k1 = t("a", name, 1);
+      targets.push(k0, k1);
+      health.markSuccess(k0, { latencyMs: 50 }, tick());
+      health.markSuccess(k1, { latencyMs: 900 }, tick());
+    }
 
-    const chain = [entry("a", "A", { keys: [1] })];
+    const chain = [entry("a", "A", { keys: [1] }), entry("a", "V", { keys: [1] })];
     const handler = createApi({
       config: { retryableStatus: [500] },
-      targets: [k0, k1],
+      targets,
       health,
       requestLog: { entries: new Map() },
-      fallbackChain: { mode: FALLBACK_MODES.AUTO, get: (name) => (name === pool ? chain : []) }
+      fallbackChain: { mode: FALLBACK_MODES.AUTO, get: () => chain }
     });
 
     const fallback = await callApi(handler, "/api/fallback");
-    const group = fallback.body.catalogue[pool].find((item) => item.model === "A");
-    const preview = await callApi(handler, "/api/router/preview", `protocol=${PROTOCOL}&pool=${pool}`);
-    const planned = preview.body.fallbackOrder.find((item) => item.keyIndex === 1);
+    assert.ok(Array.isArray(fallback.body.catalogue), "the catalogue is one flat list, not one list per pool");
+    const group = fallback.body.catalogue.find((item) => item.model === model);
+    const preview = await callApi(handler, "/api/router/preview", `protocol=${PROTOCOL}`);
+    const planned = preview.body.fallbackOrder.find((item) => item.model === model && item.keyIndex === 1);
 
     assert.equal(group.latencyMs, 900, "only key 1 is eligible, so the model is 900 ms, not 50 ms");
     assert.equal(group.latencySource, "request");
@@ -179,10 +188,10 @@ test("BUG 2: an unrestricted entry, a disabled entry and a model outside the cha
   const chain = [entry("a", "free"), entry("a", "off", { keys: [1], enabled: false })];
   const handler = createApi({
     config: { retryableStatus: [500] }, targets, health, requestLog: { entries: new Map() },
-    fallbackChain: { mode: FALLBACK_MODES.MANUAL, get: (name) => (name === "text" ? chain : []) }
+    fallbackChain: { mode: FALLBACK_MODES.MANUAL, get: () => chain }
   });
   const { body } = await callApi(handler, "/api/fallback");
-  const latency = (model) => body.catalogue.text.find((item) => item.model === model).latencyMs;
+  const latency = (model) => body.catalogue.find((item) => item.model === model).latencyMs;
   assert.equal(latency("free"), 50, "keys: null means every key");
   assert.equal(latency("off"), 50, "the planner does not narrow by a disabled entry");
   assert.equal(latency("outside"), 50, "a model with no entry is ordered over all its keys");
@@ -197,11 +206,11 @@ test("BUG 2: a restricted entry whose eligible keys were never measured is unmea
 
   const handler = createApi({
     config: { retryableStatus: [500] }, targets: [k0, k1], health, requestLog: { entries: new Map() },
-    fallbackChain: { mode: FALLBACK_MODES.AUTO, get: (name) => (name === "text" ? [entry("a", "A", { keys: [1] })] : []) }
+    fallbackChain: { mode: FALLBACK_MODES.AUTO, get: () => [entry("a", "A", { keys: [1] })] }
   });
   const fallback = await callApi(handler, "/api/fallback");
-  const group = fallback.body.catalogue.text.find((item) => item.model === "A");
-  const preview = await callApi(handler, "/api/router/preview", `protocol=${PROTOCOL}&pool=text`);
+  const group = fallback.body.catalogue.find((item) => item.model === "A");
+  const preview = await callApi(handler, "/api/router/preview", `protocol=${PROTOCOL}`);
 
   assert.equal(group.latencyMs, null);
   assert.equal(group.latencySource, null);
@@ -226,7 +235,7 @@ test("BUG 3: a key excluded by the chain entry has rank null AND no ordering lat
   health.markSuccess(k0, { latencyMs: 50 }, tick());
   health.markSuccess(k1, { latencyMs: 900 }, tick());
 
-  // Whether the pool has a saved selection or not, the same rule must hold.
+  // Whether a selection is saved or not, the same rule must hold.
   const preview = previewOf({ chain: [entry("a", "A", { keys: [1] })], targets: [k0, k1], health });
   const excluded = preview.candidates.find((item) => item.keyIndex === 0);
   const eligible = preview.candidates.find((item) => item.keyIndex === 1);
@@ -529,7 +538,7 @@ test("BUG 4 contract: the preview's phases say exactly where latency decided a p
     ["Slow:sticky", "Fast:auto", "Mid:auto"]
   );
 
-  // A partly-selected pool: the selected model keeps its saved place; only the
+  // A partly-selected chain: the selected model keeps its saved place; only the
   // unselected batch is latency-ordered (`health-fallback`).
   assert.deepEqual(
     phases(previewOf({ chain: [entry("a", "Slow")], targets, health })),

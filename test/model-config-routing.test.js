@@ -72,53 +72,60 @@ const modelId = (payload, model) => payload.models.find((row) => row.model === m
 
 const tmpDir = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `model-config-${name}-`));
 
+/**
+ * One provider: one base URL, one key list, one model list. There is no second
+ * "vision" configuration to set up. Models differ only in what they DECLARE, so
+ * a test that needs a second model lists it in GROQ_MODELS and declares (or
+ * deliberately does not declare) its capabilities through the configurator.
+ *
+ * The single upstream answers with the model it was asked for, so a test can
+ * tell which model a request was actually sent to.
+ */
 async function start({ dir, ...env } = {}) {
   const base = dir ?? tmpDir("routing");
-  const text = await startMockUpstream(() => ok("text-only"));
-  const vision = await startMockUpstream(() => ok("vision-model"));
+  const upstream = await startMockUpstream((record) => ok(record.body?.model ?? "text-only"));
   const router = await startRouter({
     GROQ_API_KEYS: "g0",
     GROQ_MODELS: "text-only",
-    GROQ_BASE_URL: `${text.baseUrl}/v1`,
-    GROQ_VISION_API_KEYS: "v0",
-    GROQ_VISION_MODELS: "vision-model",
-    GROQ_VISION_BASE_URL: `${vision.baseUrl}/v1`,
+    GROQ_BASE_URL: `${upstream.baseUrl}/v1`,
     MODEL_CONFIG_FILE: path.join(base, "model-config.json"),
     ...env
   });
-  return { router, text, vision, base };
+  return { router, upstream, base };
 }
 
-test("the configurator lists every environment model with provisional capabilities", async () => {
-  const { router, text, vision } = await start();
+/** Requests that reached the upstream for one model (the model the router sent). */
+const callsTo = (upstream, model) => upstream.apiRequests.filter((record) => record.body?.model === model).length;
+
+test("the configurator lists every environment model with default capabilities and no pool", async () => {
+  const { router, upstream } = await start({ GROQ_MODELS: "text-only,vision-model" });
   try {
     const payload = await modelConfig(router);
     assert.equal(payload.available, true);
-    assert.equal(payload.summary.total, 2);
+    assert.equal(payload.summary.total, 2, "both models of the one provider are listed");
     assert.equal(payload.summary.configured, 0);
     assert.equal(payload.summary.environmentOnly, 2);
     assert.equal(payload.schema.version, 1);
     assert.ok(payload.schema.capabilities.some((entry) => entry.id === "image_input"));
 
-    const textModel = payload.models.find((row) => row.model === "text-only");
-    const visionModel = payload.models.find((row) => row.model === "vision-model");
-    assert.equal(textModel.source, "environment");
-    assert.equal(textModel.capabilitiesSource, "inferred");
-    assert.ok(textModel.capabilities.includes("text_input"));
-    assert.ok(!textModel.capabilities.includes("image_input"));
-    assert.deepEqual(textModel.pools, ["text"]);
-    assert.ok(visionModel.capabilities.includes("image_input"));
-    assert.deepEqual(visionModel.pools, ["vision"]);
+    for (const model of ["text-only", "vision-model"]) {
+      const row = payload.models.find((entry) => entry.model === model);
+      assert.equal(row.source, "environment");
+      assert.equal(row.capabilitiesSource, "inferred", "provisional until the operator declares it");
+      // A model nobody has declared is text in, text out and nothing else. Its
+      // NAME is never evidence: "vision-model" gets no image_input.
+      assert.deepEqual([...row.capabilities].sort(), ["text_input", "text_output"], `${model}: defaults only`);
+      assert.ok(!("pools" in row), `${model}: a row carries no pool membership`);
+    }
     // No credential of any kind may appear in the payload.
     assert.equal(JSON.stringify(payload).includes("g0"), false);
-    assert.equal(JSON.stringify(payload).includes("v0"), false);
   } finally {
-    await router.close(); await text.close(); await vision.close();
+    await router.close(); await upstream.close();
   }
 });
 
 test("switching a model off in the configurator takes effect immediately and is mirrored by the switch", async () => {
-  const { router, text, vision } = await start();
+  const { router, upstream } = await start();
   try {
     const created = await json(await saveConfig(router, null, {
       provider: "groq",
@@ -126,12 +133,12 @@ test("switching a model off in the configurator takes effect immediately and is 
       enabled: false
     }));
     assert.equal(created.entry.enabled, false);
-    assert.deepEqual(created.models.find((row) => row.model === "text-only").pools, ["text"]);
+    assert.ok(!("pools" in created.models.find((row) => row.model === "text-only")), "a row carries no pool");
 
     const refused = await failure(await chat(router));
     assert.equal(refused.status, 503);
     assert.equal(refused.body.error.type, "models_disabled");
-    assert.equal(text.apiRequests.length, 0, "a switched-off model is never called");
+    assert.equal(upstream.apiRequests.length, 0, "a switched-off model is never called");
 
     // The Models page and the configurator agree: the same model is off there too.
     const models = await json(await router.request("/api/models"));
@@ -140,14 +147,14 @@ test("switching a model off in the configurator takes effect immediately and is 
     const id = modelId(created, "text-only");
     await json(await saveConfig(router, id, { enabled: true }));
     assert.equal((await chat(router)).status, 200);
-    assert.equal(text.apiRequests.length, 1);
+    assert.equal(upstream.apiRequests.length, 1);
   } finally {
-    await router.close(); await text.close(); await vision.close();
+    await router.close(); await upstream.close();
   }
 });
 
 test("the Models page switch updates a declaration, so the two surfaces cannot disagree", async () => {
-  const { router, text, vision } = await start();
+  const { router, upstream } = await start();
   try {
     await json(await saveConfig(router, null, { provider: "groq", model: "text-only" }));
 
@@ -161,7 +168,7 @@ test("the Models page switch updates a declaration, so the two surfaces cannot d
     assert.equal(row.enabledByConfig, false, "the durable declaration is off");
     assert.equal(row.disabledBySwitch, true, "the runtime switch mirrors it");
     assert.equal((await failure(await chat(router))).body.error.type, "models_disabled");
-    assert.equal(text.apiRequests.length, 0);
+    assert.equal(upstream.apiRequests.length, 0);
 
     const on = await json(await router.request("/api/models/switch", {
       method: "PUT",
@@ -174,12 +181,12 @@ test("the Models page switch updates a declaration, so the two surfaces cannot d
     assert.equal(row.disabledBySwitch, false);
     assert.equal((await chat(router)).status, 200);
   } finally {
-    await router.close(); await text.close(); await vision.close();
+    await router.close(); await upstream.close();
   }
 });
 
 test("a pinned request remains an explicit one-off when the configurator switched the model off", async () => {
-  const { router, text, vision } = await start();
+  const { router, upstream } = await start();
   try {
     await json(await saveConfig(router, null, {
       provider: "groq",
@@ -189,7 +196,7 @@ test("a pinned request remains an explicit one-off when the configurator switche
 
     // Ordinary traffic obeys the switch...
     assert.equal((await failure(await chat(router))).body.error.type, "models_disabled");
-    assert.equal(text.apiRequests.length, 0);
+    assert.equal(upstream.apiRequests.length, 0);
 
     // ...while a pin is the documented one-off override, exactly as it is for
     // the Models page switch (both surfaces now own the same flag).
@@ -198,24 +205,52 @@ test("a pinned request remains an explicit one-off when the configurator switche
       { "x-multi-ai-pin-provider": "groq", "x-multi-ai-pin-key-index": "0" }
     ));
     assert.equal(pinned.status, 200);
-    assert.equal(text.apiRequests.length, 1, "the pinned target is reached");
+    assert.equal(upstream.apiRequests.length, 1, "the pinned target is reached");
   } finally {
-    await router.close(); await text.close(); await vision.close();
+    await router.close(); await upstream.close();
   }
 });
 
-test("image requests still reach an inferred vision model with no configuration at all", async () => {
-  const { router, vision, text } = await start();
+test("an image request is never sent to an undeclared model, whatever the model is called", async () => {
+  const { router, upstream } = await start({ GROQ_MODELS: "text-only,vision-model" });
   try {
-    assert.equal((await imageChat(router)).status, 200);
-    assert.equal(vision.apiRequests.length, 1);
+    // Nothing declares image_input. "vision-model" is only a name: it earns no
+    // capability from it, so the request fails locally and nothing is called.
+    const refused = await failure(await imageChat(router));
+    assert.equal(refused.status, 503);
+    assert.equal(refused.body.error.type, "no_capable_route");
+    assert.ok(refused.body.error.required_capabilities.includes("image_input"));
+    assert.equal(upstream.apiRequests.length, 0, "no model is called when none can carry the image");
   } finally {
-    await router.close(); await text.close(); await vision.close();
+    await router.close(); await upstream.close();
   }
 });
 
-test("a declared vision model without image_input is refused instead of being sent the image", async () => {
-  const { router, vision, text } = await start();
+test("declaring image_input routes images to that model only, while text may use any model", async () => {
+  const { router, upstream } = await start({ GROQ_MODELS: "text-only,vision-model" });
+  try {
+    await json(await saveConfig(router, null, {
+      provider: "groq",
+      model: "vision-model",
+      capabilities: ["text_input", "text_output", "image_input"]
+    }));
+
+    assert.equal((await imageChat(router)).status, 200);
+    assert.equal(callsTo(upstream, "vision-model"), 1, "the image went to the declared model");
+    assert.equal(callsTo(upstream, "text-only"), 0, "and never to the model that did not declare it");
+
+    // Declaring an extra capability does not take the model out of ordinary
+    // text routing: there is one list, so both models are text candidates.
+    const before = upstream.apiRequests.length;
+    assert.equal((await chat(router)).status, 200);
+    assert.equal(upstream.apiRequests.length, before + 1);
+  } finally {
+    await router.close(); await upstream.close();
+  }
+});
+
+test("a declared model without image_input is refused instead of being sent the image", async () => {
+  const { router, upstream } = await start({ GROQ_MODELS: "text-only,vision-model" });
   try {
     await json(await saveConfig(router, null, {
       provider: "groq",
@@ -227,17 +262,20 @@ test("a declared vision model without image_input is refused instead of being se
     assert.equal(refused.status, 503);
     assert.equal(refused.body.error.type, "no_capable_route");
     assert.ok(refused.body.error.required_capabilities.includes("image_input"));
-    assert.equal(refused.body.error.excluded_candidates[0].reason, "capability_not_configured");
-    assert.equal(vision.apiRequests.length, 0, "the payload is never sent to a model that cannot carry it");
+    const excluded = refused.body.error.excluded_candidates.find((entry) => entry.model === "vision-model");
+    assert.equal(excluded?.reason, "capability_not_configured");
+    assert.equal(upstream.apiRequests.length, 0, "the payload is never sent to a model that cannot carry it");
   } finally {
-    await router.close(); await text.close(); await vision.close();
+    await router.close(); await upstream.close();
   }
 });
 
-test("a capability-incompatible manual selection falls through to eligible unselected models", async () => {
+const lookupTool = { type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } };
+
+async function startSelectionRouter(name) {
   const selected = await startMockUpstream(() => ok("selected"));
   const automatic = await startMockUpstream(() => ok("automatic"));
-  const base = tmpDir("capability-fallback");
+  const base = tmpDir(name);
   const router = await startRouter({
     GROQ_API_KEYS: "g0",
     GROQ_MODELS: "selected",
@@ -247,20 +285,27 @@ test("a capability-incompatible manual selection falls through to eligible unsel
     MISTRAL_BASE_URL: `${automatic.baseUrl}/v1`,
     MODEL_CONFIG_FILE: path.join(base, "model-config.json")
   });
+  await json(await saveConfig(router, null, {
+    provider: "groq",
+    model: "selected",
+    capabilities: ["text_input", "text_output", "streaming", "structured_output"]
+  }));
+  await json(await putFallback(router, { entries: [{ provider: "groq", model: "selected" }] }));
+  return { router, selected, automatic };
+}
+
+test("a capability-incompatible manual selection falls through to eligible unselected models", async () => {
+  const { router, selected, automatic } = await startSelectionRouter("capability-fallback");
   try {
+    // The unselected model is eligible because it DECLARES tool_calling, not
+    // because of anything it is called or which provider it belongs to.
     await json(await saveConfig(router, null, {
-      provider: "groq",
-      model: "selected",
-      capabilities: ["text_input", "text_output", "streaming", "structured_output"]
-    }));
-    await json(await putFallback(router, {
-      pool: "text",
-      entries: [{ provider: "groq", model: "selected" }]
+      provider: "mistral",
+      model: "automatic",
+      capabilities: ["text_input", "text_output", "tool_calling"]
     }));
 
-    const response = await chat(router, {
-      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }]
-    });
+    const response = await chat(router, { tools: [lookupTool] });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("x-multi-ai-provider"), "mistral");
     assert.equal(selected.apiRequests.length, 0, "the incompatible selected model is never sent the tool call");
@@ -270,8 +315,28 @@ test("a capability-incompatible manual selection falls through to eligible unsel
   }
 });
 
+test("an unselected model that has not declared the capability is not a fallback for it", async () => {
+  const { router, selected, automatic } = await startSelectionRouter("capability-undeclared");
+  try {
+    // Neither model declares tool_calling (the second has only the defaults), so
+    // nothing is guessed: the request fails locally and no upstream is called.
+    const refused = await failure(await chat(router, { tools: [lookupTool] }));
+    assert.equal(refused.status, 503);
+    assert.equal(refused.body.error.type, "no_capable_route");
+    assert.ok(refused.body.error.required_capabilities.includes("tool_calling"));
+    assert.equal(selected.apiRequests.length + automatic.apiRequests.length, 0);
+
+    // Plain text is unaffected: the selection still serves it first.
+    const plain = await chat(router);
+    assert.equal(plain.status, 200);
+    assert.equal(plain.headers.get("x-multi-ai-provider"), "groq");
+  } finally {
+    await router.close(); await selected.close(); await automatic.close();
+  }
+});
+
 test("an audio request with no capable model fails locally, and an explicit model is rejected as a mismatch", async () => {
-  const { router, text, vision } = await start();
+  const { router, upstream } = await start();
   try {
     const noRoute = await failure(await audioChat(router));
     assert.equal(noRoute.status, 503);
@@ -285,21 +350,21 @@ test("an audio request with no capable model fails locally, and an explicit mode
     assert.equal(named.status, 400);
     assert.equal(named.body.error.type, "model_capability_mismatch");
     assert.ok(named.body.error.required_capabilities.includes("audio_input"));
-    assert.equal(text.apiRequests.length, 0);
+    assert.equal(upstream.apiRequests.length, 0);
   } finally {
-    await router.close(); await text.close(); await vision.close();
+    await router.close(); await upstream.close();
   }
 });
 
 test("a declaration survives a restart, including its disabled flag", async () => {
-  const { router, text, vision, base } = await start();
+  const { router, upstream, base } = await start();
   await json(await saveConfig(router, null, { provider: "groq", model: "text-only", enabled: false }));
   await router.close();
 
   const restarted = await startRouter({
     GROQ_API_KEYS: "g0",
     GROQ_MODELS: "text-only",
-    GROQ_BASE_URL: `${text.baseUrl}/v1`,
+    GROQ_BASE_URL: `${upstream.baseUrl}/v1`,
     MODEL_CONFIG_FILE: path.join(base, "model-config.json")
   });
   try {
@@ -310,7 +375,7 @@ test("a declaration survives a restart, including its disabled flag", async () =
     assert.equal(row.capabilitiesSource, "configured");
     assert.equal((await failure(await chat(restarted))).body.error.type, "models_disabled");
   } finally {
-    await restarted.close(); await text.close(); await vision.close();
+    await restarted.close(); await upstream.close();
   }
 });
 
@@ -338,7 +403,7 @@ test("the document is persisted to GitHub, contains no credentials, and is resto
     assert.equal(JSON.stringify(document).includes("g0"), false);
     assert.equal(JSON.stringify(document).includes(github.token), false);
   } finally {
-    await first.router.close(); await first.text.close(); await first.vision.close();
+    await first.router.close(); await first.upstream.close();
   }
 
   // A fresh container: empty local mirror, same repository.
@@ -355,7 +420,7 @@ test("the document is persisted to GitHub, contains no credentials, and is resto
     assert.equal(row.enabled, false);
     assert.equal((await failure(await chat(second.router))).body.error.type, "models_disabled");
   } finally {
-    await second.router.close(); await second.text.close(); await second.vision.close();
+    await second.router.close(); await second.upstream.close();
     await github.close();
   }
 });
@@ -395,7 +460,7 @@ test("a newer document saved on GitHub is never overwritten with a stale revisio
     assert.equal(refused.body.error.type, "conflict");
     assert.equal(github.stored("main", "model-config.json"), newer, "the newer document is untouched");
   } finally {
-    await running.router.close(); await running.text.close(); await running.vision.close();
+    await running.router.close(); await running.upstream.close();
     await github.close();
   }
 });

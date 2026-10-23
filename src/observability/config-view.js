@@ -1,6 +1,5 @@
 import { isProviderConfigured } from "../config.js";
 import { providerProtocols } from "../adapters.js";
-import { describeProviderCapabilities } from "../capabilities.js";
 
 /**
  * A safe, read-only projection of the router's configuration.
@@ -29,14 +28,9 @@ function configuredHeaderNames(provider) {
     .sort();
 }
 
-function describeProvider(id, provider, targets, capabilities = null) {
+function describeProvider(id, provider, targets) {
   const providerTargets = targets.filter((target) => target.provider === id);
   const configured = isProviderConfigured(provider);
-  const caps = capabilities ?? {
-    capabilities: { text: configured, vision: configured },
-    textModels: [...provider.models],
-    visionModels: [...provider.models]
-  };
 
   return {
     id,
@@ -52,12 +46,9 @@ function describeProvider(id, provider, targets, capabilities = null) {
             : null
         ].filter(Boolean),
 
-    // Capability metadata: what this provider can route, and with which models.
-    // Derived from configuration, never assumed.
-    capabilities: { ...caps.capabilities },
-    textModels: [...caps.textModels],
-    visionModels: [...caps.visionModels],
-
+    // ONE model list per provider. What a model can do (image input, tools, ...)
+    // is its declared capability set in the Model Configurator, not a property
+    // of the provider, so none is reported here.
     baseUrl: provider.baseUrl || null,
     models: [...provider.models],
     modelCount: provider.models.length,
@@ -82,10 +73,8 @@ function describeProvider(id, provider, targets, capabilities = null) {
 }
 
 export function describeConfig(config, targets = []) {
-  const capabilities = describeProviderCapabilities(config);
-
   const providers = Object.entries(config.providers).map(([id, provider]) =>
-    describeProvider(id, provider, targets, capabilities[id])
+    describeProvider(id, provider, targets)
   );
 
   const configuredProviders = providers.filter((provider) => provider.configured);
@@ -105,25 +94,19 @@ export function describeConfig(config, targets = []) {
       exactModelPreferred: false,
       // Routing is capability-based: every configured target is a candidate,
       // and the request's required capabilities decide which ones are eligible.
-      pools: ["text", "vision"],
-      crossPoolFallback: "unified",
+      eligibility: "declared capabilities that an adapter can execute",
       // Where the order comes from. The strategy itself is not environment
       // configuration any more, so it is reported by /api/fallback.
       orderSource: "fallback-chain",
       chainFile: config.fallbackChainFile
     },
     providers,
-    // One entry per known provider, with both capabilities on one object.
-    capabilities: Object.values(capabilities),
     summary: {
       knownProviders: providers.length,
       configuredProviders: configuredProviders.length,
       unconfiguredProviders: providers.length - configuredProviders.length,
       configuredTargets: targets.length,
-      textCapableProviders: Object.values(capabilities).filter((c) => c.capabilities.text).length,
-      visionCapableProviders: Object.values(capabilities).filter((c) => c.capabilities.vision).length,
-      dualCapableProviders: Object.values(capabilities)
-        .filter((c) => c.capabilities.text && c.capabilities.vision).length
+      configuredModels: new Set(targets.map((target) => `${target.provider}/${target.model}`)).size
     }
   };
 }
@@ -149,7 +132,7 @@ function providerEnvVars(providers) {
   });
 }
 
-export function describeEnvironment(config) {
+export function describeEnvironment(config, env = process.env) {
   const providerVars = providerEnvVars(config.providers);
 
   return {
@@ -161,11 +144,14 @@ export function describeEnvironment(config) {
     ],
     // Routing order is configuration now, not environment: it lives in the
     // Fallback Chain, which the control panel owns. Listed here so an operator
-    // can see exactly which legacy variables are read no more.
+    // can see exactly which legacy variables remain and what each one does.
+    // `configured` reports whether the variable is set right now; none of them
+    // is active routing configuration.
     legacy: [
-      { name: "TEXT_PRIORITY_MODELS", configured: false, kind: "list", note: "removed — use the Fallback Chain" },
-      { name: "VISION_PRIORITY_MODELS", configured: false, kind: "list", note: "removed — use the Fallback Chain" },
-      { name: "MANUAL_SELECTION_FILE", configured: false, kind: "text", note: "read once, to seed the Fallback Chain" }
+      { name: "TEXT_PRIORITY_MODELS", configured: Boolean(String(env?.TEXT_PRIORITY_MODELS ?? "").trim()), kind: "list", note: "legacy — read once to seed the unified Fallback Chain" },
+      { name: "VISION_PRIORITY_MODELS", configured: Boolean(String(env?.VISION_PRIORITY_MODELS ?? "").trim()), kind: "list", note: "legacy — read once to seed the unified Fallback Chain" },
+      { name: "MANUAL_SELECTION_FILE", configured: false, kind: "text", note: "legacy — read once, to seed the Fallback Chain" },
+      { name: "*_VISION_API_KEYS / *_VISION_MODELS / *_VISION_BASE_URL", configured: false, kind: "list", note: "retired — ignored; list those models under *_MODELS and declare image input in the Model Configurator" }
     ],
     providers: providerVars
   };

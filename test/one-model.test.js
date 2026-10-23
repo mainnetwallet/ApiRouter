@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { startMockUpstream } from "../test-helpers/mock-upstream.js";
 import { startRouter, postJson } from "../test-helpers/router-harness.js";
-import { OneModelStore, KeyPacer, withOneModel } from "../src/one-model.js";
+import { OneModelStore, KeyPacer, withOneModel, normalizeKeyId } from "../src/one-model.js";
 import { HealthRegistry } from "../src/health.js";
 
 const ok = (model) => ({
@@ -246,7 +246,7 @@ test("one model API: per-key cooldowns are validated, saved, removable and clear
     assert.equal(set.changed, true);
     assert.deepEqual(set.keys.map((key) => key.cooldownMs), [60000, 0]);
     const saved = JSON.parse(fs.readFileSync(path.join(dir, "one-model.json"), "utf8"));
-    assert.deepEqual(saved.cooldowns, { "m1::text:0": 60000 }, "stored against its model");
+    assert.deepEqual(saved.cooldowns, { "m1::0": 60000 }, "stored against its model");
 
     // Removing it (null) and the key is unpaced again.
     const removed = await (await setOneModel(router, { cooldowns: { "text:0": null } })).json();
@@ -314,7 +314,7 @@ test("OneModelStore: key cooldowns persist, edit by scope and reset with the mod
   assert.equal(store.set({ cooldowns: { "text:0": 60000 } }), true);
   assert.equal(store.cooldownFor(key(0)), 60000);
   assert.equal(store.cooldownFor(key(1)), 0);
-  assert.deepEqual(events.at(-1), { enabled: true, provider: "groq", models: ["m1"], scope: "cooldowns", reset: false, changedKeys: ["m1::text:0"] });
+  assert.deepEqual(events.at(-1), { enabled: true, provider: "groq", models: ["m1"], scope: "cooldowns", reset: false, changedKeys: ["m1::0"] });
   assert.equal(store.set({ cooldowns: { "text:0": 60000 } }), false, "same value changes nothing");
 
   assert.equal(new OneModelStore({ file }).cooldownFor(key(0)), 60000, "reloaded");
@@ -357,7 +357,36 @@ test("OneModelStore: a saved single-model file and an old \"text:0\" cooldown st
   fs.writeFileSync(file, JSON.stringify({ version: 1, enabled: true, provider: "groq", model: "m1", cooldowns: { "text:0": 5000 } }));
   const store = new OneModelStore({ file });
   assert.deepEqual(store.active(), { provider: "groq", models: ["m1"] });
-  assert.equal(store.cooldownFor({ model: "m1", pool: "text", keyIndex: 0 }), 5000);
+  assert.equal(store.cooldownFor({ model: "m1", keyIndex: 0 }), 5000);
+});
+
+test("normalizeKeyId: the canonical \"model::N\" id is kept and every legacy spelling migrates to it", () => {
+  const models = ["m1", "m2"];
+  assert.equal(normalizeKeyId("m1::0", models), "m1::0");
+  assert.equal(normalizeKeyId("m2::12", models), "m2::12");
+  assert.equal(normalizeKeyId("m1::text:0", models), "m1::0", "two-pool text id");
+  assert.equal(normalizeKeyId("m1::vision:3", models), "m1::3", "two-pool vision id");
+  assert.equal(normalizeKeyId("text:1", models), "m1::1", "oldest bare id names the first model");
+  assert.equal(normalizeKeyId("text:1", []), null, "a bare id needs a model to belong to");
+  for (const bad of ["", "0", "m1::", "m1::x", "text:x", null, undefined]) {
+    assert.equal(normalizeKeyId(bad, models), null, `${String(bad)} is not a key id`);
+  }
+});
+
+test("OneModelStore: a version 2 pooled cooldown file migrates to model::N ids, keeping the longer pause, and is rewritten as version 3", () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "one-model-v2-")), "o.json");
+  fs.writeFileSync(file, JSON.stringify({
+    version: 2, enabled: true, provider: "groq", models: ["m1", "m2"],
+    cooldowns: { "m1::text:0": 600, "m1::vision:0": 900, "m2::text:1": 100, "gone::text:0": 500 }
+  }));
+  const store = new OneModelStore({ file });
+  // text:0 and vision:0 now name the same key; a model that is no longer listed is dropped.
+  assert.deepEqual(store.getCooldowns(), { "m1::0": 900, "m2::1": 100 });
+
+  assert.equal(store.set({ cooldowns: { "m2::0": 50 } }), true);
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(saved.version, 3);
+  assert.deepEqual(saved.cooldowns, { "m1::0": 900, "m2::1": 100, "m2::0": 50 });
 });
 
 test("withOneModel: model 1 leads, the next model is used when its keys fail or cool, and it is back on model 1 afterwards", async () => {
@@ -433,7 +462,7 @@ test("one provider: model 1 fails, model 2 answers; the next request starts from
 test("one provider: a model whose keys are all cooling is skipped without waiting, then used again once they are ready", async () => {
   const { router, groq, stop } = await start({ groqModels: "m1,m3", groqScript: (record) => ok(record.body?.model) });
   try {
-    const cooldowns = { "m1::text:0": 600, "m1::text:1": 600 };
+    const cooldowns = { "m1::0": 600, "m1::1": 600 };
     assert.equal((await setOneModel(router, { enabled: true, provider: "groq", models: ["m1", "m3"], cooldowns })).status, 200);
     const startedAt = Date.now();
     for (let i = 0; i < 3; i += 1) assert.equal((await chat(router)).status, 200);
@@ -465,21 +494,21 @@ test("one provider API: models are ordered, ranked, validated, and dropping a mo
 
     const body = await (await setOneModel(router, {
       enabled: true, provider: "groq", models: ["m4", "m1", "m4"],
-      cooldowns: { "m4::text:0": 1000, "m1::text:1": 2000 }
+      cooldowns: { "m4::0": 1000, "m1::1": 2000 }
     })).json();
     assert.deepEqual(body.models, ["m4", "m1"], "duplicates collapse, order kept");
     assert.deepEqual(body.keys.map((key) => [key.model, key.rank, key.keyIndex, key.cooldownMs]),
       [["m4", 1, 0, 1000], ["m4", 1, 1, 0], ["m1", 2, 0, 0], ["m1", 2, 1, 2000]]);
     assert.deepEqual(body.candidates.filter((c) => c.provider === "groq").map((c) => [c.model, c.rank]),
       [["m1", 2], ["m3", null], ["m4", 1]]);
-    assert.equal((await setOneModel(router, { cooldowns: { "m3::text:0": 1000 } })).status, 404, "m3 is not in the list");
+    assert.equal((await setOneModel(router, { cooldowns: { "m3::0": 1000 } })).status, 404, "m3 is not in the list");
     assert.equal((await setOneModel(router, { cooldowns: { "text:0": 3000 } })).status, 200, "an old-style id means the first model");
 
     const dropped = await (await setOneModel(router, { provider: "groq", models: ["m1"] })).json();
     assert.deepEqual(dropped.keys.map((key) => key.cooldownMs), [0, 2000], "m4's cooldowns went with it");
     const saved = JSON.parse(fs.readFileSync(path.join(dir, "one-model.json"), "utf8"));
     assert.deepEqual(saved.models, ["m1"]);
-    assert.deepEqual(saved.cooldowns, { "m1::text:1": 2000 });
+    assert.deepEqual(saved.cooldowns, { "m1::1": 2000 });
   } finally { await stop(); }
 });
 
