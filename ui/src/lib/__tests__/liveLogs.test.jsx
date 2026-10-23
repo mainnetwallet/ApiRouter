@@ -339,36 +339,15 @@ describe("live and historical logs use the same attempt events", () => {
 });
 
 describe("text and vision attempts stay apart", () => {
-  it("an identical target in each pool gives two independent cards, each tagged with its pool", () => {
-    const text = attempt(1, { pool: "text", requestSeq: 1, requestId: "req-a1b2c3-000001" });
-    const vision = attempt(2, { pool: "vision", requestSeq: 2, requestId: "req-a1b2c3-000002" });
+  it("an identical target in each attempt gives two independent cards", () => {
+    const text = attempt(1, { requestSeq: 1, requestId: "req-a1b2c3-000001" });
+    const vision = attempt(2, { requestSeq: 2, requestId: "req-a1b2c3-000002" });
     const rows = mergeRows([], rowsOf(text, vision));
 
-    expect(rows.map((r) => r.pool)).toEqual(["text", "vision"]);
-    expect(filterRows(rows, { pool: "vision" }).map((r) => r.attemptId)).toEqual([vision.attemptId]);
-    expect(filterRows(rows, { pool: "text" }).map((r) => r.attemptId)).toEqual([text.attemptId]);
-    expect(filterRows(rows, { search: "vision" })).toHaveLength(1);
+    expect(rows.map((r) => r.attemptId)).toEqual([text.attemptId, vision.attemptId]);
 
     const html = render(rows);
     expect(cards(html)).toBe(2);
-    expect(html).toContain("livelog__pool--text");
-    expect(html).toContain("livelog__pool--vision");
-  });
-
-  it("defaults to text, and an unknown pool never becomes vision", () => {
-    expect(row(attempt(1, { pool: undefined })).pool).toBe("text");
-    expect(row(attempt(1, { pool: "sideways" })).pool).toBe("text");
-    expect(row(attempt(1, { pool: "vision" })).pool).toBe("vision");
-  });
-
-  it("vision attempts keep their own independent fallback chain", () => {
-    const rows = mergeRows([], rowsOf(
-      failed(1, 429, { pool: "vision", provider: "openrouter", requestSeq: 1 }),
-      attempt(2, { pool: "vision", provider: "mistral", callIndex: 2, requestSeq: 1 }),
-      attempt(3, { pool: "text", requestSeq: 2, requestId: "req-a1b2c3-000002" })
-    ));
-    expect(rows.map((r) => r.pool)).toEqual(["vision", "vision", "text"]);
-    expect((render(rows).match(/livelog__fallback/g) ?? []).length).toBe(1);
   });
 });
 
@@ -410,7 +389,7 @@ describe("rendering safety", () => {
 });
 
 describe("the card", () => {
-  it("shows the time, state, pool, call number, request id, then the model and the key/status/time", () => {
+  it("shows the time, state, call number, request id, then the model and the key/status/time", () => {
     const html = render(rowsOf(attempt(1, { keyIndex: 3, callIndex: 2 })));
     // The clock is local wall-clock time, so the expected value is derived from
     // the attempt's own start rather than written as a literal: "14:02:12" is
@@ -421,7 +400,6 @@ describe("the card", () => {
       `${pad(started.getHours())}:${pad(started.getMinutes())}:${pad(started.getSeconds())}`
     );
     expect(html).toContain("SUCCESS");
-    expect(html).toContain("TEXT");
     expect(html).toContain("Call #2");
     expect(html).toContain("req-1");
     expect(html).toContain("key 3 · 200 · 120 ms");
@@ -571,9 +549,8 @@ describe("copy logs as text", () => {
     expect(second).toContain("key 1");
   });
 
-  it("prints the pool", () => {
-    expect(formatRowsAsText(rowsOf(attempt(1, { pool: "vision" })))).toContain("VISION");
-    expect(formatRowsAsText(rowsOf(attempt(1)))).toContain("TEXT");
+  it("prints the state", () => {
+    expect(formatRowsAsText(rowsOf(attempt(1)))).toContain("SUCCESS");
   });
 
   it("never leaks a credential-shaped string", () => {

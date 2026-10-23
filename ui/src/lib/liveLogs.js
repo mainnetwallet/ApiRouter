@@ -88,7 +88,6 @@ function requestContext(entry) {
     startSeq,
     requestId: entry?.requestId ?? entry?.id ?? null,
     sessionId: entry?.id ?? null,
-    pool: entry?.pool,
     protocol: entry?.protocol ?? null,
     requestedModel: entry?.requestedModel ?? null
   };
@@ -119,7 +118,6 @@ export function buildAttemptRow(attempt, ctx = {}) {
       : STATE.FAILED;
   const calling = state === STATE.CALLING;
   const failed = state === STATE.FAILED;
-  const pool = attempt.pool ?? ctx.pool;
   const requestId = attempt.requestId ?? ctx.requestId ?? null;
 
   return {
@@ -137,9 +135,6 @@ export function buildAttemptRow(attempt, ctx = {}) {
     pending: calling,
     ts: isNum(attempt.startedAt) ? attempt.startedAt : null,
     protocol: attempt.protocol ?? ctx.protocol ?? null,
-    // Which routing pool this call went to. Defaults to text so a gateway that
-    // predates the vision pool still renders correctly.
-    pool: pool === "vision" ? "vision" : "text",
     requestedModel: optText(attempt.requestedModel ?? ctx.requestedModel, 120),
     phase: attempt.phase ?? null,
     provider: attempt.provider ?? null,
@@ -179,7 +174,6 @@ export function buildRequestRow(entry) {
     pending,
     ts: isNum(entry.receivedAt) ? entry.receivedAt : null,
     protocol: ctx.protocol,
-    pool: entry.pool === "vision" ? "vision" : "text",
     requestedModel: optText(entry.requestedModel, 120),
     phase: null,
     provider: entry.finalProvider ?? null,
@@ -339,7 +333,7 @@ export function ingestEvent(event, { floor = 0, maxSeq = 0 } = {}) {
 /** Text a search box matches against. Never includes anything but display fields. */
 function haystack(row) {
   return [
-    row.state, row.requestId, row.provider, row.model, row.protocol, row.pool, row.requestedModel,
+    row.state, row.requestId, row.provider, row.model, row.protocol, row.requestedModel,
     Number.isInteger(row.keyIndex) ? `key ${row.keyIndex}` : "",
     Number.isInteger(row.callIndex) ? `call ${row.callIndex}` : "",
     row.status, row.reason, row.detail
@@ -348,16 +342,14 @@ function haystack(row) {
 
 /**
  * Apply the panel filters. `status` is "running", "success" or "failed";
- * "running" covers every row that has not finished yet. `pool` is "text" or
- * "vision" — text and vision calls are otherwise indistinguishable in the list.
+ * "running" covers every row that has not finished yet.
  */
-export function filterRows(rows, { provider = null, status = null, search = "", requestId = "", pool = null } = {}) {
+export function filterRows(rows, { provider = null, status = null, search = "", requestId = "" } = {}) {
   const needle = String(search ?? "").trim().toLowerCase();
   const rid = String(requestId ?? "").trim().toLowerCase();
 
   return rows.filter((row) => {
     if (provider && row.provider !== provider) return false;
-    if (pool && row.pool !== pool) return false;
     if (status === "running" && !row.pending) return false;
     if (status === "success" && row.state !== STATE.SUCCESS) return false;
     if (status === "failed" && row.state !== STATE.FAILED) return false;

@@ -125,11 +125,10 @@ function FallbackLink({ from }) {
   );
 }
 
-/** Time, state, pool, call number, protocol and request id: the top of every card. */
+/** Time, state, call number, protocol and request id: the top of every card. */
 function CardHead({ row, outcome, request, rid, onSelectRequest }) {
   const tone = STATE_TONE[row.state] ?? "neutral";
   const live = isLive(row);
-  const pool = row.pool === "vision" ? "VISION" : "TEXT";
   const call = Number.isInteger(row.callIndex) ? `#${row.callIndex}` : "";
   return (
     <div className="livelog__card-head">
@@ -139,13 +138,6 @@ function CardHead({ row, outcome, request, rid, onSelectRequest }) {
         title={STATE_HINT[row.state]}
       >
         {row.state}
-      </span>
-      {/* Which pool served the call: text and vision are routed independently. */}
-      <span
-        className={`livelog__pool livelog__pool--${pool === "VISION" ? "vision" : "text"}`}
-        title={`${pool} routing pool`}
-      >
-        {pool}
       </span>
       <span className="livelog__sub dim mono" title={request}>{[call ? `Call ${call}` : null, request].filter(Boolean).join(" · ")}</span>
       <span className="livelog__outcome mono tabular">{outcome}</span>
@@ -255,7 +247,6 @@ export function formatRowsAsText(rows) {
     const head = [
       `[${formatClock(row.ts)}]`,
       row.state,
-      row.pool === "vision" ? "VISION" : "TEXT",
       Number.isInteger(row.callIndex) ? `call #${row.callIndex}` : null,
       clean(requestText(row)),
       row.requestId ? `id ${row.requestId}` : null,

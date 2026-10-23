@@ -3,11 +3,11 @@ import { apiRequest } from "./client.js";
 /**
  * The Fallback Chain: the single source of truth for routing order.
  *
- * `GET /api/fallback` returns the saved selection per pool and the catalogue of
+ * `GET /api/fallback` returns the saved selection and the catalogue of
  * configured models with their per-key health and measured latency. Only
  * provider/model ids and key indexes are ever sent. The routing mode is derived
- * from the selection — a pool with a saved selection is walked manually, an
- * empty one automatically — so there is nothing to switch.
+ * from the selection — a saved selection is walked manually, an empty one
+ * automatically — so there is nothing to switch.
  */
 export function getFallback({ signal } = {}) {
   return apiRequest("/api/fallback", { signal });

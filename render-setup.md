@@ -106,7 +106,7 @@ GROQ_MODELS=openai/gpt-oss-120b,qwen/qwen3.8-27b
 
 Cloudflare use korle `CLOUDFLARE_API_KEYS` er sathe `CLOUDFLARE_ACCOUNT_IDS` o lagbe.
 
-### Baki shob env (models, base URL, vision) - `.env.example` er shob
+### Baki shob env (models, base URL) - `.env.example` er shob
 
 Shudhu key dile hobe na. Repo te `.env` file thake na (`.gitignore` e), tai Render e
 `.env.example` er baki variable gulo-o **env variable hishebe** dite hobe.

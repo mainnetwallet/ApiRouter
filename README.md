@@ -326,8 +326,8 @@ The remembered target is scoped per session and protocol, and lasts
 X-Multi-AI-Session-ID
 ```
 
-The response also returns the session ID so clients can reuse it. A Text success
-never becomes a Vision preference.
+The response also returns the session ID so clients can reuse it. Requests
+without a session header share one default session per protocol.
 
 ### Capabilities
 
