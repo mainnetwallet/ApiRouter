@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "6af926a8-83f5-4af2-bcce-fa5e1b0e6722",
-  "updatedAt": "2026-10-23T19:15:40.280Z",
+  "revision": "86c87842-dbb9-443b-b2db-a5ba80f072f9",
+  "updatedAt": "2026-10-23T19:16:23.909Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -509,6 +509,26 @@
       "version": 1,
       "createdAt": 1792782940280,
       "updatedAt": 1792782940280
+    },
+    {
+      "id": "mc_e55655e35b6ce762",
+      "provider": "opencode",
+      "model": "space-bunny-free",
+      "displayName": "space-bunny-free",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792782983909,
+      "updatedAt": 1792782983909
     }
   ]
 }
