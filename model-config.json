@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "2f26ea43-7da5-4078-9f81-fed4ad901df8",
-  "updatedAt": "2026-10-23T18:55:20.765Z",
+  "revision": "f76f0e04-744b-44f6-b05f-9893265e6df3",
+  "updatedAt": "2026-10-23T18:55:33.897Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -159,6 +159,26 @@
       "version": 1,
       "createdAt": 1792781720764,
       "updatedAt": 1792781720764
+    },
+    {
+      "id": "mc_b394484ab6699382",
+      "provider": "cloudflare",
+      "model": "@cf/google/gemma-4-26b-a4b-it",
+      "displayName": "@cf/google/gemma-4-26b-a4b-it",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792781733897,
+      "updatedAt": 1792781733897
     }
   ]
 }
