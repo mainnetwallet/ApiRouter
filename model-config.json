@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "163ca668-6d9a-4e15-aece-c4c81b0c9296",
-  "updatedAt": "2026-10-23T11:01:01.207Z",
+  "revision": "d4841c4f-9fcc-47c7-b9e0-f9eb6de26a94",
+  "updatedAt": "2026-10-23T11:02:21.112Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -11,15 +11,13 @@
       "enabled": true,
       "capabilities": [
         "text_input",
-        "text_output",
-        "tool_calling",
-        "structured_output"
+        "text_output"
       ],
       "protocol": null,
       "metadata": {},
       "version": 1,
       "createdAt": 1792753261206,
-      "updatedAt": 1792753261206
+      "updatedAt": 1792753341112
     }
   ]
 }
