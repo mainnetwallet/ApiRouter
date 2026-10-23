@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "19baa494-3812-4a83-a905-6ad708607c07",
-  "updatedAt": "2026-10-23T19:11:52.584Z",
+  "revision": "98494fb4-8a02-4e5f-9871-637dd1ee6139",
+  "updatedAt": "2026-10-23T19:12:08.592Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -390,6 +390,27 @@
       "version": 1,
       "createdAt": 1792782712584,
       "updatedAt": 1792782712584
+    },
+    {
+      "id": "mc_8d84991c5390d20b",
+      "provider": "groq",
+      "model": "qwen/qwen3.8-27b",
+      "displayName": "qwen/qwen3.8-27b",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792782728592,
+      "updatedAt": 1792782728592
     }
   ]
 }
