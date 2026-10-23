@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "ec428811-d2d2-4c10-8058-b8787ae8422e",
-  "updatedAt": "2026-10-23T19:13:43.158Z",
+  "revision": "b67910f4-7e9f-475f-ace2-4b269578e6af",
+  "updatedAt": "2026-10-23T19:14:00.827Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -450,6 +450,25 @@
       "version": 1,
       "createdAt": 1792782823158,
       "updatedAt": 1792782823158
+    },
+    {
+      "id": "mc_30c253cee21c4efb",
+      "provider": "llm7",
+      "model": "minimax-m2.7",
+      "displayName": "minimax-m2.7",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792782840827,
+      "updatedAt": 1792782840827
     }
   ]
 }
