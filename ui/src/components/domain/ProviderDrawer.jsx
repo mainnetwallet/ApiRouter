@@ -2,7 +2,6 @@ import { Drawer } from "../ui/Overlays.jsx";
 import { StatusBadge } from "../ui/StatusBadge.jsx";
 import { HealthBadge } from "../ui/HealthBadge.jsx";
 import { LatencyBadge } from "../ui/LatencyBadge.jsx";
-import { CapabilityBadges } from "./CapabilityBadges.jsx";
 import {
   formatPercent, formatRelativeTime, protocolLabel, providerLabel, EMPTY
 } from "../../lib/format.js";
@@ -15,7 +14,6 @@ import {
  * code path that reads key material into the browser.
  */
 export function ProviderDrawer({ open, onClose, id, record }) {
-  const capabilities = record?.capabilities ?? null;
   const protocols = record?.protocols ?? [];
 
   return (
@@ -36,15 +34,6 @@ export function ProviderDrawer({ open, onClose, id, record }) {
               <StatusBadge key={protocol} tone="neutral" dot={false}>{protocolLabel(protocol)}</StatusBadge>
             ))}
           </div>
-
-          <section>
-            <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>Capabilities</div>
-            <CapabilityBadges capabilities={capabilities} />
-            <p className="tiny dim" style={{ marginTop: "var(--sp-2)" }}>
-              Capabilities are derived from what is configured for the provider, never assumed from
-              its name.
-            </p>
-          </section>
 
           <ProviderSection record={record} />
 

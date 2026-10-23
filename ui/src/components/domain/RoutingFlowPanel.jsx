@@ -1,7 +1,3 @@
-import { Fragment } from "react";
-import { Icon } from "../ui/Icon.jsx";
-import { providerLabel, EMPTY } from "../../lib/format.js";
-
 /**
  * Routing Flow (spec §8).
  *
@@ -11,12 +7,18 @@ import { providerLabel, EMPTY } from "../../lib/format.js";
  * Nothing here implies one modality can fall back into another: a target is
  * either eligible for the request's capabilities or it is not.
  *
- * The first-choice target comes from `health.ranked`, which already carries
- * each target's capabilities, so no extra fetch is needed.
+ * `ranked` comes from `GET /api/health`: the current ordered set of routable
+ * targets (health and manual selection applied). It is a general ordering, not
+ * a request-specific eligibility result — each request is further constrained
+ * by protocol, required capabilities, adapter execution support, enabled
+ * switches, key availability and cooldowns.
  */
+import { Icon } from "../ui/Icon.jsx";
+import { providerLabel, EMPTY } from "../../lib/format.js";
+
 export function RoutingFlowPanel({ ranked = [] }) {
   const top = ranked[0] ?? null;
-  const eligibleCount = ranked.filter((r) => r?.eligible !== false).length;
+  const orderedCount = ranked.length;
 
   return (
     <div className="panel">
@@ -57,13 +59,19 @@ export function RoutingFlowPanel({ ranked = [] }) {
             <div className="flow__content">
               <div className="flow__label">Route to Eligible Targets</div>
               <div className="flow__eligible">
-                <span className="flow__cap flow__cap--req">eligible</span>
-                <span className="tiny dim mono">{eligibleCount} target{eligibleCount === 1 ? "" : "s"}</span>
+                <span className="flow__cap flow__cap--req">ordered</span>
+                <span className="tiny dim mono">{orderedCount} target{orderedCount === 1 ? "" : "s"}</span>
                 <span className="flow__route truncate" title={top ? `${top.provider} / ${top.model}` : undefined}>
                   {top
                     ? `${providerLabel(top.provider)} / ${top.model ?? EMPTY}`
-                    : `no eligible target`}
+                    : `no ordered target`}
                 </span>
+              </div>
+              <div className="flow__detail" style={{ marginTop: "var(--sp-2)" }}>
+                The first target in the current fallback order is not
+                automatically eligible for every request: protocol, required
+                capabilities, adapter execution support, key availability and
+                cooldowns all still apply.
               </div>
             </div>
           </li>
@@ -83,8 +91,9 @@ export function RoutingFlowPanel({ ranked = [] }) {
             <div className="flow__content">
               <div className="flow__label">Automatic Health-Based Fallback</div>
               <div className="flow__detail">
-                Used when no chain is configured: healthy models with lower
-                measured latency first, unmeasured models in a stable order.
+                Used when no chain is configured, and as fallback after a saved
+                selection is exhausted: healthy models with lower measured
+                latency first, unmeasured models in a stable order.
               </div>
             </div>
           </li>

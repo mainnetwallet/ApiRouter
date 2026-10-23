@@ -301,7 +301,7 @@ export default function Configuration() {
 
               {data.environment.legacy?.length ? (
                 <>
-                  <div className="section__title">Legacy routing variables (no longer read)</div>
+                  <div className="section__title">Legacy variables and migration status</div>
                   <div className="table-wrap" style={{ marginBottom: "var(--sp-4)" }}>
                     <table className="table table--compact">
                       <caption className="sr-only">Legacy environment variables</caption>
