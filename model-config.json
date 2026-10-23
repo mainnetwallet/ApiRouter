@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "6d2c70bb-3f00-4c92-b8f7-77917a6ef5af",
-  "updatedAt": "2026-10-23T19:20:06.807Z",
+  "revision": "8c9aed5f-0ddd-4e28-8b83-c587f9be05ab",
+  "updatedAt": "2026-10-23T19:20:16.166Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -626,6 +626,25 @@
       "version": 1,
       "createdAt": 1792783206807,
       "updatedAt": 1792783206807
+    },
+    {
+      "id": "mc_1491380ad3331a55",
+      "provider": "vercel",
+      "model": "poolside/laguna-s-2.1-free",
+      "displayName": "poolside/laguna-s-2.1-free",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792783216166,
+      "updatedAt": 1792783216166
     }
   ]
 }
