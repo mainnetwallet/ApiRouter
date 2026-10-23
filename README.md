@@ -1,6 +1,21 @@
+<div align="center">
+
+<img src="assets/banner.svg" alt="ApiRouter" width="100%">
+
 # ApiRouter
 
-Multi-provider AI gateway with a UI-controlled fallback chain, health-aware routing, key rotation and a built-in control panel.
+**Multi-provider AI gateway: one endpoint, UI-controlled fallback chain, key rotation and health-aware routing.**
+
+![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
+![providers](https://img.shields.io/badge/providers-16-orange)
+![protocols](https://img.shields.io/badge/protocols-5-blue)
+![deploy](https://img.shields.io/badge/deploy-Render-46E3B7?logo=render&logoColor=white)
+
+[Features](#features) • [Quick Start](#quick-start) • [Routing](#routing) • [Persistence](#persistence-survive-redeploys) • [API](#api) • [Security](#security)
+
+</div>
+
+---
 
 ## Features
 
@@ -103,6 +118,7 @@ npm run ui:dev      # UI only
 ## Structure
 
 ```text
+assets/   Banner
 bin/      Router launchers
 docs/     Client guides
 scripts/  Dev, prod, launcher scripts
@@ -112,4 +128,4 @@ ui/       React + Vite control panel
 
 ## License
 
-See the repository license.
+No license file is included yet.

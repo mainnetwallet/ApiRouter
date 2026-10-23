@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400">
+  <defs>
+    <radialGradient id="glow" cx="22%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#ff6a2b" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="line" gradientUnits="userSpaceOnUse" x1="100" y1="0" x2="260" y2="0">
+      <stop offset="0" stop-color="#ff6a2b"/>
+      <stop offset="1" stop-color="#ff2d55"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="400" fill="#07070a"/>
+  <rect width="1200" height="400" fill="url(#glow)"/>
+  <!-- router glyph -->
+  <g transform="translate(110,200)" stroke="url(#line)" stroke-width="6" stroke-linecap="round" fill="none">
+    <path d="M0 0 L70 0"/>
+    <path d="M70 0 L130 -85"/>
+    <path d="M70 0 L130 0"/>
+    <path d="M70 0 L130 85"/>
+  </g>
+  <g fill="#07070a" stroke="url(#line)" stroke-width="6">
+    <circle cx="110" cy="200" r="14"/>
+    <circle cx="240" cy="115" r="14"/>
+    <circle cx="240" cy="200" r="14"/>
+    <circle cx="240" cy="285" r="14"/>
+  </g>
+  <circle cx="180" cy="200" r="9" fill="#ff6a2b"/>
+  <!-- title -->
+  <text x="320" y="205" font-family="Helvetica, Arial, sans-serif" font-size="92" font-weight="700" fill="#ffffff">Api<tspan fill="#ff5a2b">Router</tspan></text>
+  <text x="324" y="255" font-family="Consolas, Menlo, monospace" font-size="22" fill="#a1a1aa">Multi-provider AI gateway with smart fallback</text>
+  <line x1="324" y1="285" x2="620" y2="285" stroke="url(#line)" stroke-width="3"/>
+  <!-- divider + stat -->
+  <line x1="920" y1="120" x2="920" y2="290" stroke="#ff2d55" stroke-opacity="0.6" stroke-width="2"/>
+  <text x="960" y="215" font-family="Helvetica, Arial, sans-serif" font-size="96" font-weight="700" fill="#ffffff">16</text>
+  <text x="962" y="250" font-family="Consolas, Menlo, monospace" font-size="24" fill="#ff5a2b">providers</text>
+  <text x="962" y="290" font-family="Consolas, Menlo, monospace" font-size="18" fill="#a1a1aa">5 client protocols</text>
+</svg>
