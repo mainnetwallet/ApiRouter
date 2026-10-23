@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "revision": "96b4db3e-8cdf-438d-8888-a2e200846304",
+  "updatedAt": "2026-10-23T18:12:04.212Z",
+  "models": [
+    {
+      "id": "mc_8f0a2ef8f5b577ce",
+      "provider": "cerebras",
+      "model": "gpt-oss-120b",
+      "displayName": "gpt-oss-120b",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "image_output",
+        "video_input",
+        "video_output",
+        "audio_input",
+        "audio_output",
+        "file_input",
+        "structured_output",
+        "streaming",
+        "reasoning",
+        "embeddings",
+        "web_search",
+        "code_execution",
+        "audio_transcription",
+        "audio_translation",
+        "realtime_audio",
+        "url_context",
+        "file_search",
+        "web_fetch",
+        "computer_use",
+        "reranking",
+        "moderation"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792779124211,
+      "updatedAt": 1792779124211
+    }
+  ]
+}
