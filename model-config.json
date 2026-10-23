@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "98494fb4-8a02-4e5f-9871-637dd1ee6139",
-  "updatedAt": "2026-10-23T19:12:08.592Z",
+  "revision": "67af83b9-6cb3-499f-b36a-0f7db6fe9023",
+  "updatedAt": "2026-10-23T19:13:26.525Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -411,6 +411,26 @@
       "version": 1,
       "createdAt": 1792782728592,
       "updatedAt": 1792782728592
+    },
+    {
+      "id": "mc_42fdbd077099f896",
+      "provider": "llm7",
+      "model": "DeepSeek-V4-Flash-0731",
+      "displayName": "DeepSeek-V4-Flash-0731",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792782806525,
+      "updatedAt": 1792782806525
     }
   ]
 }
