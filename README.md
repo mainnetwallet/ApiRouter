@@ -11,19 +11,36 @@
 ![protocols](https://img.shields.io/badge/protocols-5-blue)
 ![deploy](https://img.shields.io/badge/deploy-Render-46E3B7?logo=render&logoColor=white)
 
-[Features](#features) • [Quick Start](#quick-start) • [Routing](#routing) • [Persistence](#persistence-survive-redeploys) • [API](#api) • [Security](#security)
+[Client Setup](#-client-setup) • [Features](#-features) • [Quick Start](#quick-start) • [Routing](#routing) • [Persistence](#persistence-survive-redeploys) • [API](#api) • [Security](#security)
 
 </div>
 
 ---
 
-## Features
+## 🔌 Client Setup
 
-- Fallback chain edited in the control panel and followed exactly; every eligible key of a model is tried before the next model.
-- Automatic health/latency ordering when no chain is set; last successful provider/model/key is tried first (20 min TTL).
-- Model Configurator: declare capabilities per model; requests only reach models that declare what they need.
-- Protocols: Claude Messages, OpenAI Responses, OpenAI Chat Completions, Gemini, generic OpenAI-compatible.
-- Control panel: health, models, requests, Live Logs, analytics, playground, custom endpoints.
+Point your client at the gateway (`http://localhost:8788`) using its guide:
+
+| Client | Setup Guide |
+|---|---|
+| Claude Code | [docs/clients/CLAUDE_CODE.md](docs/clients/CLAUDE_CODE.md) |
+| Codex | [docs/clients/CODEX.md](docs/clients/CODEX.md) |
+| Qwen Code | [docs/clients/QWEN_CODE.md](docs/clients/QWEN_CODE.md) |
+| OpenCode | [docs/clients/OPENCODE.md](docs/clients/OPENCODE.md) |
+| Generic OpenAI-compatible | [docs/clients/GENERIC_OPENAI.md](docs/clients/GENERIC_OPENAI.md) |
+| Other clients | [docs/clients/OTHER_CLIENTS.md](docs/clients/OTHER_CLIENTS.md) |
+| Protocol reference | [docs/clients/CLIENTS.md](docs/clients/CLIENTS.md) |
+
+## ✨ Features
+
+| | Feature | Description |
+|---|---|---|
+| 🔀 | **Fallback chain** | Ordered list set in the control panel and followed exactly; every eligible key of a model is tried before the next model |
+| ❤️ | **Health-aware routing** | Automatic health/latency ordering when no chain is set; last working provider/model/key is tried first (20 min) |
+| 🧩 | **Model Configurator** | Declare capabilities per model; requests only reach models that support what they need |
+| 🔑 | **Key rotation & cooldowns** | Per-key failure handling, so one bad key never disables the rest |
+| 🌐 | **Multi-protocol** | Claude Messages, OpenAI Responses, OpenAI Chat, Gemini, generic OpenAI-compatible |
+| 📊 | **Control panel** | Health, models, requests, Live Logs, analytics, playground, custom endpoints |
 
 ## Quick Start
 
@@ -49,10 +66,6 @@ Gateway: `http://localhost:8788`
 .\scripts\install-router.ps1   # Windows (once), then run: Router
 Router --prod             # production mode
 ```
-
-## Client Guides
-
-[Claude Code](docs/clients/CLAUDE_CODE.md) · [Codex](docs/clients/CODEX.md) · [Qwen Code](docs/clients/QWEN_CODE.md) · [OpenCode](docs/clients/OPENCODE.md) · [Generic OpenAI](docs/clients/GENERIC_OPENAI.md) · [Other](docs/clients/OTHER_CLIENTS.md) · [Protocols](docs/clients/CLIENTS.md)
 
 ## Routing
 
