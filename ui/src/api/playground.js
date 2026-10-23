@@ -104,8 +104,8 @@ export function parseMaxTokens(value) {
  * cancelled or came back empty is left out, so the history always alternates
  * user / assistant and starts with a user turn (Anthropic and Gemini both
  * require that). Earlier images are not re-sent — they would be uploaded again
- * on every message and would force every later request into the vision pool —
- * so a turn that had images carries a short "[image attached]" note instead.
+ * on every message and would force every later request to carry the image_input
+ * requirement — so a turn that had images carries a short "[image attached]" note instead.
  * There is deliberately no length cap: the whole conversation is sent.
  */
 export function buildHistory(messages = []) {

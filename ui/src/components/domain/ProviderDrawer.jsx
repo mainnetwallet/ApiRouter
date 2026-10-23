@@ -62,11 +62,11 @@ export function ProviderDrawer({ open, onClose, id, record }) {
 
 /** The provider's configuration, health and targets. */
 function ProviderSection({ record }) {
-  const models = record.textModels ?? [];
+  const models = record.models ?? [];
   const targets = Array.isArray(record.targets) ? record.targets : [];
 
   return (
-    <section className="provider-pool">
+    <section className="provider-detail">
       <div className="section__header">
         <span className="section__title" style={{ textTransform: "none" }}>Provider</span>
         <span className="section__actions tiny dim mono">

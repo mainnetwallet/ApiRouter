@@ -1,21 +1,21 @@
 /**
- * ✓/✗ badges for the two capability flags.
+ * Capability chips for declared model capabilities.
  *
- * Each badge carries both a mark and the word, so capability is never
- * color-only.
+ * Renders each declared capability ID as a chip. Capabilities are explicit
+ * names (text_input, image_input, tool_calling, …) — never boolean "text"/"vision"
+ * pool membership.
  */
-export function CapabilityBadges({ capabilities }) {
-  const text = capabilities?.text === true;
-  const vision = capabilities?.vision === true;
+export function CapabilityBadges({ capabilities = [] }) {
+  const ids = Array.isArray(capabilities) ? capabilities : [];
 
   return (
     <div className="row row--wrap" style={{ gap: "var(--sp-1)" }}>
-      <span className={`cap-badge cap-badge--text${text ? " is-on" : " is-off"}`}>
-        <span aria-hidden="true">{text ? "✓" : "✗"}</span> {text ? "Text" : "No text"}
-      </span>
-      <span className={`cap-badge cap-badge--vision${vision ? " is-on" : " is-off"}`}>
-        <span aria-hidden="true">{vision ? "✓" : "✗"}</span> {vision ? "Vision" : "No vision"}
-      </span>
+      {ids.map((id) => (
+        <span key={id} className="cap-badge cap-badge--declared" title={id}>
+          {id}
+        </span>
+      ))}
+      {ids.length === 0 && <span className="cap-badge cap-badge--empty">none declared</span>}
     </div>
   );
 }

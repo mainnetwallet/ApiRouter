@@ -41,18 +41,13 @@ export default function Configuration() {
       )
     },
     {
-      key: "capabilities",
-      header: "Capabilities",
-      get: (row) => `${row.capabilities?.text ? "T" : ""}${row.capabilities?.vision ? "V" : ""}`,
+      key: "custom",
+      header: "Type",
+      get: (row) => row.custom ? "custom" : "env",
       render: (row) => (
-        <div className="row row--wrap" style={{ gap: "var(--sp-1)" }}>
-          <StatusBadge tone={row.capabilities?.text ? "ok" : "neutral"} dot={false}>
-            <span aria-hidden="true">{row.capabilities?.text ? "✓" : "✗"}</span> Text
-          </StatusBadge>
-          <StatusBadge tone={row.capabilities?.vision ? "info" : "neutral"} dot={false}>
-            <span aria-hidden="true">{row.capabilities?.vision ? "✓" : "✗"}</span> Vision
-          </StatusBadge>
-        </div>
+        <StatusBadge tone={row.custom ? "neutral" : "ok"} dot={false}>
+          {row.custom ? "Custom endpoint" : "Environment"}
+        </StatusBadge>
       )
     },
     {
