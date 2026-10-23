@@ -13,9 +13,9 @@ export function getFallback({ signal } = {}) {
   return apiRequest("/api/fallback", { signal });
 }
 
-/** Replaces one pool's ordered selection. Sends ids, key indexes and flags only. */
-export function saveChain(pool, entries) {
-  return apiRequest("/api/fallback", { method: "PUT", body: { pool, entries } });
+/** Replaces the ordered selection. Sends ids, key indexes and flags only. */
+export function saveChain(entries) {
+  return apiRequest("/api/fallback", { method: "PUT", body: { entries } });
 }
 
 /**

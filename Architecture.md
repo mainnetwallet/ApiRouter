@@ -33,8 +33,8 @@ AI Provider
 3. The request protocol is detected from the endpoint.
 4. Configured provider/model/key combinations are expanded into independent targets.
 5. Targets incompatible with the client protocol are excluded.
-6. The request's pool (TEXT or VISION) is decided; only that pool's targets are used, never the other.
-7. A route plan is built (see "The Fallback Chain"): the remembered target, then the operator's Manual Model Selection for that pool when there is one, or the automatic health-and-latency order when nothing is selected.
+6. The request's required capabilities are detected from its content; only targets that declare and can execute them are eligible.
+7. A route plan is built (see "The Fallback Chain"): the remembered target, then the operator's Manual Model Selection when there is one, or the automatic health-and-latency order when nothing is selected.
 8. Targets cooling down in the health registry, and targets already attempted in this request, are skipped. A failure cools down only the key + model that was tried: 401/402/403 and 400/404/413/422 never cool the key's sibling models (each is attempted on its own), and a 429 cools that key + model for the upstream `Retry-After` (60s when absent), not the 12 minute default. A 429 whose wording says it is a *daily* or *monthly* quota (OpenRouter `free-models-per-day`, Cloudflare's daily neuron allocation, Cohere's 1000 calls / month) is not a rate limit and gets a window-sized cooldown instead (`quotaCooldown` in `router.js`): until the reset time the upstream reported, else the next 00:00 UTC for daily, 6 hours for monthly, never more than 24 hours. Such a target is not retried within the same request.
 9. The router calls targets sequentially.
 10. Every failure puts the exact target (key + model) into cooldown and moves routing forward to the next key or model — whatever the status. Only a client disconnect ends the request early.
@@ -45,11 +45,10 @@ AI Provider
 
 Implemented in `src/fallback-chain.js` (the persisted configuration),
 `src/fallback-plan.js` (the planner) and `withFallback` in `src/router.js` (the
-walker). One code path serves both pools; only the target list and the chain
-differ.
+walker). One code path serves all routing.
 
 ```text
-REQUEST -> TEXT pool | VISION pool (never mixed)
+REQUEST -> ROUTING (capability-based)
   REMEMBERED  the session's last successful target, while its 20-minute TTL is
               valid; it leads the selection only when it is one of the selected
               models
@@ -92,14 +91,14 @@ flag:
   advances to the next entry.
 - A disabled entry keeps its position and is simply not routed to, and it is
   never used as a fallback either. Disabling every entry leaves the selection
-  with nothing walkable, so the pool fails closed rather than substituting
+  with nothing walkable, so the selection fails closed rather than substituting
   models the operator parked.
 
 The file holds ids, key indexes and flags — never credentials.
 
 ### Derived modes
 
-There is no mode switch to set. The mode is derived from the pool's saved
+There is no mode switch to set. The mode is derived from the saved
 Manual Model Selection:
 
 | Selection | Mode | Order |
@@ -108,11 +107,10 @@ Manual Model Selection:
 | non-empty | `manual` | the saved selection, then health and latency |
 
 A successful target is always remembered: it is stored on the session
-(`RouteSession`), keyed by protocol + pool + session id, so a text success can
-never become a vision preference. In `manual` it leads the next request only
-when it is one of the selected models; in `auto` it leads outright. An older
-client or persisted file that still says `fixed` or `last-success` is accepted
-and read as the derived mode, so no configuration is broken by the removal.
+(`RouteSession`), keyed by protocol + session id. In `manual` it leads the next
+request only when it is one of the selected models; in `auto` it leads outright.
+An older client or persisted file that still says `fixed` or `last-success` is
+accepted and read as the derived mode, so no configuration is broken by the removal.
 
 Reset Fallback clears those session records and the automatic-order cache. It
 touches nothing else: not the selection, the providers, the keys, the
@@ -197,9 +195,9 @@ Providers normally come from the environment (`PROVIDER_IDS` in `src/config.js`)
 id (custom-<name>) + name + baseUrl + protocol + models[] + apiKeys[]
 ```
 
-`applyCustomEndpoints` (`src/custom-endpoints.js`) merges each record into `config.providers` as a normal text provider (`custom: true`, one protocol) and, when the record has `visionModels`, into `config.visionProviders` as well (its own `visionBaseUrl` / `visionApiKeys`, else the text ones), so `buildTargets` produces a text target set and a vision target set; the server hot-reloads both pools, so `buildTargets` produces the usual `provider + model + keyIndex` targets and everything downstream (Fallback Chain, health probes, cooldowns, sticky routing, the model switch) treats it like any other provider.
+`applyCustomEndpoints` (`src/custom-endpoints.js`) merges each record into `config.providers` as a normal text provider (`custom: true`, one protocol). Its models are tried with its keys, in the order set in the Fallback Chain; image-capable models serve image requests through capability-based routing. The server hot-reloads targets so `buildTargets` produces the usual `provider + model + keyIndex` targets and everything downstream (Fallback Chain, health probes, cooldowns, sticky routing, the model switch) treats it like any other provider.
 
-Changes apply without a restart. `server.js` listens to the store, removes the old `custom-*` targets from the live `textTargets` / `targets` arrays in place, adds the new ones, rebuilds the model capability index, re-registers secrets for redaction, resets the automatic-order cache and probes the new targets at once. The health monitor, the router and the API all read those same arrays and the same `config` object, which is why in-place mutation is enough.
+Changes apply without a restart. `server.js` listens to the store, removes the old `custom-*` targets from the live targets array in place, adds the new ones, rebuilds the model capability index, re-registers secrets for redaction, resets the automatic-order cache and probes the new targets at once. The health monitor, the router and the API all read those same arrays and the same `config` object, which is why in-place mutation is enough.
 
 `/api/custom-endpoints` accepts keys but never returns them: the panel only gets a key count. The base URL passes the same checks as the Playground (http(s) only, no credentials, query or fragment, no private or reserved address, hostnames resolved at save time).
 
@@ -396,9 +394,9 @@ next request. When it fails or is cooling down, the walk continues from the chai
 in its saved order; the remembered target is never retried twice in one request,
 and the chain itself is never modified by a success.
 
-The record is scoped by protocol, pool and session id: text and vision keep
-separate remembered targets, and so does each client protocol. Requests without
-the header share one default session per protocol and pool.
+The record is scoped by protocol and session id: each client protocol keeps its
+own remembered targets. Requests without the header share one default session per
+protocol.
 
 When nothing is selected the plan is built purely from health and latency, and
 the remembered target leads the walk outright.

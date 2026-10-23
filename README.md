@@ -7,13 +7,12 @@ ApiRouter gives OpenAI-compatible and native AI clients one local endpoint while
 ## Features
 
 - **Multi-provider routing** — route requests across configured AI providers and models.
-- **UI-controlled fallback chain** — one ordered list per pool, edited in the control panel, followed exactly.
+- **UI-controlled fallback chain** — one ordered list, edited in the control panel, followed exactly.
 - **Multi-key fallback** — every eligible API key of a model is tried before the next model.
 - **Health-aware fallback** — cooling targets are skipped and reported, never hidden.
 - **Automatic ordering** — with nothing selected, models are ordered by measured health and latency.
 - **Remembered successes** — the provider, model and exact key that last answered are tried first on the next request (20-minute TTL), with no mode to set.
 - **Key-aware routing** — keys are handled independently within each provider/model target.
-- **Text + vision separation** — vision requests stay in the vision pool; they do not silently fall back to text-only targets.
 - **Unified Model Configurator** — declare text, vision, tool, media and structured-output capabilities per model in one place, and switch a model off from the same page; a request only reaches a model that declares what it needs.
 - **Multiple client protocols** — Claude Messages, OpenAI Responses, OpenAI Chat Completions, Gemini, and generic OpenAI-compatible clients.
 - **Control Panel** — inspect providers, models, health, routing, requests, live logs, analytics, configuration, and system state.
@@ -148,13 +147,12 @@ Use `Router --prod` for production mode.
 
 ## Routing
 
-Routing is decided by the **Fallback Chain** — one ordered list per pool (Text and
-Vision), configured in the control panel under **Configure → Fallback Chain**.
+Routing is decided by the **Fallback Chain** — one ordered list, configured in the control panel under **Configure → Fallback Chain**.
 It is the single source of truth: there is no separate priority list and no
 separate normal-fallback path, and nothing re-sorts a chain you have configured.
 
 ```text
-Configured chain, for the request's own pool:
+Configured chain:
 
   Gemini — Model 2
     key 1 -> fail
@@ -176,12 +174,11 @@ With an empty chain the router builds the order itself, from measured health and
 latency: healthy models with lower measured latency first, models with no
 measurement at all after those, in a stable configured order. Latency comes from
 real request timings first and health-probe timings second — never from a value
-the router does not have. The panel shows this as **Automatic Health-Based
-Fallback**. Text and Vision are ordered separately, from their own measurements.
+the router does not have. The panel shows this as **Automatic Health-Based Fallback**.
 
-### How a pool is routed
+### How routing works
 
-There is no mode switch. The routing mode is derived from the pool's saved
+There is no mode switch. The routing mode is derived from the saved
 **Manual Model Selection**, and a successful provider, model and key is always
 remembered either way:
 
@@ -225,8 +222,8 @@ State is stored in `DISABLED_MODELS_FILE` (default `data/disabled-models.json`).
 ### Model Configurator (capabilities and eligibility)
 
 The **Model Configurator** (Configure -> Model Configurator, `/model-config`) is one
-unified page for every model the gateway knows, text and vision together. Each row
-shows the provider/model, its pools, its protocols, how many keys it has, whether it
+unified page for every model the gateway knows. Each row
+shows the provider/model, its protocols, how many keys it has, whether it
 is enabled, and one checkbox per capability. A model is declared once instead of
 being configured separately for text and vision.
 
@@ -240,8 +237,8 @@ code_execution
 ```
 
 - A model that comes only from `.env` (or a saved custom endpoint) is **inferred**:
-  its capabilities are guessed from its pool and protocols (for example a vision-pool
-  model gets `image_input`, and every current adapter gets `text_input`,
+  its capabilities are guessed from its protocols and environment (for example a model
+  gets `image_input`, and every current adapter gets `text_input`,
   `text_output`, `tool_calling` and `streaming`). The page marks these rows as
   environment-provided.
 - Saving the row makes it **configured**, and its checkboxes become authoritative for
@@ -282,7 +279,7 @@ request the gateway fails closed with a reason instead of substituting a model:
 
 | Situation | Response |
 |---|---|
-| Every model in the pool is switched off | `503`, `error.type: "models_disabled"` |
+| Every model is switched off | `503`, `error.type: "models_disabled"` |
 | Targets exist, but none can declare and execute the required capabilities | `503`, `error.type: "no_capable_route"`, with `required_capabilities` and the first `excluded_candidates` |
 | The client names a configured model that cannot serve this request | `400`, `error.type: "model_capability_mismatch"` |
 
@@ -322,7 +319,7 @@ a key, a base URL or any other credential.
 
 ### Sticky sessions
 
-The remembered target is scoped per session, protocol and pool, and lasts
+The remembered target is scoped per session and protocol, and lasts
 **20 minutes** after its last success. Sessions are identified with:
 
 ```text
@@ -332,12 +329,13 @@ X-Multi-AI-Session-ID
 The response also returns the session ID so clients can reuse it. A Text success
 never becomes a Vision preference.
 
-### Text and Vision
+### Capabilities
 
-Text and Vision share one algorithm and one set of rules, but never share
-targets. Each has its own chain, its own health, its own cooldowns, its own
-latency measurements and its own remembered target. A vision request can never
-reach a model that does not support vision, and the two pools never cross over.
+Routing is capability-based: a request's required capabilities (detected from its
+content, such as image parts) decide which models are eligible. A model that
+declares `image_input` and whose adapter can execute it can serve image requests;
+one that does not cannot. Every model shares one chain, one health registry,
+one set of cooldowns, one set of latency measurements and one remembered target.
 
 ### Failures and cooldowns
 
@@ -382,8 +380,8 @@ outright, and that wins over the status code.
 | GET | `/api/requests` | Request history |
 | GET | `/api/requests/stream` | Live request events |
 | GET | `/api/requests/:id` | Request lifecycle |
-| GET | `/api/fallback` | The saved selection per pool, the derived mode and the model catalogue with health and latency |
-| PUT | `/api/fallback` | Save one pool's Manual Model Selection |
+| GET | `/api/fallback` | The saved selection, the derived mode and the model catalogue with health and latency |
+| PUT | `/api/fallback` | Save the Manual Model Selection |
 | POST | `/api/fallback/reset` | Clear remembered model/key preferences (Reset Fallback) |
 | GET / POST | `/api/model-config` | Effective model declarations (capabilities, enabled, storage state) / create one declaration; never returns a credential |
 | PUT / PATCH / DELETE | `/api/model-config/:id` | Change or remove one declaration (`enabled` stays in step with the Models page Switch) |
@@ -480,7 +478,7 @@ A Playground test forgets everything. To keep a custom endpoint, add it on the *
 - The Playground never saves anything: use it to test an endpoint first, then add it on the Custom Endpoints page.
 - Changes take effect immediately, with no restart. Removing an endpoint removes it from routing at once.
 - Keys are stored in `data/custom-endpoints.json` (override with `CUSTOM_ENDPOINTS_FILE`), like the other `data/` state. They are sent to the gateway but never returned: the control panel only shows how many keys an endpoint has, and the keys are redacted from any error text.
-- **Text and vision.** An endpoint serves the text pool (`models`, `apiKeys`, `baseUrl`) and, optionally, the vision pool for image requests: add `visionModels`, plus an optional `visionBaseUrl` and `visionApiKeys`. Left empty, the vision models share the text base URL and keys. An endpoint may be vision-only (no text models). Image requests only ever use vision models, text requests only text models.
+- **Models and keys.** Any number of models (one per line) and any number of keys (one per line). Every model is tried with every key, in the order you set in the Fallback Chain. Image-capable models serve image requests through capability-based routing: declare `image_input` on the model in the Model Configurator.
 - The same address rules as the Playground apply: private, loopback and metadata addresses are refused (hostnames are resolved when you save) unless `PLAYGROUND_ALLOW_PRIVATE_HOSTS=1`. A local model with no key needs a placeholder key such as `none`.
 - **Surviving a redeploy.** By default the data file lives on the server's disk. On a host that wipes its disk on every redeploy or wake-up (a free Render web service) that would lose your saved endpoints, so they can be kept in a GitHub branch instead. Set `CUSTOM_ENDPOINTS_GITHUB_REPO` (`owner/name`), `CUSTOM_ENDPOINTS_GITHUB_TOKEN` (a fine-grained token with Contents: read and write on that repo) and `CUSTOM_ENDPOINTS_SECRET` (any passphrase of 12+ characters). Everything is encrypted with AES-256-GCM before it is uploaded, so the repository only ever holds ciphertext, but keep the secret safe: with a different secret the saved data cannot be read, and it is never overwritten. It is written to the branch `main` by default (`CUSTOM_ENDPOINTS_GITHUB_BRANCH`; saves commit straight to it with no PR, and on `main` each save redeploys the service, so set it to e.g. `apirouter-data` to avoid that), in `custom-endpoints.enc.json` (`CUSTOM_ENDPOINTS_GITHUB_PATH`). On startup GitHub is the source of truth; if it is unreachable, changes are refused (so a stale list can never overwrite the saved one) and the endpoints load as soon as it answers. Endpoints that already exist on the disk are uploaded the first time.
 

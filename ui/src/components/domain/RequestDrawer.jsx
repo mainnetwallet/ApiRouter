@@ -63,9 +63,6 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
               <dt className="dl__term">Protocol</dt>
               <dd className="dl__desc">{protocolLabel(entry.protocol)}</dd>
 
-              <dt className="dl__term">Routing pool</dt>
-              <dd className="dl__desc mono">{entry.pool ?? EMPTY}</dd>
-
               <dt className="dl__term">Requested model</dt>
               <dd className="dl__desc mono">{entry.requestedModel ?? <span className="dim">auto route</span>}</dd>
 

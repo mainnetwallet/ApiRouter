@@ -13,7 +13,7 @@ const step = (model, phase, extra = {}) => ({
 });
 
 const group = (model) => ({
-  id: `text/a/${model}`, provider: "a", model, pool: "text", keyIndexes: [0], keyStates: [{ keyIndex: 0, status: "healthy", available: true }],
+  id: `text/a/${model}`, provider: "a", model, keyIndexes: [0], keyStates: [{ keyIndex: 0, status: "healthy", available: true }],
   available: true, status: "healthy", latencyMs: 900, latencySource: "request", measuredLatencyMs: 900, probeLatencyMs: null
 });
 
@@ -21,8 +21,8 @@ const group = (model) => ({
 function render({ fallbackOrder, chain = [] }) {
   const configuration = {
     data: {
-      chain: { text: chain, vision: [] },
-      catalogue: { text: [...new Set(fallbackOrder.map((item) => item.model))].map(group), vision: [] },
+      chain: chain,
+      catalogue: [...new Set(fallbackOrder.map((item) => item.model))].map(group),
       remembered: null
     },
     error: null, loading: false, reload() {}

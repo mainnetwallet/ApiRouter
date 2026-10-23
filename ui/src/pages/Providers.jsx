@@ -12,7 +12,6 @@ import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { HealthDistribution } from "../components/charts/Charts.jsx";
-import { CapabilityBadges } from "../components/domain/CapabilityBadges.jsx";
 import { ProviderDrawer } from "../components/domain/ProviderDrawer.jsx";
 import { Link } from "../router.jsx";
 import { formatRelativeTime, providerLabel } from "../lib/format.js";
@@ -108,13 +107,6 @@ export default function Providers() {
           <div className="tiny dim mono">{row.envPrefix}_*</div>
         </div>
       )
-    },
-    {
-      key: "capabilities",
-      header: "Capabilities",
-      sortable: true,
-      get: (row) => `${row.capabilities?.text ? "T" : ""}${row.capabilities?.vision ? "V" : ""}`,
-      render: (row) => <CapabilityBadges capabilities={row.capabilities} />
     },
     {
       key: "status",

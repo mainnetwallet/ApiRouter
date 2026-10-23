@@ -219,7 +219,29 @@ export default function ModelConfigurator() {
       key: "capabilities",
       header: "Declared capabilities",
       get: (row) => row.capabilities.join(","),
-      render: (row) => <CapabilityChips row={row} />
+      render: (row) => (
+        <div className="row row--wrap" style={{ gap: "var(--sp-2)", alignItems: "center" }}>
+          <CapabilityChips row={row} />
+          {!row.capabilities.includes("streaming") || !row.capabilities.includes("tool_calling") ? (
+            <button
+              type="button"
+              className="btn btn--sm"
+              disabled={busy || !row.configId}
+              onClick={(event) => {
+                event.stopPropagation();
+                run(async () => {
+                  const next = [...new Set([...row.capabilities, "streaming", "tool_calling"])];
+                  await updateModelConfig(row.configId, { capabilities: next });
+                  await config.reload();
+                  toast.success("Declared streaming + tool calling");
+                });
+              }}
+            >
+              Declare streaming + tool calling
+            </button>
+          ) : null}
+        </div>
+      )
     },
     {
       key: "selection",

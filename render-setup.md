@@ -127,13 +127,7 @@ Ei group gulo thakte hobe:
 | Text key | `*_API_KEYS` (+ `CLOUDFLARE_ACCOUNT_IDS`) | Provider key |
 | Text model | `*_MODELS` | Prottek provider er model list |
 | Base URL | `*_BASE_URL` | Provider er API root |
-| Vision key | `*_VISION_API_KEYS` (+ `CLOUDFLARE_VISION_ACCOUNT_IDS`) | Image request er jonno key |
-| Vision model | `*_VISION_MODELS` | Image request er model list |
-| Vision base URL | `*_VISION_BASE_URL` | Vision provider er API root |
 | AgentRouter | `AGENTROUTER_ORIGINATOR` (`AGENTROUTER_VERSION`, `AGENTROUTER_USER_AGENT` optional) | AgentRouter client identity |
-
-Vision key sadharonoto text key er same hoy, tai text key paste korar somoy
-`*_VISION_API_KEYS` e-o same value dao.
 
 Model bodlate chaile shudhu oi provider er `*_MODELS` edit koro, jemon:
 
@@ -279,7 +273,6 @@ ekbar Down dekhate pare, deploy shesh hole nijei Up hoye jay.
 | Repo list e nai | GitHub → Settings → Applications → Render → repo access dao |
 | `401 Unauthorized` | `Authorization: Bearer <token>` (ba `x-api-key: <token>`) thik ache kina, `APIROUTER_API_KEYS` match kore kina |
 | Kono model chole na | Provider key `*_API_KEYS` ba `*_MODELS` / `*_BASE_URL` boshano hoy ni, ba key thik na. Control Panel er Health page dekho |
-| Vision (image) request fail | `*_VISION_API_KEYS`, `*_VISION_MODELS`, `*_VISION_BASE_URL` boshano ache kina dekho |
 | Service sleep kore | UptimeRobot add koro (step 7) |
 | Deploy fail kintu ager kaj korto | Logs e error dekho: Dashboard → service → **Logs** |
 | `Port scan timeout` | `PORT` env nijer hate dio na, Render er-ta e chalte dao |

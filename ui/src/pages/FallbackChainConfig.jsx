@@ -20,13 +20,12 @@ import {
 /**
  * Fallback Chain configuration — the single place routing order is decided.
  *
- * One selection per pool, in the operator's exact order. Every eligible key of a
- * model is tried before the next model; the last successful target leads the next
- * request. A pool with nothing selected uses the automatic health-based order
- * instead. Nothing on this page invents a route: the order shown is what the
- * gateway will walk.
+ * One selection, in the operator's exact order. Every eligible key of a model
+ * is tried before the next model; the last successful target leads the next
+ * request. Nothing selected means the router uses the automatic health-based
+ * order instead. Nothing on this page invents a route: the order shown is what
+ * the gateway will walk.
  */
-const POOLS = [{ id: "text", label: "Text", icon: "terminal" }, { id: "vision", label: "Vision", icon: "image" }];
 const PROTOCOLS = ["openai-chat", "anthropic", "openai-responses", "gemini"];
 
 function ModelName({ entry }) {
@@ -70,7 +69,6 @@ function KeyPicker({ entry, group, disabled, onChange }) {
 export default function FallbackChainConfig() {
   const { data, error, loading, reload } = useApi((opts) => getFallback(opts));
   const toast = useToast();
-  const [pool, setPool] = useState("text");
   const [draft, setDraft] = useState(null);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
@@ -78,10 +76,10 @@ export default function FallbackChainConfig() {
   const [dragOver, setDragOver] = useState(null);
   const [protocol, setProtocol] = useState("openai-chat");
 
-  const saved = data?.chain?.[pool] ?? [];
+  const saved = data?.chain ?? [];
   const chain = draft ?? saved;
   const dirty = draft !== null && !sameChain(chain, saved);
-  const catalogue = data?.catalogue?.[pool] ?? [];
+  const catalogue = data?.catalogue ?? [];
   const index = useMemo(() => indexCatalogue(catalogue), [catalogue]);
   const lastSeenAt = useMemo(() => {
     const stamps = catalogue.flatMap((group) => group.keyStates ?? [])
@@ -101,11 +99,11 @@ export default function FallbackChainConfig() {
   }, [visible]);
   const addable = visible.filter((group) => !chosen.has(entryId(group)));
 
-  const preview = useApi((opts) => getRoutingPreview({ protocol, pool }, opts), { deps: [protocol, pool, data] });
+  const preview = useApi((opts) => getRoutingPreview({ protocol }, opts), { deps: [protocol, data] });
   const order = preview.data?.fallbackOrder ?? [];
   const summary = chainSummary(chain, catalogue);
 
-  useEffect(() => { setQuery(""); setDraft(null); }, [pool]);
+  useEffect(() => { setQuery(""); setDraft(null); }, []);
 
   const run = async (action, success) => {
     setBusy(true);
@@ -126,7 +124,7 @@ export default function FallbackChainConfig() {
     <div className="page">
       <PageHeader
         title="Fallback Chain"
-        description="The router's order for Text and Vision. Every eligible key of a model is tried before the next model."
+        description="The router's order for every model. Every eligible key of a model is tried before the next model."
         actions={
           <>
             <button type="button" className="btn" disabled={busy || draft === null}
@@ -137,9 +135,9 @@ export default function FallbackChainConfig() {
               type="button"
               className="btn"
               disabled={busy || (saved.length === 0 && chain.length === 0)}
-              onClick={() => run(() => saveChain(pool, []), `${pool} chain cleared`)}
+              onClick={() => run(() => saveChain([]), "Chain cleared")}
             >
-              <Icon name="trash" className="btn__icon" size={12} /><span className="btn__label">Clear {pool}</span>
+              <Icon name="trash" className="btn__icon" size={12} /><span className="btn__label">Clear chain</span>
             </button>
             <button
               type="button"
@@ -151,7 +149,7 @@ export default function FallbackChainConfig() {
               <Icon name="refresh" className="btn__icon" size={12} /><span className="btn__label">Reset Fallback</span>
             </button>
             <button type="button" className="btn btn--primary" disabled={busy || !dirty}
-              onClick={() => run(() => saveChain(pool, chain), `${pool} chain saved`)}>
+              onClick={() => run(() => saveChain(chain), "Chain saved")}>
               <Icon name="check" className="btn__icon" size={12} /><span className="btn__label">Save</span>
             </button>
           </>
@@ -169,20 +167,9 @@ export default function FallbackChainConfig() {
             </span>
             {summary.failClosed ? (
               <span className="tiny dim">
-                Every entry is disabled or names a model this pool no longer has. Clear the selection to use the automatic order.
+                Every entry is disabled or names a model the router no longer has. Clear the selection to use the automatic order.
               </span>
             ) : null}
-          </div>
-
-          <div className="tabs" role="tablist" aria-label="Pool">
-            {POOLS.map((item) => (
-              <button key={item.id} type="button" role="tab" className="tab" aria-selected={pool === item.id} onClick={() => setPool(item.id)}>
-                <Icon name={item.icon} size={13} /> {item.label}
-                <span className={`badge ${(data.chain?.[item.id]?.length ?? 0) > 0 ? "badge--info" : "badge--neutral"} ms-count`}>
-                  {data.chain?.[item.id]?.length ?? 0}
-                </span>
-              </button>
-            ))}
           </div>
 
           {dirty ? (
@@ -207,7 +194,7 @@ export default function FallbackChainConfig() {
                 <div className="ms-list scroll-list">
                   {groups.length === 0 ? (
                     <EmptyState title="No models">
-                      {catalogue.length === 0 ? `No ${pool} models are configured.` : "Nothing matches this search."}
+                      {catalogue.length === 0 ? "No models are configured." : "Nothing matches this search."}
                     </EmptyState>
                   ) : groups.map(([provider, models]) => (
                     <div key={provider} className="ms-group">
@@ -238,7 +225,7 @@ export default function FallbackChainConfig() {
 
             <section className="panel" aria-label="Fallback chain">
               <div className="panel__header">
-                <span className="panel__title">{POOLS.find((item) => item.id === pool)?.label} chain</span>
+                <span className="panel__title">Chain</span>
                 <div className="panel__actions">
                   <span className="badge badge--neutral">{chain.length}</span>
                 </div>
@@ -246,8 +233,8 @@ export default function FallbackChainConfig() {
               <div className="panel__body">
                 {chain.length === 0 ? (
                   <EmptyState title="Nothing selected" icon="list">
-                    Add models from the left. While nothing is selected the router uses the
-                    automatic health-based order over every configured {pool} model.
+                    Add models from the left. While nothing is selected the router uses the automatic
+                    health-based order over every configured model.
                   </EmptyState>
                 ) : (
                   <ol className="ms-selected scroll-list">
@@ -341,7 +328,7 @@ export default function FallbackChainConfig() {
                 </ol>
               )}
               <p className="tiny dim fc-note">
-                This is the order the gateway will walk for a new {pool} request over {protocol}.
+                This is the order the gateway will walk for a new request over {protocol}.
               </p>
             </div>
           </section>
