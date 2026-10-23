@@ -26,7 +26,22 @@ const REMOTE_URL_IMAGE = [{ type: "image_url", image_url: { url: "https://exampl
 const imageRequest = (content) => postJson({ messages: [{ role: "user", content }] });
 const posts = (mock) => mock.requests.filter((r) => r.method === "POST");
 
-/** A Gemini-protocol provider plus an OpenAI-chat provider, both in the vision pool. */
+/**
+ * Image input is a DECLARED capability of one model, not membership of a vision
+ * pool. Declaring it makes a model a candidate; whether its ADAPTER can carry a
+ * particular image (a remote URL, say) is a second, separate check.
+ */
+const IMAGE_CAPABILITIES = ["text_input", "text_output", "image_input"];
+async function declareImageInput(router, provider, model) {
+  const response = await router.request("/api/model-config", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider, model, capabilities: IMAGE_CAPABILITIES })
+  });
+  assert.ok(response.status >= 200 && response.status < 300, `declaring ${provider}/${model}: ${response.status} ${await response.text()}`);
+}
+
+/** A Gemini-protocol provider plus an OpenAI-chat provider; both models declare image_input. */
 async function startBoth(t, { gemini = true, groq = true } = {}) {
   const geminiMock = await startMockUpstream(() => ({ status: 200, body: { candidates: [{ content: { role: "model", parts: [{ text: "gemini" }] }, finishReason: "STOP" }] } }));
   const groqMock = await startMockUpstream(() => ({ status: 200, body: completion }));
@@ -34,18 +49,20 @@ async function startBoth(t, { gemini = true, groq = true } = {}) {
 
   const env = {};
   if (gemini) {
-    env.GEMINI_VISION_API_KEYS = "g0";
-    env.GEMINI_VISION_MODELS = "gemini-model";
-    env.GEMINI_VISION_BASE_URL = `${geminiMock.baseUrl}/v1beta`;
+    env.GEMINI_API_KEYS = "g0";
+    env.GEMINI_MODELS = "gemini-model";
+    env.GEMINI_BASE_URL = `${geminiMock.baseUrl}/v1beta`;
   }
   if (groq) {
-    env.GROQ_VISION_API_KEYS = "q0";
-    env.GROQ_VISION_MODELS = "groq-model";
-    env.GROQ_VISION_BASE_URL = `${groqMock.baseUrl}/v1`;
+    env.GROQ_API_KEYS = "q0";
+    env.GROQ_MODELS = "groq-model";
+    env.GROQ_BASE_URL = `${groqMock.baseUrl}/v1`;
   }
 
   const router = await startRouter(env);
   t.after(() => router.close());
+  if (gemini) await declareImageInput(router, "gemini", "gemini-model");
+  if (groq) await declareImageInput(router, "groq", "groq-model");
   return { router, geminiMock, groqMock };
 }
 
@@ -101,18 +118,19 @@ test("a refused image does not cool the provider down for later text traffic", a
   const groqMock = await startMockUpstream(() => ({ status: 200, body: completion }));
   t.after(async () => { await geminiMock.close(); await groqMock.close(); });
 
+  // One provider, one key list, one model list each. The same Gemini model
+  // serves text and (by declaration) images, so it is a candidate for both.
   const router = await startRouter({
     GEMINI_API_KEYS: "g0",
     GEMINI_MODELS: "gemini-model",
     GEMINI_BASE_URL: `${geminiMock.baseUrl}/v1beta`,
-    GEMINI_VISION_API_KEYS: "g0",
-    GEMINI_VISION_MODELS: "gemini-model",
-    GEMINI_VISION_BASE_URL: `${geminiMock.baseUrl}/v1beta`,
-    GROQ_VISION_API_KEYS: "q0",
-    GROQ_VISION_MODELS: "groq-model",
-    GROQ_VISION_BASE_URL: `${groqMock.baseUrl}/v1`
+    GROQ_API_KEYS: "q0",
+    GROQ_MODELS: "groq-model",
+    GROQ_BASE_URL: `${groqMock.baseUrl}/v1`
   });
   t.after(() => router.close());
+  await declareImageInput(router, "gemini", "gemini-model");
+  await declareImageInput(router, "groq", "groq-model");
 
   // The refusal must not be charged to the provider as a failure.
   const refused = await router.request("/v1/chat/completions", imageRequest(REMOTE_URL_IMAGE));
@@ -125,4 +143,15 @@ test("a refused image does not cool the provider down for later text traffic", a
     assert.notEqual(row.status, "failed", "the Gemini target was marked failed by a request-level limitation");
     assert.equal(row.cooldownUntil, 0, "the Gemini target was cooled down by a request-level limitation");
   }
+
+  // ...and it really is still usable for text. Automatic routing would prefer
+  // groq (it just answered the image), so the request is PINNED to Gemini: the
+  // pin is strict, so a 200 here proves Gemini itself accepted the text request.
+  const geminiBefore = posts(geminiMock).length;
+  const text = await router.request("/v1/chat/completions", postJson(
+    { model: "gemini-model", messages: [{ role: "user", content: "hello" }] },
+    { "x-multi-ai-pin-provider": "gemini" }
+  ));
+  assert.equal(text.status, 200, await text.text());
+  assert.equal(posts(geminiMock).length, geminiBefore + 1, "Gemini still serves text after refusing an image it could not carry");
 });
