@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "86c87842-dbb9-443b-b2db-a5ba80f072f9",
-  "updatedAt": "2026-10-23T19:16:23.909Z",
+  "revision": "15b6e6e0-f019-4dac-b27a-6a46f40a9579",
+  "updatedAt": "2026-10-23T19:17:52.773Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -55,13 +55,14 @@
         "tool_calling",
         "image_input",
         "video_input",
+        "structured_output",
         "streaming"
       ],
       "protocol": null,
       "metadata": {},
       "version": 1,
       "createdAt": 1792780907578,
-      "updatedAt": 1792780907578
+      "updatedAt": 1792783072773
     },
     {
       "id": "mc_c93830178f57be0b",
