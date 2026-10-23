@@ -337,7 +337,23 @@ export class FallbackChainStore {
     // A stored `mode` from an older file is read but not adopted: the mode is
     // derived from the entries below, so the file cannot force a mode the
     // selection does not support.
-    this.entries = normalizeEntries(data?.entries);
+    if (Array.isArray(data?.entries)) {
+      this.entries = normalizeEntries(data.entries);
+      return;
+    }
+    // A file saved by the Text/Vision pool build holds `{ text: [...], vision: [...] }`
+    // and no `entries`. Reading only `entries` would load it as an empty chain and
+    // the next save would silently overwrite the operator's saved order, so the
+    // two lists are merged (text first, then vision, duplicates dropped) in
+    // memory. The file itself is left alone until the next deliberate save,
+    // which writes the unified format. Which model serves which request is
+    // decided by declared capabilities, not by the list a model used to be in.
+    const legacy = [
+      ...(Array.isArray(data?.text) ? data.text : []),
+      ...(Array.isArray(data?.vision) ? data.vision : [])
+    ];
+    this.entries = normalizeEntries(legacy);
+    if (legacy.length > 0) this.migrated = true;
   }
 
   get() {

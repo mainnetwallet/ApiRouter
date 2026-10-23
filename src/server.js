@@ -236,6 +236,19 @@ if (retiredVisionPrefixes.length > 0) {
     + "List those models under the provider's *_MODELS and declare image_input for them in the Model Configurator."
   );
 }
+// The Text/Vision split is gone: `<PROVIDER>_VISION_*` variables are no longer
+// read. Say so once at startup (provider names only, never a value) so an
+// operator who still has them knows those models are not being routed to. The
+// variables are left exactly as they are; they are never edited or removed.
+const retiredVisionPrefixes = legacyVisionPrefixes(process.env)
+  .filter((prefix) => ["API_KEYS", "MODELS", "BASE_URL", "ACCOUNT_IDS"]
+    .some((name) => String(process.env[`${prefix}_VISION_${name}`] ?? "").trim() !== ""));
+if (retiredVisionPrefixes.length > 0) {
+  console.warn(
+    `config: ${retiredVisionPrefixes.map((prefix) => `${prefix}_VISION_*`).join(", ")} are retired and ignored. `
+    + "Add those models to the provider's ordinary *_MODELS list and declare image_input on them in the Model Configurator."
+  );
+}
 const targets = buildTargets(config.providers);
 const sessions = new SessionStore();
 
