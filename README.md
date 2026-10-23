@@ -6,6 +6,7 @@
 
 **Multi-provider AI gateway: one endpoint, UI-controlled fallback chain, key rotation and health-aware routing.**
 
+![license](https://img.shields.io/badge/license-MIT-blue)
 ![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
 ![providers](https://img.shields.io/badge/providers-16-orange)
 ![protocols](https://img.shields.io/badge/protocols-5-blue)
@@ -141,4 +142,4 @@ ui/       React + Vite control panel
 
 ## License
 
-No license file is included yet.
+Released under the [MIT License](LICENSE).
