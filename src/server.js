@@ -1127,7 +1127,7 @@ async function proxy(req, res, protocol, pathname) {
       {
         plan: routePlan.steps,
         // Every walk records its success: the remembered target leads the next
-        // request, whether the pool has a saved selection or is automatic. A pin
+        // request, whether the selection is saved or is automatic. A pin
         // is a one-off override and stays stateless.
         remember: !pinned.pinned,
         // A skipped target never reaches the network, but it is still shown

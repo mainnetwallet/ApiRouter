@@ -162,7 +162,7 @@ function CardHead({ row, outcome, request, rid, onSelectRequest }) {
 }
 
 /**
- * ONE card for ONE upstream attempt: its header (time, state, pool, call number,
+ * ONE card for ONE upstream attempt: its header (time, state, call number,
  * key, status and time) above the box naming the model. The card shows only its
  * own attempt; it knows nothing of the other attempts of the request, so
  * a later attempt can never change what it says. A request that never reached a
