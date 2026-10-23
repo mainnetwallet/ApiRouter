@@ -216,10 +216,10 @@ export default function RouterControl() {
             <>
               <section className="section">
                 <div className="metrics">
-                  <MetricCard label="Compatible targets" value={data.counts.compatible} icon="box" hint={`of ${data.counts.totalTargets} total`} />
-                  <MetricCard label="Eligible now" value={data.counts.available} tone={data.counts.available > 0 ? "ok" : "danger"} icon="check" hint="not in cooldown" />
-                  <MetricCard label="In cooldown" value={data.counts.unavailable} tone={data.counts.unavailable > 0 ? "warn" : null} icon="clock" />
-                  <MetricCard label="Excluded" value={data.counts.excluded} icon="filter" hint="wrong protocol" />
+                  <MetricCard label="Compatible targets" value={data.counts?.compatible} icon="box" hint={`of ${data.counts?.totalTargets ?? 0} total`} />
+                  <MetricCard label="Eligible now" value={data.counts?.available} tone={data.counts?.available > 0 ? "ok" : "danger"} icon="check" hint="not in cooldown" />
+                  <MetricCard label="In cooldown" value={data.counts?.unavailable} tone={data.counts?.unavailable > 0 ? "warn" : null} icon="clock" />
+                  <MetricCard label="Excluded" value={data.counts?.excluded} icon="filter" hint="wrong protocol" />
                 </div>
               </section>
 

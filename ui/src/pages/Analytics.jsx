@@ -37,6 +37,10 @@ export default function Analytics() {
 
   const data = analytics.data;
   const empty = data && data.sampleSize === 0;
+  const summary = data?.summary ?? {};
+  const breakdowns = data?.breakdowns ?? {};
+  const recentFailures = Array.isArray(data?.recentFailures) ? data.recentFailures : [];
+  const recentFallbacks = Array.isArray(data?.recentFallbacks) ? data.recentFallbacks : [];
 
   return (
     <div className="page">
@@ -91,39 +95,39 @@ export default function Analytics() {
         <>
           <section className="section">
             <div className="metrics">
-              <MetricCard label="Requests" value={formatNumber(data.summary.total)} icon="list" hint={range} />
+              <MetricCard label="Requests" value={formatNumber(summary.total)} icon="list" hint={range} />
               <MetricCard
                 label="Success rate"
-                value={data.summary.successRate === null ? null : formatPercent(data.summary.successRate)}
-                tone={data.summary.failed > 0 ? "warn" : "ok"}
+                value={summary.successRate == null ? null : formatPercent(summary.successRate)}
+                tone={summary.failed > 0 ? "warn" : "ok"}
                 icon="check"
               />
               <MetricCard
                 label="Failure rate"
-                value={data.summary.failureRate === null ? null : formatPercent(data.summary.failureRate)}
-                tone={data.summary.failed > 0 ? "danger" : null}
+                value={summary.failureRate == null ? null : formatPercent(summary.failureRate)}
+                tone={summary.failed > 0 ? "danger" : null}
                 icon="alert"
               />
               <MetricCard
                 label="Average latency"
-                value={formatLatency(data.summary.avgLatencyMs)}
-                hint={Number.isFinite(data.summary.p95LatencyMs) ? `p95 ${formatLatency(data.summary.p95LatencyMs)}` : null}
+                value={formatLatency(summary.avgLatencyMs)}
+                hint={Number.isFinite(summary.p95LatencyMs) ? `p95 ${formatLatency(summary.p95LatencyMs)}` : null}
                 icon="gauge"
               />
               <MetricCard
                 label="Fallbacks"
-                value={formatNumber(data.summary.totalFallbacks)}
-                hint={`${data.summary.requestsWithFallback} request(s) affected`}
-                tone={data.summary.totalFallbacks > 0 ? "warn" : null}
+                value={formatNumber(summary.totalFallbacks)}
+                hint={`${summary.requestsWithFallback ?? 0} request(s) affected`}
+                tone={summary.totalFallbacks > 0 ? "warn" : null}
                 icon="undo"
               />
               <MetricCard
                 label="Tokens"
-                value={data.summary.tokenReportingRequests === 0 ? null : formatNumber(data.summary.tokens)}
+                value={summary.tokenReportingRequests === 0 ? null : formatNumber(summary.tokens)}
                 hint={
-                  data.summary.tokenReportingRequests === 0
+                  summary.tokenReportingRequests === 0
                     ? "no provider reported usage"
-                    : `${data.summary.tokenReportingRequests} of ${data.summary.total} reported`
+                    : `${summary.tokenReportingRequests ?? 0} of ${summary.total ?? 0} reported`
                 }
                 icon="zap"
               />
@@ -135,7 +139,7 @@ export default function Analytics() {
               <span className="panel__title">Requests over time</span>
               <div className="panel__actions">
                 <span className="tiny dim nowrap">
-                  {new Date(data.range.from).toLocaleString()} → {new Date(data.range.to).toLocaleString()}
+                  {data.range?.from && data.range?.to ? `${new Date(data.range.from).toLocaleString()} → ${new Date(data.range.to).toLocaleString()}` : ""}
                 </span>
               </div>
             </div>
@@ -149,7 +153,7 @@ export default function Analytics() {
               <div className="panel__header"><span className="panel__title">Provider usage</span></div>
               <div className="panel__body">
                 <BarList
-                  items={data.breakdowns.provider.map((row) => ({ ...row, key: providerLabel(row.key) }))}
+                  items={(breakdowns.provider ?? []).map((row) => ({ ...row, key: providerLabel(row.key) }))}
                   emptyLabel="No provider usage recorded"
                   valueFormatter={(value) => `${value} req`}
                 />
@@ -160,7 +164,7 @@ export default function Analytics() {
               <div className="panel__header"><span className="panel__title">Model usage</span></div>
               <div className="panel__body">
                 <BarList
-                  items={data.breakdowns.model}
+                  items={breakdowns.model ?? []}
                   emptyLabel="No model usage recorded"
                   valueFormatter={(value) => `${value} req`}
                 />
@@ -171,7 +175,7 @@ export default function Analytics() {
               <div className="panel__header"><span className="panel__title">Protocol usage</span></div>
               <div className="panel__body">
                 <BarList
-                  items={data.breakdowns.protocol}
+                  items={breakdowns.protocol ?? []}
                   emptyLabel="No protocol usage recorded"
                   valueFormatter={(value) => `${value} req`}
                 />
@@ -184,12 +188,12 @@ export default function Analytics() {
               <div className="panel__header">
                 <span className="panel__title">Error distribution</span>
                 <div className="panel__actions">
-                  <span className="tiny dim">{data.summary.failed} failed request(s)</span>
+                  <span className="tiny dim">{summary.failed ?? 0} failed request(s)</span>
                 </div>
               </div>
               <div className="panel__body">
                 <BarList
-                  items={data.breakdowns.errors}
+                  items={breakdowns.errors ?? []}
                   emptyLabel="No failures in this range"
                   valueFormatter={(value) => `${value}`}
                 />
@@ -205,7 +209,7 @@ export default function Analytics() {
               </div>
               <div className="panel__body">
                 <BarList
-                  items={data.breakdowns.fallback}
+                  items={breakdowns.fallback ?? []}
                   emptyLabel="No fallbacks in this range"
                   valueFormatter={(value) => `${value} req`}
                 />
@@ -216,7 +220,7 @@ export default function Analytics() {
           <div className="split split--2 section">
             <div className="panel">
               <div className="panel__header"><span className="panel__title">Recent failures</span></div>
-              {data.recentFailures.length === 0 ? (
+              {recentFailures.length === 0 ? (
                 <EmptyState title="No failures in this range" icon="check" />
               ) : (
                 <div className="table-wrap">
@@ -231,7 +235,7 @@ export default function Analytics() {
                       </tr>
                     </thead>
                     <tbody>
-                      {data.recentFailures.map((failure) => (
+                      {recentFailures.map((failure) => (
                         <tr key={failure.seq}>
                           <td className="dim tiny nowrap">{formatRelativeTime(failure.receivedAt)}</td>
                           <td className="truncate">{providerLabel(failure.provider)} / {failure.model ?? EMPTY}</td>
@@ -247,7 +251,7 @@ export default function Analytics() {
 
             <div className="panel">
               <div className="panel__header"><span className="panel__title">Recent fallbacks</span></div>
-              {data.recentFallbacks.length === 0 ? (
+              {recentFallbacks.length === 0 ? (
                 <EmptyState title="No fallbacks in this range" icon="check" />
               ) : (
                 <div className="table-wrap">
@@ -262,7 +266,7 @@ export default function Analytics() {
                       </tr>
                     </thead>
                     <tbody>
-                      {data.recentFallbacks.map((item) => (
+                      {recentFallbacks.map((item) => (
                         <tr key={item.seq}>
                           <td className="dim tiny nowrap">{formatRelativeTime(item.receivedAt)}</td>
                           <td className="truncate">{providerLabel(item.finalProvider)} / {item.finalModel ?? EMPTY}</td>

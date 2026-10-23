@@ -203,7 +203,7 @@ export default function Dashboard() {
                 <div className="row" style={{ justifyContent: "space-between", marginBottom: "var(--sp-2)" }}>
                   <span className="section__title">Targets</span>
                   <span className="tiny dim mono">
-                    {summary?.healthPercent === null ? "n/a" : `${formatPercent(summary.healthPercent)} healthy`}
+                    {summary?.healthPercent === null || summary?.healthPercent === undefined ? "n/a" : `${formatPercent(summary.healthPercent)} healthy`}
                   </span>
                 </div>
                 <HealthDistribution counts={summary ?? null} />
@@ -220,9 +220,9 @@ export default function Dashboard() {
             <div className="panel__body">
               {analytics.loading && !analytics.data ? (
                 <TableSkeleton rows={3} label="Loading traffic" />
-              ) : analytics.data?.series.some((bucket) => bucket.total > 0) ? (
+              ) : analytics.data?.series?.some((bucket) => bucket.total > 0) ? (
                 <Sparkline
-                  values={(analytics.data.series ?? []).map((bucket) => bucket.total)}
+                  values={(analytics.data?.series ?? []).map((bucket) => bucket.total)}
                   label="Requests per interval"
                 />
               ) : (

@@ -150,7 +150,7 @@ function FallbackPreview({ tab, tick, targets, recent, fallbackRequests }) {
       get: (row) => row.fallbackCount,
       render: (row) => (
         <span className="mono tiny">
-          {row.attempts.map((attempt) => (attempt.ok ? "ok" : `×${attempt.status ?? "err"}`)).join(" → ")}
+          {(row.attempts ?? []).map((attempt) => (attempt.ok ? "ok" : `×${attempt.status ?? "err"}`)).join(" → ")}
         </span>
       )
     },

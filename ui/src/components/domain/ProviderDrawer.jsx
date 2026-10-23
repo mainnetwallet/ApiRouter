@@ -104,23 +104,23 @@ function ProviderSection({ record }) {
         ) : null}
 
         <dt className="dl__term">Health</dt>
-        <dd className="dl__desc"><HealthBadge status={record.health.status} /></dd>
+        <dd className="dl__desc"><HealthBadge status={record.health?.status} /></dd>
 
         <dt className="dl__term">Success rate</dt>
         <dd className="dl__desc">
-          {record.health.successRate === null
+          {record.health?.successRate == null
             ? <span className="dim">no observations yet</span>
             : formatPercent(record.health.successRate)}
         </dd>
 
         <dt className="dl__term">Observations</dt>
-        <dd className="dl__desc mono">{record.health.successes} ok / {record.health.failures} failed</dd>
+        <dd className="dl__desc mono">{record.health?.successes ?? 0} ok / {record.health?.failures ?? 0} failed</dd>
 
         <dt className="dl__term">Latency</dt>
-        <dd className="dl__desc"><LatencyBadge ms={record.health.latencyMs} /></dd>
+        <dd className="dl__desc"><LatencyBadge ms={record.health?.latencyMs} /></dd>
 
         <dt className="dl__term">Last check</dt>
-        <dd className="dl__desc">{formatRelativeTime(record.health.lastUpdatedAt)}</dd>
+        <dd className="dl__desc">{formatRelativeTime(record.health?.lastUpdatedAt)}</dd>
       </dl>
 
       <div className="section__title" style={{ margin: "var(--sp-3) 0 var(--sp-2)" }}>

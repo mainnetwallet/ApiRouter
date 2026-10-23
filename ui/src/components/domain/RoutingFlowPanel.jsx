@@ -17,8 +17,9 @@ import { Icon } from "../ui/Icon.jsx";
 import { providerLabel, EMPTY } from "../../lib/format.js";
 
 export function RoutingFlowPanel({ ranked = [] }) {
-  const top = ranked[0] ?? null;
-  const orderedCount = ranked.length;
+  const list = Array.isArray(ranked) ? ranked : [];
+  const top = list[0] ?? null;
+  const orderedCount = list.length;
 
   return (
     <div className="panel">
