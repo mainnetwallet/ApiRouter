@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "ef2b6d34-9c98-409c-9b89-4d179f7c71cc",
-  "updatedAt": "2026-10-23T19:02:15.835Z",
+  "revision": "4272af87-3bb0-48cb-9e52-2d345e30d850",
+  "updatedAt": "2026-10-23T19:02:30.008Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -259,6 +259,27 @@
       "version": 1,
       "createdAt": 1792782135835,
       "updatedAt": 1792782135835
+    },
+    {
+      "id": "mc_97914e5bf8e1133e",
+      "provider": "cohere",
+      "model": "command-a-03-2025",
+      "displayName": "command-a-03-2025",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792782150007,
+      "updatedAt": 1792782150007
     }
   ]
 }
