@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "d65c0800-08ff-4548-b536-ede279543886",
-  "updatedAt": "2026-10-23T19:19:05.067Z",
+  "revision": "5dccdcc0-2d54-4dbe-87f6-20e3cc71e3d4",
+  "updatedAt": "2026-10-23T19:19:18.874Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -569,6 +569,24 @@
       "version": 1,
       "createdAt": 1792783145067,
       "updatedAt": 1792783145067
+    },
+    {
+      "id": "mc_0e85b0c8dd6519ea",
+      "provider": "pollinations",
+      "model": "glm",
+      "displayName": "glm",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792783158874,
+      "updatedAt": 1792783158874
     }
   ]
 }
