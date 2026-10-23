@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "b67910f4-7e9f-475f-ace2-4b269578e6af",
-  "updatedAt": "2026-10-23T19:14:00.827Z",
+  "revision": "19445310-27d7-4e53-82a1-6047c146dbd5",
+  "updatedAt": "2026-10-23T19:15:12.657Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -469,6 +469,25 @@
       "version": 1,
       "createdAt": 1792782840827,
       "updatedAt": 1792782840827
+    },
+    {
+      "id": "mc_ae72c098d1503f42",
+      "provider": "mistral",
+      "model": "devstral-medium-latest",
+      "displayName": "devstral-medium-latest",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "structured_output",
+        "streaming"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792782912657,
+      "updatedAt": 1792782912657
     }
   ]
 }
