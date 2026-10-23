@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "80ed9b61-0364-4f1d-b34e-3cf38781e92e",
-  "updatedAt": "2026-10-23T19:06:16.469Z",
+  "revision": "bd17374d-a522-487d-934b-b6b271de3739",
+  "updatedAt": "2026-10-23T19:08:51.166Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -279,6 +279,29 @@
       "version": 1,
       "createdAt": 1792782150007,
       "updatedAt": 1792782150007
+    },
+    {
+      "id": "mc_da2c6c9458e1168c",
+      "provider": "gemini",
+      "model": "gemini-3.5-flash",
+      "displayName": "gemini-3.5-flash",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "audio_input",
+        "file_input",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1792782531166,
+      "updatedAt": 1792782531166
     }
   ]
 }
