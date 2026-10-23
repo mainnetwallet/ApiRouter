@@ -339,7 +339,7 @@ function authorized(req) {
 // x-multi-ai-session-id. A random id per request meant every such request
 // started a brand-new session, so the last successful model + key was never
 // found again. Requests without the header now share one stable session per
-// protocol + pool; an explicit header still selects its own isolated session.
+// protocol; an explicit header still selects its own isolated session.
 const DEFAULT_SESSION_ID = "default";
 
 function getSession(req, protocol) {

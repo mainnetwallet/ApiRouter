@@ -182,7 +182,7 @@ export default function Playground() {
     ? Number(keyIndex)
     : null;
 
-  const sendBlocked = custom ? customBlock !== null : selectedModel === "";
+  const sendBlocked = custom ? customBlock !== null : (!autoRoute && selectedModel === "");
 
   const pickProvider = (value) => {
     setProvider(value);

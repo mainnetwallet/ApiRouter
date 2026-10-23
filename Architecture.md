@@ -404,7 +404,7 @@ the remembered target leads the walk outright.
 
 ### Manual Model Selection (alternating batches)
 
-`manual` is the mode a pool with a saved selection uses. It is the only mode
+`manual` is the mode a saved selection uses. It is the only mode
 whose plan has more than one source, and it is built by `buildManualPlan` in
 `fallback-plan.js`:
 
@@ -422,7 +422,7 @@ whose plan has more than one source, and it is built by `buildManualPlan` in
    is therefore MANUAL → HEALTH → MANUAL → HEALTH.
 
 **The remembered target (last success) leads the batch it came from.** There is
-one remembered target per session and pool, whichever batch it answered in:
+one remembered target per session, whichever batch it answered in:
 
 - a *selected* model leads the Manual batch: MANUAL → HEALTH → MANUAL → HEALTH;
 - an *unselected* (Health) model leads the Health batch, and the Manual batch is

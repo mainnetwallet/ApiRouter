@@ -226,12 +226,21 @@ export default function ModelConfigurator() {
             <button
               type="button"
               className="btn btn--sm"
-              disabled={busy || !row.configId}
+              disabled={busy}
               onClick={(event) => {
                 event.stopPropagation();
                 run(async () => {
                   const next = [...new Set([...row.capabilities, "streaming", "tool_calling"])];
-                  await updateModelConfig(row.configId, { capabilities: next });
+                  if (row.stored && row.configId) {
+                    await updateModelConfig(row.configId, { capabilities: next });
+                  } else {
+                    await createModelConfig({
+                      provider: row.provider,
+                      model: row.model,
+                      capabilities: next,
+                      enabled: row.enabled
+                    });
+                  }
                   await config.reload();
                   toast.success("Declared streaming + tool calling");
                 });

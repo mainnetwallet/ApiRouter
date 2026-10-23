@@ -237,10 +237,10 @@ code_execution
 ```
 
 - A model that comes only from `.env` (or a saved custom endpoint) is **inferred**:
-  its capabilities are guessed from its protocols and environment (for example a model
-  gets `image_input`, and every current adapter gets `text_input`,
-  `text_output`, `tool_calling` and `streaming`). The page marks these rows as
-  environment-provided.
+  its capabilities default to `text_input` and `text_output` only. Any other
+  capability (`image_input`, `tool_calling`, `streaming`, `structured_output`, …)
+  must be declared on the Model Configurator before it can be used. The page marks
+  these rows as environment-provided.
 - Saving the row makes it **configured**, and its checkboxes become authoritative for
   that exact `provider/model`. Deleting the declaration returns the model to the
   inferred defaults. Provider, model and credentials still come from the environment
@@ -394,7 +394,7 @@ outright, and that wins over the status code.
 | POST | `/api/gateway/shutdown` | Shut the gateway down: no proxy request or health probe reaches an upstream |
 | POST | `/api/gateway/resume` | Turn the gateway back on |
 | GET / POST | `/api/custom-endpoints` | List / create a saved custom endpoint (see [Saved custom endpoints](#saved-custom-endpoints)); keys are accepted but never returned |
-| PUT / DELETE | `/api/custom-endpoints/:id` | Change (name, base URL, API style, models, `addApiKeys` / `apiKeys`, and the vision part: `visionModels`, `visionBaseUrl`, `addVisionApiKeys` / `visionApiKeys`) or remove a saved custom endpoint |
+| PUT / DELETE | `/api/custom-endpoints/:id` | Change (name, base URL, API style, models, `addApiKeys` / `apiKeys`) or remove a saved custom endpoint |
 | POST | `/api/playground/custom` | Forward ONE request to a base URL, API key and model typed in the Playground (see [Custom endpoint playground](#custom-endpoint-playground)) |
 
 ### Shutdown and resume
