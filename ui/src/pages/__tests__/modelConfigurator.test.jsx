@@ -38,13 +38,11 @@ const payload = {
       capabilitiesSource: "configured",
       executableCapabilities: ["text_input", "text_output"],
       unsupportedCapabilities: [],
-      pools: ["text"],
       protocols: ["openai-chat"],
       keyCount: 2,
       configuredInEnvironment: true,
       stored: true,
       source: "configured",
-      manualSelection: { text: true, vision: false },
       warnings: []
     },
     {
@@ -60,13 +58,11 @@ const payload = {
       capabilitiesSource: "inferred",
       executableCapabilities: ["text_input"],
       unsupportedCapabilities: ["image_output"],
-      pools: ["vision"],
       protocols: ["openai-chat"],
       keyCount: 1,
       configuredInEnvironment: true,
       stored: false,
       source: "environment",
-      manualSelection: { text: false, vision: false },
       warnings: ["No adapter can execute: image_output."]
     }
   ]
@@ -107,8 +103,6 @@ describe("Model Configurator page", () => {
     expect(markup).toContain("Llama");
     expect(markup).toContain("Configured");
     expect(markup).toContain("Environment");
-    expect(markup).toContain("TEXT");
-    expect(markup).toContain("VISION");
     // The environment model is switched off by the Model Switch, and the page
     // says so instead of pretending the declaration is what disabled it.
     expect(markup).toContain("why?");

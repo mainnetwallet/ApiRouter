@@ -20,13 +20,6 @@ import { matchesSearch } from "./table.js";
 
 export const HEALTH_STATUSES = Object.freeze(["healthy", "cooldown", "failed", "unknown"]);
 
-/**
- * The two routing pools. A target belongs to exactly one, and the pools are
- * routed independently — an image request can never fall back into the text
- * pool. The UI labels the pool wherever a target or a routing decision is shown.
- */
-export const POOLS = Object.freeze(["text", "vision"]);
-
 
 const isPlainObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
@@ -68,9 +61,6 @@ export function normalizeTarget(row, index = 0) {
     provider,
     model,
     keyIndex: keyIndex ?? index,
-    // Defaults to "text": an older gateway that omits the field only ever had
-    // the text pool, so anything else would mislabel its rows.
-    pool: POOLS.includes(row?.pool) ? row.pool : "text",
     protocols: strings(row?.protocols),
     status: HEALTH_STATUSES.includes(row?.status) ? row.status : "unknown",
     score: num(row?.score),
@@ -159,12 +149,11 @@ const SEARCH_FIELDS = [
   (row) => row.lastReason ?? ""
 ];
 
-export function filterTargets(rows = [], { provider = null, protocol = null, status = null, pool = null, search = "" } = {}) {
+export function filterTargets(rows = [], { provider = null, protocol = null, status = null, search = "" } = {}) {
   return rows.filter((row) => {
     if (provider && row.provider !== provider) return false;
     if (protocol && !row.protocols.includes(protocol)) return false;
     if (status && row.status !== status) return false;
-    if (pool && row.pool !== pool) return false;
     return matchesSearch(row, search, SEARCH_FIELDS);
   });
 }
@@ -202,21 +191,12 @@ export function filterChoices({ filters = null, rows = [] } = {}) {
   const providers = strings(filters?.providers);
   const protocols = strings(filters?.protocols);
   const statuses = strings(filters?.statuses);
-  const pools = strings(filters?.pools);
 
   return {
     providers: providers.length > 0 ? providers : providerOptions(list),
     protocols: protocols.length > 0
       ? protocols
       : [...new Set(list.flatMap((row) => (Array.isArray(row?.protocols) ? row.protocols : [])))].sort(),
-    // The two pools are a fixed contract, so an absent list falls back to both
-    // rather than to whatever the rows happen to contain — filtering to an
-    // empty pool is legitimate and must stay selectable.
-    pools: pools.length > 0 ? pools : [...POOLS],
-    // The four states are the gateway's own contract, so an absent list falls
-    // back to the full set rather than to whatever the rows happen to contain:
-    // filtering *to* a state that is currently empty is a legitimate thing to
-    // want, and it must still be selectable to show the empty result.
     statuses: statuses.length > 0 ? statuses : [...HEALTH_STATUSES]
   };
 }
@@ -232,8 +212,7 @@ export function normalizeModelPayload(payload) {
   const filters = {
     providers: strings(payload?.filters?.providers),
     protocols: strings(payload?.filters?.protocols),
-    statuses: strings(payload?.filters?.statuses),
-    pools: strings(payload?.filters?.pools)
+    statuses: strings(payload?.filters?.statuses)
   };
 
   const providers = filters.providers.length > 0

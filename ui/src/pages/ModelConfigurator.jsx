@@ -4,7 +4,6 @@ import { DataTable } from "../components/ui/DataTable.jsx";
 import { FilterBar, FilterSelect } from "../components/ui/FilterBar.jsx";
 import { SearchInput } from "../components/ui/SearchInput.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
-import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
@@ -41,10 +40,10 @@ import { providerLabel, protocolLabel } from "../lib/format.js";
 /**
  * Unified Model Configurator.
  *
- * One page for the model facts that used to live in two places: whether a
- * provider/model may be routed at all, and which modalities and controls it
- * really has. Text and Vision are the same table, distinguished by pool badge,
- * because they are one catalogue with two routing pools — not two systems.
+ * One page for the model facts that determine whether a provider/model may be
+ * routed at all, and which modalities and controls it really has. Every model
+ * is one row with its declared capabilities — text and vision are capabilities
+ * on the model, not separate routing systems.
  *
  * The checkbox says what the operator DECLARES. A second, separate signal says
  * what an adapter can EXECUTE. A capability with no wire form (`image_output`,
@@ -58,7 +57,6 @@ export default function ModelConfigurator() {
 
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState(null);
-  const [pool, setPool] = useState(null);
   const [status, setStatus] = useState(null);
   const [source, setSource] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -70,8 +68,8 @@ export default function ModelConfigurator() {
   const view = useMemo(() => normalizeModelConfigPayload(config.data), [config.data]);
   const groups = useMemo(() => capabilityGroups(view.schema), [view.schema]);
   const filtered = useMemo(
-    () => filterModels(view.models, { search, provider, pool, status, source }),
-    [view.models, search, provider, pool, status, source]
+    () => filterModels(view.models, { search, provider, status, source }),
+    [view.models, search, provider, status, source]
   );
   const providers = useMemo(() => providerChoices(view.models), [view.models]);
 
@@ -175,19 +173,6 @@ export default function ModelConfigurator() {
         <span className="stack" style={{ gap: 2 }}>
           <span className="mono truncate table__truncate" title={row.model}>{row.displayName || row.model}</span>
           <span className="tiny dim nowrap">{providerLabel(row.provider)}</span>
-        </span>
-      )
-    },
-    {
-      key: "pool",
-      header: "Pool",
-      sortable: true,
-      get: (row) => row.pools.join(","),
-      render: (row) => (
-        <span className="row row--wrap" style={{ gap: 4 }}>
-          {row.pools.length > 0
-            ? row.pools.map((item) => <PoolBadge key={item} pool={item} />)
-            : <span className="tiny dim">none</span>}
         </span>
       )
     },
@@ -349,12 +334,6 @@ export default function ModelConfigurator() {
               options={providers.map((value) => ({ value, label: providerLabel(value) }))}
             />
             <FilterSelect
-              label="Pool"
-              value={pool}
-              onChange={setPool}
-              options={[{ value: "text", label: "Text" }, { value: "vision", label: "Vision" }]}
-            />
-            <FilterSelect
               label="Routing"
               value={status}
               onChange={setStatus}
@@ -379,7 +358,7 @@ export default function ModelConfigurator() {
                 <button
                   type="button"
                   className="btn btn--sm"
-                  onClick={() => { setSearch(""); setProvider(null); setPool(null); setStatus(null); setSource(null); }}
+                  onClick={() => { setSearch(""); setProvider(null); setStatus(null); setSource(null); }}
                 >
                   Clear filters
                 </button>
@@ -594,7 +573,7 @@ function EditorDrawer({ editor, models, groups, providers, adapters, busy, error
             onChange={(event) => onChange({ ...draft, enabled: event.target.checked })}
           />
           <span>Enabled for routing</span>
-          <span className="tiny dim">Unchecking removes this model from every pool, key and fallback walk.</span>
+          <span className="tiny dim">Unchecking removes this model from routing and the fallback walk.</span>
         </label>
 
         <div className="field">

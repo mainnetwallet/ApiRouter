@@ -1,6 +1,5 @@
 import { Drawer } from "../ui/Overlays.jsx";
 import { StatusBadge } from "../ui/StatusBadge.jsx";
-import { PoolBadge } from "../ui/PoolBadge.jsx";
 import { CopyableId } from "../ui/CopyableId.jsx";
 import { ErrorState } from "../ui/ErrorState.jsx";
 import { RequestTimeline, phaseLabel } from "./RequestTimeline.jsx";
@@ -65,9 +64,7 @@ export function RequestDrawer({ entry, open, onClose, loading = false, error = n
               <dd className="dl__desc">{protocolLabel(entry.protocol)}</dd>
 
               <dt className="dl__term">Routing pool</dt>
-              <dd className="dl__desc">
-                <PoolBadge pool={entry.pool} />
-              </dd>
+              <dd className="dl__desc mono">{entry.pool ?? EMPTY}</dd>
 
               <dt className="dl__term">Requested model</dt>
               <dd className="dl__desc mono">{entry.requestedModel ?? <span className="dim">auto route</span>}</dd>

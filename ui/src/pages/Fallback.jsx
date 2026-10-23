@@ -5,14 +5,12 @@ import { DataTable } from "../components/ui/DataTable.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
-import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { MetricCard } from "../components/ui/MetricCard.jsx";
 import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useHealth } from "../context/HealthContext.jsx";
 import { getRoutingPreview } from "../api/router.js";
 import { getRequests } from "../api/requests.js";
-import { CROSS_POOL_FALLBACK, poolLabel } from "../lib/pools.js";
 import { formatRelativeTime, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 
 /**
@@ -28,42 +26,27 @@ import { formatRelativeTime, protocolLabel, providerLabel, EMPTY } from "../lib/
  * available — and here they are, so no animation is simulated. A request that
  * hopped twice shows two failures and a success, in the order they occurred.
  *
- * The text and vision pools each have their own targets, health and fallback
- * chain, and a failed request never crosses from one to the other. So every
- * panel below is built per pool: its own protocol list, its own preview call
- * (`pool` is sent explicitly) and its own recorded requests. Nothing is a
- * combined chain.
+ * Every target is one flat list — text and vision are capabilities of a model,
+ * not separate routing pools — and a failed request is retried only among
+ * targets that cover the request's required capabilities.
  */
-const POOL_ORDER = ["text", "vision"];
-
 export default function Fallback() {
   const { targets } = useHealth();
   const [tab, setTab] = useState("planned");
   const [tick, setTick] = useState(0);
 
-  const poolTargets = useMemo(() => ({
-    text: targets.filter((target) => (target.pool ?? "text") === "text"),
-    vision: targets.filter((target) => target.pool === "vision")
-  }), [targets]);
-
-  // One request log fetch per pool, so a busy text pool cannot push every
-  // vision request out of a shared "last 40".
-  const recentText = useApi(
-    ({ signal }) => getRequests({ limit: 40, pool: "text" }, { signal }),
+  // One request log fetch — all traffic, no pool scope.
+  const recent = useApi(
+    ({ signal }) => getRequests({ limit: 40 }, { signal }),
     { intervalMs: 10_000, deps: [tick] }
   );
-  const recentVision = useApi(
-    ({ signal }) => getRequests({ limit: 40, pool: "vision" }, { signal }),
-    { intervalMs: 10_000, deps: [tick] }
+
+  const fallbackRequests = useMemo(
+    () => (recent.data?.entries ?? []).filter((entry) => (entry.fallbackCount ?? 0) > 0),
+    [recent.data]
   );
-  const recent = { text: recentText, vision: recentVision };
 
-  const fallbackRequests = useMemo(() => {
-    const pick = (api) => (api.data?.entries ?? []).filter((entry) => (entry.fallbackCount ?? 0) > 0);
-    return { text: pick(recentText), vision: pick(recentVision) };
-  }, [recentText.data, recentVision.data]);
-
-  const totalFallbacks = fallbackRequests.text.length + fallbackRequests.vision.length;
+  const totalFallbacks = fallbackRequests.length;
 
   if (targets.length === 0) {
     return (
@@ -90,10 +73,6 @@ export default function Fallback() {
         }
       />
 
-      <p className="tiny dim" style={{ marginBottom: "var(--sp-3)" }}>
-        <strong>{CROSS_POOL_FALLBACK.label}.</strong> {CROSS_POOL_FALLBACK.detail}
-      </p>
-
       <div className="tabs" role="tablist" aria-label="Fallback view">
         <button
           type="button"
@@ -115,33 +94,18 @@ export default function Fallback() {
         </button>
       </div>
 
-      {/* Text on the left, Vision on the right; stacks on narrow screens. */}
-      <div className="split split--2 fallback-pools">
-        {POOL_ORDER.map((pool) => (
-          <PoolFallbackSection
-            key={pool}
-            pool={pool}
-            tab={tab}
-            tick={tick}
-            targets={poolTargets[pool]}
-            recent={recent[pool]}
-            fallbackRequests={fallbackRequests[pool]}
-          />
-        ))}
-      </div>
+      <FallbackPreview tab={tab} tick={tick} targets={targets} recent={recent} fallbackRequests={fallbackRequests} />
 
       {tab === "planned" ? <HowFallbackWorks /> : null}
     </div>
   );
 }
 
-/** Everything for ONE pool: its protocol, planned chain, skipped targets and observed fallbacks. */
-function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequests }) {
+/** The planned chain view, derived from the backend's preview endpoint. */
+function FallbackPreview({ tab, tick, targets, recent, fallbackRequests }) {
   const [protocol, setProtocol] = useState("");
   const [selectedId, setSelectedId] = useState(null);
 
-  // Only the protocols this pool serves: a protocol that only the other pool
-  // speaks would make the preview fail rather than show a chain.
   const protocols = useMemo(() => {
     const set = new Set();
     for (const target of targets) for (const value of target.protocols ?? []) set.add(value);
@@ -151,8 +115,8 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
   const activeProtocol = protocols.includes(protocol) ? protocol : (protocols[0] ?? "");
 
   const preview = useApi(
-    ({ signal }) => getRoutingPreview({ protocol: activeProtocol, pool }, { signal }),
-    { deps: [activeProtocol, pool, tick], enabled: Boolean(activeProtocol) }
+    ({ signal }) => getRoutingPreview({ protocol: activeProtocol }, { signal }),
+    { deps: [activeProtocol, tick], enabled: Boolean(activeProtocol) }
   );
 
   const selected = useMemo(
@@ -211,14 +175,13 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
   const heading = (
     <div className="section__header">
       <h2 className="section__title row" style={{ gap: 8 }}>
-        <PoolBadge pool={pool} />
-        {poolLabel(pool)} pool
+        Fallback Chain
       </h2>
       {tab === "planned" && protocols.length > 0 ? (
         <div className="section__actions">
-          <label className="sr-only" htmlFor={`fallback-protocol-${pool}`}>{poolLabel(pool)} client protocol</label>
+          <label className="sr-only" htmlFor="fallback-protocol">Client protocol</label>
           <select
-            id={`fallback-protocol-${pool}`}
+            id="fallback-protocol"
             className="select"
             value={activeProtocol}
             onChange={(event) => setProtocol(event.target.value)}
@@ -237,10 +200,8 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
       <section className="section">
         {heading}
         <div className="panel">
-          <EmptyState title={`No ${pool} targets`} icon="layers">
-            {pool === "vision"
-              ? "No vision provider is configured, so there is no vision fallback chain. Image requests will fail until one is set up."
-              : "A fallback chain exists only once at least one provider is fully configured."}
+          <EmptyState title="No targets" icon="layers">
+            A fallback chain exists only once at least one provider is fully configured.
           </EmptyState>
         </div>
       </section>
@@ -258,7 +219,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
           label="Recent fallbacks"
           value={recent.data ? fallbackRequests.length : null}
           icon="undo"
-          hint={`last 40 ${pool} requests`}
+          hint="last 40 requests"
         />
       </div>
 
@@ -267,7 +228,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
           <div className="panel">
             <div className="panel__header">
               <span className="panel__title">
-                {poolLabel(pool)} chain for {protocolLabel(activeProtocol)}
+                Chain for {protocolLabel(activeProtocol)}
               </span>
               <div className="panel__actions">
                 <span className="tiny dim">fixed route order</span>
@@ -282,7 +243,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
                 <FallbackChain
                   targets={chain}
                   mode="planned"
-                  emptyMessage={`No eligible ${pool} target can serve ${protocolLabel(activeProtocol)} right now.`}
+                  emptyMessage={`No eligible target can serve ${protocolLabel(activeProtocol)} right now.`}
                 />
               )}
             </div>
@@ -290,7 +251,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
 
           <div className="panel">
             <div className="panel__header">
-              <span className="panel__title">Skipped {pool} targets</span>
+              <span className="panel__title">Skipped targets</span>
             </div>
             <div className="panel__body scroll-list">
               {unavailable.length === 0 ? (
@@ -314,7 +275,7 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
         <div className="split split--sidebar">
           <div className="panel">
             <div className="panel__header">
-              <span className="panel__title">{poolLabel(pool)} requests that fell back</span>
+              <span className="panel__title">Requests that fell back</span>
             </div>
             {recent.error ? (
               <div className="panel__body"><ErrorState error={recent.error} onRetry={recent.reload} compact /></div>
@@ -328,10 +289,10 @@ function PoolFallbackSection({ pool, tab, tick, targets, recent, fallbackRequest
                 onRowClick={(row) => setSelectedId(row.seq)}
                 isSelected={(row) => selected?.seq === row.seq}
                 compact
-                caption={`Recent ${pool} requests that used a fallback target`}
+                caption="Recent requests that used a fallback target"
                 emptyState={
                   <EmptyState title="No fallback activity" icon="check">
-                    No {pool} request in the last 40 needed a fallback — every one was served by its
+                    No request in the last 40 needed a fallback — every one was served by its
                     first-choice target.
                   </EmptyState>
                 }
@@ -370,9 +331,9 @@ function HowFallbackWorks() {
       </div>
       <div className="panel__body">
         <ol className="small muted" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.9 }}>
-          <li>The request enters exactly one pool: text, or vision for image requests. It never crosses over.</li>
+          <li>The request declares the capabilities it needs, and the router walks targets that cover them.</li>
           <li>Targets that cannot speak the client's protocol are removed.</li>
-          <li>The Fallback Chain for that pool is walked in exactly its saved order.</li>
+          <li>The Fallback Chain is walked in exactly its saved order.</li>
           <li>Every eligible API key of a model is tried, in key order, before the walk moves to the next model.</li>
           <li>The remembered target (last success, valid for 20 minutes) is tried first — only in the modes that remember one.</li>
           <li>When no chain is configured, or the automatic mode is selected, the order is built from measured health and latency instead.</li>

@@ -4,7 +4,6 @@ import { DataTable } from "../components/ui/DataTable.jsx";
 import { FilterBar, FilterSelect } from "../components/ui/FilterBar.jsx";
 import { SearchInput } from "../components/ui/SearchInput.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
-import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
 import { MetricCard } from "../components/ui/MetricCard.jsx";
@@ -18,7 +17,6 @@ import { getModels, setModelDisabled } from "../api/models.js";
 import {
   filterChoices, filterTargets, findTarget, isRoutable, normalizeModelPayload, summarizeTargets
 } from "../lib/targets.js";
-import { poolLabel } from "../lib/pools.js";
 import { sortRows } from "../lib/table.js";
 import {
   formatDateTime, formatNumber, formatPercent,
@@ -33,6 +31,10 @@ import {
  * into a single model row would hide exactly the failure mode this page exists
  * to reveal: one key exhausted while its siblings are fine.
  *
+ * Text and vision are capabilities of a model, declared in the Model
+ * Configurator — not separate routing pools — so there is one table here with
+ * no pool filter, column or per-pool summary.
+ *
  * All data comes from `GET /api/models`. The raw `/v1/models` discovery
  * endpoint is a client-facing contract and is deliberately not consumed here.
  */
@@ -40,7 +42,6 @@ export default function Models() {
   const models = useApi(getModels, { intervalMs: 15_000 });
 
   const [search, setSearch] = useState("");
-  const [pool, setPool] = useState(null);
   const [provider, setProvider] = useState(null);
   const [protocol, setProtocol] = useState(null);
   const [status, setStatus] = useState(null);
@@ -61,30 +62,19 @@ export default function Models() {
 
   const filtered = useMemo(
     () => sortRows(
-      filterTargets(rows, { provider, protocol, status, pool, search: debouncedSearch }),
+      filterTargets(rows, { provider, protocol, status, search: debouncedSearch }),
       COLUMN_ACCESSORS,
       sort
     ),
-    [rows, provider, protocol, status, pool, debouncedSearch, sort]
+    [rows, provider, protocol, status, debouncedSearch, sort]
   );
 
   const selected = useMemo(() => findTarget(rows, selectedId), [rows, selectedId]);
 
-  const activeFilterCount = [pool, provider, protocol, status, debouncedSearch].filter(Boolean).length;
+  const activeFilterCount = [provider, protocol, status, debouncedSearch].filter(Boolean).length;
 
-  // One summary per pool, recounted from that pool's own rows. The payload's
-  // combined `summary` is deliberately not used: text and vision are separate
-  // pools, so no card here is ever the sum of both.
-  const poolSummaries = useMemo(() => {
-    const build = (pool) => {
-      const poolRows = rows.filter((row) => row.pool === pool);
-      return {
-        ...summarizeTargets(poolRows),
-        providers: new Set(poolRows.map((row) => row.provider)).size
-      };
-    };
-    return { text: build("text"), vision: build("vision") };
-  }, [rows]);
+  // One summary, recounted from all rows together.
+  const summary = useMemo(() => summarizeTargets(rows), [rows]);
 
   // Applies at once on the gateway: new requests stop planning the model and a
   // request still waiting on it is aborted and falls back to the next one.
@@ -131,9 +121,18 @@ export default function Models() {
       {models.error ? <ErrorState error={models.error} onRetry={models.reload} compact /> : null}
       {switchError ? <ErrorState error={switchError} compact /> : null}
 
-      {POOL_ORDER.map((pool) => (
-        <PoolMetrics key={pool} pool={pool} summary={poolSummaries[pool]} />
-      ))}
+      <section className="section">
+        <div className="section__header">
+          <h2 className="section__title">Targets</h2>
+        </div>
+
+        <div className="metrics">
+          <MetricCard label="Total targets" value={formatNumber(summary.total)} icon="box" hint="provider + model + key targets" />
+          <MetricCard label="Healthy" value={formatNumber(summary.healthy)} tone={summary.healthy > 0 ? "ok" : null} icon="check" />
+          <MetricCard label="Failed" value={formatNumber(summary.failed)} tone={summary.failed > 0 ? "danger" : null} icon="alert" />
+          <MetricCard label="Available" value={formatNumber(summary.available)} tone={summary.available === 0 ? "danger" : null} icon="route" hint="not cooling down" />
+        </div>
+      </section>
 
       <div className="panel section">
         <FilterBar
@@ -155,12 +154,6 @@ export default function Models() {
             />
           </div>
 
-          <FilterSelect
-            label="Pool"
-            value={pool}
-            onChange={setPool}
-            options={choices.pools.map((value) => ({ value, label: poolLabel(value) }))}
-          />
           <FilterSelect label="Provider" value={provider} onChange={setProvider} options={choices.providers} />
           <FilterSelect
             label="Protocol"
@@ -189,7 +182,7 @@ export default function Models() {
                 <button
                   type="button"
                   className="btn btn--sm"
-                  onClick={() => { setSearch(""); setPool(null); setProvider(null); setProtocol(null); setStatus(null); }}
+                  onClick={() => { setSearch(""); setProvider(null); setProtocol(null); setStatus(null); }}
                 >
                   Clear filters
                 </button>
@@ -204,71 +197,10 @@ export default function Models() {
   );
 }
 
-const POOL_ORDER = ["text", "vision"];
-
-/** The five headline cards for ONE pool. */
-function PoolMetrics({ pool, summary }) {
-  const empty = summary.total === 0;
-
-  return (
-    <section className="section">
-      <div className="section__header">
-        <h2 className="section__title row" style={{ gap: 8 }}>
-          <PoolBadge pool={pool} />
-          {poolLabel(pool)} pool
-        </h2>
-      </div>
-
-      {empty ? (
-        <p className="tiny dim">
-          {pool === "vision"
-            ? "No vision targets configured. Image requests will fail until a vision provider is set up."
-            : "No text targets configured."}
-        </p>
-      ) : (
-        <div className="metrics">
-          <MetricCard
-            label="Total models"
-            value={formatNumber(summary.total)}
-            icon="box"
-            hint="provider + model + key targets"
-          />
-          <MetricCard
-            label="Healthy"
-            value={formatNumber(summary.healthy)}
-            tone={summary.healthy > 0 ? "ok" : null}
-            icon="check"
-          />
-          <MetricCard
-            label="Failed"
-            value={formatNumber(summary.failed)}
-            tone={summary.failed > 0 ? "danger" : null}
-            icon="alert"
-          />
-          <MetricCard
-            label="Providers"
-            value={formatNumber(summary.providers)}
-            icon="server"
-            hint="serving at least one model"
-          />
-          <MetricCard
-            label="Available targets"
-            value={formatNumber(summary.available)}
-            tone={summary.available === 0 ? "danger" : null}
-            icon="route"
-            hint="not cooling down"
-            title="Targets the router can currently route to"
-          />
-        </div>
-      )}
-    </section>
-  );
-}
-
 const COLUMN_ACCESSORS = {
-  pool: (row) => row.pool,
   provider: (row) => row.provider,
   model: (row) => row.model,
+  keyIndex: (row) => row.keyIndex,
   protocol: (row) => row.protocols[0] ?? "",
   status: (row) => row.status,
   latency: (row) => row.latencyMs,
@@ -280,102 +212,95 @@ const COLUMN_ACCESSORS = {
 
 function makeColumns({ onToggle, pendingKey }) {
   return [
-  {
-    key: "pool",
-    header: "Pool",
-    sortable: true,
-    get: (row) => row.pool,
-    render: (row) => <PoolBadge pool={row.pool} />
-  },
-  {
-    key: "provider",
-    header: "Provider",
-    sortable: true,
-    get: (row) => row.provider,
-    render: (row) => <span className="nowrap">{providerLabel(row.provider)}</span>
-  },
-  {
-    key: "model",
-    header: "Model",
-    sortable: true,
-    get: (row) => row.model,
-    render: (row) => (
-      <span className="mono truncate table__truncate" title={row.model}>{row.model}</span>
-    )
-  },
-  {
-    key: "protocol",
-    header: "Protocol",
-    sortable: true,
-    get: (row) => row.protocols[0] ?? "",
-    render: (row) => (
-      <span className="tiny dim nowrap">
-        {row.protocols.map(protocolLabel).join(", ") || EMPTY}
-      </span>
-    )
-  },
-  {
-    key: "key",
-    header: "Key",
-    align: "right",
-    get: (row) => row.keyIndex,
-    render: (row) => <span className="mono">{row.keyIndex}</span>
-  },
-  {
-    key: "status",
-    header: "Health",
-    sortable: true,
-    get: (row) => row.status,
-    render: (row) => <HealthBadge status={row.status} title={row.lastReason ?? undefined} />
-  },
-  {
-    key: "latency",
-    header: "Latency",
-    align: "right",
-    sortable: true,
-    get: (row) => row.latencyMs,
-    render: (row) => <LatencyBadge ms={row.latencyMs} />
-  },
-  {
-    key: "success",
-    header: "Success rate",
-    align: "right",
-    sortable: true,
-    get: (row) => row.successRate,
-    render: (row) => row.successRate === null
-      ? <span className="dim">—</span>
-      : <span className="mono tabular">{formatPercent(row.successRate)}</span>
-  },
-  {
-    key: "failures",
-    header: "Failures",
-    align: "right",
-    sortable: true,
-    get: (row) => row.failures,
-    render: (row) => (
-      <span className="mono" style={{ color: row.failures > 0 ? "var(--danger)" : undefined }}>
-        {row.failures}
-      </span>
-    )
-  },
-  {
-    key: "updated",
-    header: "Last check",
-    align: "right",
-    sortable: true,
-    get: (row) => row.updatedAt,
-    render: (row) => <span className="dim tiny nowrap">{shortTime(row.updatedAt)}</span>
-  },
-  {
-    key: "switch",
-    header: "Switch",
-    align: "right",
-    sortable: true,
-    get: (row) => (row.disabled ? 1 : 0),
-    render: (row) => (
-      <ModelSwitchButton row={row} busy={pendingKey === `${row.provider}/${row.model}`} onToggle={onToggle} />
-    )
-  }
+    {
+      key: "provider",
+      header: "Provider",
+      sortable: true,
+      get: (row) => row.provider,
+      render: (row) => <span className="nowrap">{providerLabel(row.provider)}</span>
+    },
+    {
+      key: "model",
+      header: "Model",
+      sortable: true,
+      get: (row) => row.model,
+      render: (row) => (
+        <span className="mono truncate table__truncate" title={row.model}>{row.model}</span>
+      )
+    },
+    {
+      key: "protocol",
+      header: "Protocol",
+      sortable: true,
+      get: (row) => row.protocols[0] ?? "",
+      render: (row) => (
+        <span className="tiny dim nowrap">
+          {row.protocols.map(protocolLabel).join(", ") || EMPTY}
+        </span>
+      )
+    },
+    {
+      key: "key",
+      header: "Key",
+      align: "right",
+      get: (row) => row.keyIndex,
+      render: (row) => <span className="mono">{row.keyIndex}</span>
+    },
+    {
+      key: "status",
+      header: "Health",
+      sortable: true,
+      get: (row) => row.status,
+      render: (row) => <HealthBadge status={row.status} title={row.lastReason ?? undefined} />
+    },
+    {
+      key: "latency",
+      header: "Latency",
+      align: "right",
+      sortable: true,
+      get: (row) => row.latencyMs,
+      render: (row) => <LatencyBadge ms={row.latencyMs} />
+    },
+    {
+      key: "success",
+      header: "Success rate",
+      align: "right",
+      sortable: true,
+      get: (row) => row.successRate,
+      render: (row) => row.successRate === null
+        ? <span className="dim">—</span>
+        : <span className="mono tabular">{formatPercent(row.successRate)}</span>
+    },
+    {
+      key: "failures",
+      header: "Failures",
+      align: "right",
+      sortable: true,
+      get: (row) => row.failures,
+      render: (row) => (
+        <span className="mono" style={{ color: row.failures > 0 ? "var(--danger)" : undefined }}>
+          {row.failures}
+        </span>
+      )
+    },
+    {
+      key: "updated",
+      header: "Last check",
+      align: "right",
+      sortable: true,
+      get: (row) => row.updatedAt,
+      render: (row) => <span className="dim tiny nowrap">{shortTime(row.updatedAt)}</span>
+    },
+    {
+      key: "switch",
+      header: "Switch",
+      align: "right",
+      sortable: true,
+      get: (row) => (row.disabled ? 1 : 0),
+      render: (row) => (
+        <ModelSwitchButton row={row} busy={pendingKey === `${row.provider}/${row.model}`} onToggle={onToggle} />
+      )
+    }
   ];
 }
 
@@ -417,12 +342,11 @@ function ModelDrawer({ model, onClose }) {
       open={Boolean(model)}
       onClose={onClose}
       title={model?.model ?? ""}
-      subtitle={model ? `${poolLabel(model.pool)} · ${providerLabel(model.provider)} · key ${model.keyIndex}` : null}
+      subtitle={model ? `${providerLabel(model.provider)} · key ${model.keyIndex}` : null}
     >
       {model ? (
         <div className="stack" style={{ gap: "var(--sp-4)" }}>
           <div className="row row--wrap">
-            <PoolBadge pool={model.pool} />
             <HealthBadge status={model.status} />
             <StatusBadge tone="neutral" dot={false}>
               {model.protocols.map(protocolLabel).join(", ") || "no protocol"}
@@ -430,9 +354,6 @@ function ModelDrawer({ model, onClose }) {
           </div>
 
           <dl className="dl">
-            <dt className="dl__term">Pool</dt>
-            <dd className="dl__desc"><PoolBadge pool={model.pool} /></dd>
-
             <dt className="dl__term">Provider</dt>
             <dd className="dl__desc">{providerLabel(model.provider)}</dd>
 

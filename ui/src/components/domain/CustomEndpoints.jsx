@@ -8,7 +8,7 @@ import {
   listCustomEndpoints, createCustomEndpoint, updateCustomEndpoint, deleteCustomEndpoint, splitList
 } from "../../api/customEndpoints.js";
 import { protocolLabel } from "../../lib/format.js";
-import { EMPTY_FORM, formFromEndpoint, formProblem, createBody, updateBody, visionSummary } from "../../lib/customEndpointForm.js";
+import { EMPTY_FORM, formFromEndpoint, formProblem, createBody, updateBody } from "../../lib/customEndpointForm.js";
 
 const PROTOCOLS = ["openai-chat", "openai-responses", "anthropic", "gemini"];
 
@@ -42,8 +42,6 @@ export function CustomEndpoints({ onChanged, showHeading = true }) {
   const current = editing && editing !== "new" ? endpoints.find((endpoint) => endpoint.id === editing) : null;
   const models = splitList(form.models);
   const keys = splitList(form.keys);
-  const visionModels = splitList(form.visionModels);
-  const visionKeys = splitList(form.visionKeys);
   const problem = formProblem(form, editing === "new");
 
   const save = async () => {
@@ -116,12 +114,6 @@ export function CustomEndpoints({ onChanged, showHeading = true }) {
                   {endpoint.models.length > 0 ? (
                     <div className="tiny mono" style={{ overflowWrap: "anywhere" }}>{endpoint.models.join(", ")}</div>
                   ) : null}
-                  {visionSummary(endpoint) ? (
-                    <>
-                      <div className="tiny dim">{visionSummary(endpoint)}</div>
-                      <div className="tiny mono" style={{ overflowWrap: "anywhere" }}>{endpoint.visionModels.join(", ")}</div>
-                    </>
-                  ) : null}
                 </div>
                 <div className="row" style={{ gap: "var(--sp-2)" }}>
                   <button type="button" className="btn btn--sm" onClick={() => open(endpoint)} disabled={saving}>Edit</button>
@@ -183,51 +175,6 @@ export function CustomEndpoints({ onChanged, showHeading = true }) {
                       Replace all saved keys with the ones above
                     </label>
                   ) : null}
-                </div>
-
-                <div className="stack" style={{ borderTop: "1px solid var(--border)", paddingTop: "var(--sp-3)" }}>
-                  <strong>Vision (optional)</strong>
-                  <span className="tiny dim">
-                    Models that accept images. They serve image requests only, in their own vision pool. Leave the base URL and keys empty to share the text ones.
-                  </span>
-
-                  <div className="field">
-                    <label className="field__label" htmlFor="ce-vision-models">Vision models</label>
-                    <textarea
-                      id="ce-vision-models" className="textarea mono" rows={3} value={form.visionModels}
-                      placeholder={"vision-model-a, vision-model-b"} autoCapitalize="off" autoCorrect="off" spellCheck={false}
-                      onChange={(event) => set({ visionModels: event.target.value })}
-                    />
-                    <span className="field__hint">Separate with commas or put one per line. {visionModels.length} entered.</span>
-                  </div>
-
-                  <div className="field">
-                    <label className="field__label" htmlFor="ce-vision-base">Vision base URL</label>
-                    <input
-                      id="ce-vision-base" className="input mono" type="url" inputMode="url" value={form.visionBaseUrl}
-                      placeholder="Same as the base URL above" autoCapitalize="off" autoCorrect="off" spellCheck={false}
-                      onChange={(event) => set({ visionBaseUrl: event.target.value })}
-                    />
-                  </div>
-
-                  <div className="field">
-                    <label className="field__label" htmlFor="ce-vision-keys">{editing === "new" ? "Vision API keys" : "Add vision API keys"}</label>
-                    <textarea
-                      id="ce-vision-keys" className="textarea mono" rows={2} value={form.visionKeys}
-                      placeholder="Empty: use the API keys above" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false}
-                      onChange={(event) => set({ visionKeys: event.target.value })}
-                    />
-                    <span className="field__hint">
-                      {visionKeys.length} entered.
-                      {editing !== "new" ? ` ${current?.visionKeyCount ?? 0} saved vision key(s) are kept and never shown.` : ""}
-                    </span>
-                    {editing !== "new" ? (
-                      <label className="checkbox">
-                        <input type="checkbox" checked={form.replaceVisionKeys} onChange={(event) => set({ replaceVisionKeys: event.target.checked })} />
-                        Replace all saved vision keys with the ones above
-                      </label>
-                    ) : null}
-                  </div>
                 </div>
 
                 <div className="row" style={{ gap: "var(--sp-2)", alignItems: "center", flexWrap: "wrap" }}>

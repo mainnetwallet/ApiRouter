@@ -26,5 +26,5 @@ export function setOneProvider({ enabled, provider, models, cooldowns } = {}) {
   return apiRequest("/api/one-model", { method: "PUT", body });
 }
 
-/** `"model::text:0"`: a key's id inside the chosen provider. */
-export const keyIdOf = (key) => key.keyId ?? `${key.model}::${key.pool}:${key.keyIndex}`;
+/** `"model:keyIndex"`: a key's id inside the chosen provider. */
+export const keyIdOf = (key) => key.keyId ?? `${key.model}:${key.keyIndex}`;

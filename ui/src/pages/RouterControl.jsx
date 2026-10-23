@@ -4,7 +4,6 @@ import { RoutingGraph } from "../components/domain/RoutingGraph.jsx";
 import { DataTable } from "../components/ui/DataTable.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
-import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
@@ -13,8 +12,6 @@ import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { useApi } from "../hooks/useApi.js";
 import { useHealth } from "../context/HealthContext.jsx";
 import { getRoutingPreview } from "../api/router.js";
-import { POOLS } from "../lib/targets.js";
-import { poolLabel } from "../lib/pools.js";
 import { formatLatency, protocolLabel, providerLabel, EMPTY } from "../lib/format.js";
 
 /**
@@ -39,48 +36,32 @@ import { formatLatency, protocolLabel, providerLabel, EMPTY } from "../lib/forma
 export default function RouterControl() {
   const { targets: healthTargets } = useHealth();
 
-  const [pool, setPool] = useState("text");
   const [protocol, setProtocol] = useState("");
   const [model, setModel] = useState("");
   const [session, setSession] = useState("");
 
-  // Only this pool's targets are offered. The two pools have separate models,
-  // separate health and separate fallback chains, so a text model must never
-  // appear as a vision choice (or the other way round).
-  const poolTargets = useMemo(
-    () => healthTargets.filter((target) => (target.pool ?? "text") === pool),
-    [healthTargets, pool]
-  );
-
-  const poolCounts = useMemo(() => {
-    const counts = { text: 0, vision: 0 };
-    for (const target of healthTargets) counts[(target.pool ?? "text") === "vision" ? "vision" : "text"] += 1;
-    return counts;
-  }, [healthTargets]);
-
   const protocols = useMemo(() => {
     const set = new Set();
-    for (const target of poolTargets) {
+    for (const target of healthTargets) {
       for (const protocol of target.protocols ?? []) set.add(protocol);
     }
     return [...set].sort();
-  }, [poolTargets]);
+  }, [healthTargets]);
 
   const models = useMemo(
-    () => [...new Set(poolTargets.map((target) => target.model))].sort(),
-    [poolTargets]
+    () => [...new Set(healthTargets.map((target) => target.model))].sort(),
+    [healthTargets]
   );
 
-  // Fall back to the first protocol the selected pool actually serves, so a
-  // protocol chosen for one pool cannot carry over to the other as an error.
+  // Fall back to the first protocol any target actually serves.
   const activeProtocol = protocols.includes(protocol) ? protocol : (protocols[0] ?? "");
 
   const preview = useApi(
     ({ signal }) => getRoutingPreview(
-      { protocol: activeProtocol, model, session, pool },
+      { protocol: activeProtocol, model, session },
       { signal }
     ),
-    { deps: [activeProtocol, model, session, pool], enabled: Boolean(activeProtocol) }
+    { deps: [activeProtocol, model, session], enabled: Boolean(activeProtocol) }
   );
 
   const data = preview.data;
@@ -163,32 +144,10 @@ export default function RouterControl() {
         }
       />
 
-      {/* Outside the conditional on purpose: a pool with no targets (vision is
-          often unconfigured) must not hide the switch, or the operator would
-          have no way back to the other pool. */}
-      <div className="row row--wrap section" style={{ gap: "var(--sp-3)" }}>
-        <span className="field__label">Routing pool</span>
-        <div className="chips" role="group" aria-label="Routing pool">
-          {POOLS.map((value) => (
-            <button
-              key={value}
-              type="button"
-              className={`chip${pool === value ? " is-active" : ""}${value === "vision" ? " chip--vision" : " chip--text"}`}
-              aria-pressed={pool === value}
-              onClick={() => { setPool(value); setModel(""); }}
-            >
-              {poolLabel(value).toUpperCase()} · {poolCounts[value]} targets
-            </button>
-          ))}
-        </div>
-      </div>
-
       {!supportsProtocols ? (
         <div className="panel">
           <EmptyState title="No routable protocols" icon="route">
-            No provider is configured well enough to serve a request in the{" "}
-            <strong>{pool.toUpperCase()}</strong> pool, so there is no routing decision to show.
-            {pool === "vision" ? " Image requests will fail with 503 until a vision provider is set up." : ""}
+            No provider is configured well enough to serve a request, so there is no routing decision to show.
           </EmptyState>
         </div>
       ) : (
@@ -196,9 +155,6 @@ export default function RouterControl() {
           <div className="panel section">
             <div className="panel__header">
               <span className="panel__title">Simulate a request</span>
-              <div className="panel__actions">
-                <PoolBadge pool={pool} />
-              </div>
             </div>
             <div className="panel__body">
               <div className="row row--wrap" style={{ alignItems: "flex-end", gap: "var(--sp-3)" }}>
@@ -294,10 +250,6 @@ export default function RouterControl() {
                     <div className="panel__body">
                       {data.selected ? (
                         <dl className="dl dl--tight">
-                          <dt className="dl__term">Pool</dt>
-                          <dd className="dl__desc">
-                            <PoolBadge pool={data.pool ?? pool} />
-                          </dd>
                           <dt className="dl__term">Provider</dt>
                           <dd className="dl__desc">{providerLabel(data.selected.provider)}</dd>
                           <dt className="dl__term">Model</dt>

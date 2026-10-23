@@ -14,15 +14,16 @@ import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
 import { HealthDistribution } from "../components/charts/Charts.jsx";
 import { CapabilityBadges } from "../components/domain/CapabilityBadges.jsx";
 import { ProviderDrawer } from "../components/domain/ProviderDrawer.jsx";
+import { Link } from "../router.jsx";
 import { formatRelativeTime, providerLabel } from "../lib/format.js";
 
 /**
  * Providers.
  *
- * Text and vision are two independent routing pools, so they are presented as
- * two tables rather than one merged list: a provider healthy for text and
- * failing for vision must be able to say exactly that, and the models, keys and
- * base URLs behind each pool are different configuration.
+ * Every row is one provider. Text and vision are capabilities of a model —
+ * declared in the Model Configurator — not separate routing pools, so there is
+ * one table here and one drawer per provider. A provider healthy for one model
+ * and failing for another says exactly that per-model on the Models page.
  *
  * Clicking a row opens the shared `ProviderDrawer`, which answers "is this
  * provider set up correctly?" using only values the gateway is willing to
@@ -32,8 +33,8 @@ import { formatRelativeTime, providerLabel } from "../lib/format.js";
  */
 
 /**
- * On/Off for a whole provider: every model, every key, both pools together.
- * The click must not open the row's drawer.
+ * On/Off for a whole provider: every model, every key, both capabilities
+ * together. The click must not open the row's drawer.
  */
 function ProviderSwitchButton({ row, busy, onToggle }) {
   if (!row.configured) return <span className="dim tiny">—</span>;
@@ -68,27 +69,8 @@ export default function Providers() {
     deps: [generation]
   });
 
-  const textProviders = providerData?.providers ?? [];
-  const visionProviders = providerData?.visionProviders ?? [];
+  const rows = providerData?.providers ?? [];
 
-  // One entry per pool, each rendered as its own table under its own heading.
-  const groups = useMemo(() => ([
-    {
-      pool: "text",
-      title: "Text providers",
-      description: "Serve ordinary text requests. Separate keys, base URLs and models from the vision pool.",
-      rows: textProviders
-    },
-    {
-      pool: "vision",
-      title: "Vision providers",
-      description: "Serve requests carrying an image. An image request never falls back into the text pool.",
-      rows: visionProviders
-    }
-  ]), [textProviders, visionProviders]);
-
-  // { id, pool }: the same provider can have a row in both tables, and the two
-  // rows describe different configuration.
   const [selection, setSelection] = useState(null);
   const [sort, setSort] = useState({ key: "provider", direction: "asc" });
   const [pendingProvider, setPendingProvider] = useState(null);
@@ -111,9 +93,8 @@ export default function Providers() {
 
   const selected = useMemo(() => {
     if (!selection) return null;
-    const rows = selection.pool === "vision" ? visionProviders : textProviders;
     return rows.find((provider) => provider.id === selection.id) ?? null;
-  }, [selection, textProviders, visionProviders]);
+  }, [selection, rows]);
 
   const columns = useMemo(() => [
     {
@@ -231,6 +212,8 @@ export default function Providers() {
     );
   }
 
+  const summary = providerData?.summary ?? null;
+
   return (
     <div className="page">
       <PageHeader
@@ -244,22 +227,22 @@ export default function Providers() {
       {error ? <ErrorState error={error} onRetry={reload} compact /> : null}
       {switchError ? <ErrorState error={switchError} compact /> : null}
 
-      {groups.map((group) => (
-        <section className="section" key={group.pool}>
-          <div className="section__title" style={{ marginBottom: "var(--sp-2)" }}>
-            {group.title}
-            <span className="tiny dim" style={{ marginLeft: "var(--sp-2)", fontWeight: 400 }}>
-              {group.description}
-            </span>
-          </div>
-
-          <div className="panel" style={{ marginBottom: "var(--sp-3)" }}>
+      {rows.length === 0 ? (
+        <div className="panel">
+          <EmptyState title="No providers configured" icon="server">
+            Add a provider to <code>.env</code> and restart — see the
+            {" "}<Link to="/configuration">Configuration</Link> page for exactly which variables are needed.
+          </EmptyState>
+        </div>
+      ) : (
+        <>
+          <div className="section">
             <div className="panel__body">
               <HealthDistribution counts={{
-                healthy: group.rows.reduce((sum, p) => sum + p.health.healthy, 0),
-                cooldown: group.rows.reduce((sum, p) => sum + p.health.cooldown, 0),
-                failed: group.rows.reduce((sum, p) => sum + p.health.failed, 0),
-                unknown: group.rows.reduce((sum, p) => sum + p.health.unknown, 0)
+                healthy: rows.reduce((sum, p) => sum + p.health.healthy, 0),
+                cooldown: rows.reduce((sum, p) => sum + p.health.cooldown, 0),
+                failed: rows.reduce((sum, p) => sum + p.health.failed, 0),
+                unknown: rows.reduce((sum, p) => sum + p.health.unknown, 0)
               }} />
             </div>
           </div>
@@ -267,29 +250,27 @@ export default function Providers() {
           <div className="panel">
             <DataTable
               columns={columns}
-              rows={group.rows}
+              rows={rows}
               sort={sort}
               onSortChange={setSort}
-              rowKey={(row) => `${group.pool}:${row.id}`}
-              onRowClick={(row) => setSelection({ id: row.id, pool: group.pool })}
-              caption={`${group.title} and their ${group.pool} routing targets`}
+              rowKey={(row) => row.id}
+              onRowClick={(row) => setSelection({ id: row.id })}
+              caption="Providers and their routing targets"
               emptyState={(
-                <EmptyState title={`No ${group.title.toLowerCase()}`} icon="server">
-                  {group.pool === "vision"
-                    ? "No vision pool is configured. Image requests will fail with 503 until one is."
-                    : "No text provider is configured."}
+                <EmptyState title="No providers configured" icon="server">
+                  Configure a provider in <code>.env</code> and restart.
                 </EmptyState>
               )}
             />
           </div>
-        </section>
-      ))}
+        </>
+      )}
 
       <ProviderDrawer
         open={Boolean(selected)}
         onClose={() => setSelection(null)}
         id={selected?.id}
-        pools={selected ? [{ pool: selected.pool, record: selected }] : []}
+        record={selected ?? null}
       />
     </div>
   );

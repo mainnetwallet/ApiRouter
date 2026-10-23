@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "../components/layout/PageHeader.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
-import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { Icon } from "../components/ui/Icon.jsx";
@@ -665,7 +664,7 @@ export default function Playground() {
                       <StatusBadge tone="danger" dot={false}>{meta.error.label ?? "Request failed"}</StatusBadge>
                     ) : (
                       <>
-                        {meta.pool ? <PoolBadge pool={meta.pool} /> : null}
+                        {meta.pool ? <span className="tiny dim mono">{meta.pool.toUpperCase()}</span> : null}
                         <span className="mono pg-meta__target">
                           {meta.provider ? providerLabel(meta.provider) : EMPTY} · {meta.model ?? EMPTY}
                         </span>
@@ -779,7 +778,7 @@ export default function Playground() {
             </div>
 
             <div className="pg-route">
-              {custom ? <StatusBadge tone="info" dot={false}>Custom</StatusBadge> : <PoolBadge pool={effectivePool} />}
+              {custom ? <StatusBadge tone="info" dot={false}>Custom</StatusBadge> : <span className="tiny dim mono">{effectivePool.toUpperCase()}</span>}
               <span className="pg-route__text" title={routeSummary}>{routeSummary}</span>
               <button
                 type="button"
@@ -1083,7 +1082,7 @@ export default function Playground() {
                   {meta.custom ? null : (
                     <>
                       <dt className="dl__term">Pool</dt>
-                      <dd className="dl__desc">{meta.pool ? <PoolBadge pool={meta.pool} /> : <span className="dim">{EMPTY}</span>}</dd>
+                      <dd className="dl__desc">{meta.pool ? <span className="tiny dim mono">{meta.pool.toUpperCase()}</span> : <span className="dim">{EMPTY}</span>}</dd>
                     </>
                   )}
 

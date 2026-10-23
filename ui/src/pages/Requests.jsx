@@ -4,7 +4,6 @@ import { DataTable } from "../components/ui/DataTable.jsx";
 import { FilterBar, FilterSelect } from "../components/ui/FilterBar.jsx";
 import { SearchInput } from "../components/ui/SearchInput.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
-import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { TableSkeleton } from "../components/ui/LoadingSkeleton.jsx";
@@ -13,8 +12,6 @@ import { useApi } from "../hooks/useApi.js";
 import { useDebouncedValue } from "../hooks/useDebounce.js";
 import { getRequest, getRequests } from "../api/requests.js";
 import { matchesSearch, nextSort, sortRows } from "../lib/table.js";
-import { POOLS } from "../lib/targets.js";
-import { poolLabel } from "../lib/pools.js";
 import {
   formatDateTime, formatLatency, formatRelativeTime, formatTokens,
   protocolLabel, providerLabel, EMPTY
@@ -33,7 +30,6 @@ const PAGE_SIZE = 50;
  * the current page.
  */
 export default function Requests() {
-  const [pool, setPool] = useState(null);
   const [outcome, setOutcome] = useState(null);
   const [provider, setProvider] = useState(null);
   const [protocol, setProtocol] = useState(null);
@@ -50,12 +46,11 @@ export default function Requests() {
     limit: PAGE_SIZE,
     cursor,
     // Filtered server-side like the others, so pagination stays correct.
-    pool,
     outcome,
     provider,
     protocol,
     status
-  }), [cursor, pool, outcome, provider, protocol, status]);
+  }), [cursor, outcome, provider, protocol, status]);
 
   const log = useApi(({ signal }) => getRequests(query, { signal }), {
     intervalMs: cursor === null ? 5_000 : null,
@@ -127,9 +122,7 @@ export default function Requests() {
           actions={
             <span className="tiny dim nowrap">
               {log.data
-                ? pool
-                  ? `${rows.length} shown · ${log.data.matched ?? rows.length} ${pool} · ${log.data.total} in buffer`
-                  : `${rows.length} shown · ${log.data.total} in buffer`
+                ? `${rows.length} shown · ${log.data.total} in buffer`
                 : ""}
             </span>
           }
@@ -145,12 +138,6 @@ export default function Requests() {
             />
           </div>
 
-          <FilterSelect
-            label="Pool"
-            value={pool}
-            onChange={changeFilter(setPool)}
-            options={POOLS.map((value) => ({ value, label: poolLabel(value) }))}
-          />
           <FilterSelect label="Outcome" value={outcome} onChange={changeFilter(setOutcome)} options={["success", "failed"]} />
           <FilterSelect label="Provider" value={provider} onChange={changeFilter(setProvider)} options={providers} />
           <FilterSelect
@@ -229,7 +216,6 @@ export default function Requests() {
 
 const COLUMN_ACCESSORS = {
   receivedAt: (row) => row.receivedAt,
-  pool: (row) => row.pool ?? "text",
   id: (row) => row.id ?? "",
   provider: (row) => row.finalProvider ?? "",
   model: (row) => row.finalModel ?? "",
@@ -251,13 +237,6 @@ const COLUMNS = [
         {formatRelativeTime(row.receivedAt)}
       </span>
     )
-  },
-  {
-    key: "pool",
-    header: "Pool",
-    sortable: true,
-    get: (row) => row.pool ?? "text",
-    render: (row) => <PoolBadge pool={row.pool} />
   },
   {
     key: "id",

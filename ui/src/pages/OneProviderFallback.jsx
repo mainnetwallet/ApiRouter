@@ -7,7 +7,6 @@ import { PageHeader } from "../components/layout/PageHeader.jsx";
 import { DataTable } from "../components/ui/DataTable.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
 import { HealthBadge } from "../components/ui/HealthBadge.jsx";
-import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { LatencyBadge } from "../components/ui/LatencyBadge.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { ErrorState } from "../components/ui/ErrorState.jsx";
@@ -222,11 +221,6 @@ export default function OneProviderFallback() {
       )
     },
     {
-      key: "pool", header: "Pool", sortable: true,
-      get: (row) => row.pool,
-      render: (row) => <PoolBadge pool={row.pool} />
-    },
-    {
       key: "key", header: "Key", sortable: true, align: "right",
       get: (row) => row.keyIndex,
       render: (row) => <span className="mono">#{row.keyIndex}</span>
@@ -387,7 +381,7 @@ export default function OneProviderFallback() {
                               <span className="op-row__main">
                                 <span className="op-row__name">{candidate.model}</span>
                                 <span className="op-row__meta">
-                                  {candidate.keyCount} key{candidate.keyCount === 1 ? "" : "s"} · {candidate.pools.join("+")}
+                                  {candidate.keyCount} key{candidate.keyCount === 1 ? "" : "s"}
                                   {candidate.disabled ? " · switched off" : ""}
                                 </span>
                               </span>
@@ -418,7 +412,7 @@ export default function OneProviderFallback() {
                               <span className="op-row__main">
                                 <span className="op-row__name">{model}</span>
                                 <span className="op-row__meta">
-                                  {info ? `${info.keyCount} key${info.keyCount === 1 ? "" : "s"} · ${info.pools.join("+")}${info.disabled ? " · switched off" : ""}` : "not configured"}
+                                  {info ? `${info.keyCount} key${info.keyCount === 1 ? "" : "s"}${info.disabled ? " · switched off" : ""}` : "not configured"}
                                 </span>
                               </span>
                               <span className="op-actions">
@@ -477,7 +471,7 @@ export default function OneProviderFallback() {
               <li><strong>Same cooldown for every key (minutes):</strong> enter 1, 2, 5 … and Apply. From then on every call, success or failure, puts that key and model into cooldown for that long (1 minute = 1.01 minutes) and it is called again only after it ends. You can also set a different value per key.</li>
               <li><strong>Empty (none):</strong> nothing is paced. A key that answers is called again for the next request, and only a key whose call fails (any error) cools, for 5 minutes. The next key or model is used meanwhile.</li>
               <li>If every key of every model has failed or is cooling, the request waits for the first cooldown to end and tries again, and keeps going until a key answers.</li>
-              <li>An image request needs a model of this provider with a key in the vision pool; otherwise it fails instead of falling back to another provider.</li>
+              <li>An image request needs a model of this provider declared as vision-capable; otherwise it fails instead of falling back to another provider.</li>
             </ul>
           </div>
         </div>
@@ -519,7 +513,7 @@ export default function OneProviderFallback() {
             rows={keys}
             sort={sort}
             onSortChange={setSort}
-            rowKey={(row) => `${row.model}::${row.pool}:${row.keyIndex}`}
+            rowKey={(row) => `${row.model}::${row.keyIndex}`}
             caption="Keys of the chosen models and their cooldown"
             emptyState={(
               <EmptyState title="No keys to show" icon="key">

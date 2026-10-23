@@ -5,10 +5,6 @@
  * source it was measured from.
  */
 
-export const FALLBACK_POOLS = ["text", "vision"];
-
-export const POOL_LABEL = { text: "Text", vision: "Vision" };
-
 /** The routing phases the gateway records on an attempt. */
 export const PHASE_LABEL = {
   sticky: "Remembered",
@@ -253,7 +249,7 @@ export function latencyOf(group) {
 
 /** How a configured entry will actually behave, so the panel never overstates it. */
 export function entryState(entry, group) {
-  if (!group) return { key: "missing", label: "Not configured in this pool", tone: "danger" };
+  if (!group) return { key: "missing", label: "Not configured", tone: "danger" };
   if (entry.enabled === false) return { key: "disabled", label: "Disabled — keeps its place, not routed to", tone: "muted" };
   // Usable only if the selection intersects what the provider actually has. A
   // non-empty selection that matches nothing is exactly as unroutable as an

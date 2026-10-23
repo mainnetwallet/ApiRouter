@@ -24,7 +24,6 @@ export const CATEGORY = Object.freeze({
   GATEWAY: "gateway",
   UNAVAILABLE: "unavailable",
   NO_ROUTE: "no-route",
-  NO_VISION_ROUTE: "no-vision-route",
   CAPABILITY: "capability",
   MODEL: "model-unavailable",
   COOLDOWN: "cooldown",
@@ -150,10 +149,10 @@ export function apiErrorFromResponse(status, envelope, { rawText = null } = {}) 
       details: error?.details,
       failures: error?.failures
     });
-    apiError.category = CATEGORY.NO_VISION_ROUTE;
+    apiError.category = CATEGORY.NO_ROUTE;
     apiError.label = "No vision route";
     apiError.retryable = false;
-    apiError.hint = "The request contains an image, but no vision pool is configured. Set a provider's _VISION_API_KEYS, _VISION_MODELS and _VISION_BASE_URL.";
+    apiError.hint = "The request contains an image, but no vision-capable provider is configured. Set a provider's vision API keys, models and base URL.";
     return apiError;
   }
 
@@ -299,7 +298,7 @@ export function classifyFailure(entry) {
   const errorType = String(entry?.errorType ?? "").toLowerCase();
 
   if (errorType === "no_route") return "no route";
-  if (errorType === "no_vision_route") return "no vision route";
+  if (errorType === "no_vision_route") return "no route";
   if (errorType === "model_not_vision_capable") return "capability mismatch";
   if (status === 401 || status === 403) return "authentication";
   if (status === 402) return "quota exhausted";
@@ -326,7 +325,6 @@ export function failureLabel(category) {
     case "rate limited": return "Rate limiting";
     case "timeout": return "Timeout";
     case "no route": return "No route available";
-    case "no vision route": return "No vision route available";
     case "capability mismatch": return "Model cannot process images";
     case "unavailable": return "Provider unavailable";
     case "network failure": return "Network failure";

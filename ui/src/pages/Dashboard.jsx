@@ -6,11 +6,8 @@ import { ErrorState } from "../components/ui/ErrorState.jsx";
 import { EmptyState } from "../components/ui/EmptyState.jsx";
 import { DataTable } from "../components/ui/DataTable.jsx";
 import { StatusBadge } from "../components/ui/StatusBadge.jsx";
-import { PoolBadge } from "../components/ui/PoolBadge.jsx";
 import { HealthDistribution, Sparkline } from "../components/charts/Charts.jsx";
 import { RequestDrawer } from "../components/domain/RequestDrawer.jsx";
-import { PoolSummaryCards } from "../components/domain/PoolSummaryCards.jsx";
-import { ProviderMatrix } from "../components/domain/ProviderMatrix.jsx";
 import { ProviderDrawer } from "../components/domain/ProviderDrawer.jsx";
 import { RoutingFlowPanel } from "../components/domain/RoutingFlowPanel.jsx";
 import { useHealth } from "../context/HealthContext.jsx";
@@ -20,7 +17,6 @@ import { getAnalytics } from "../api/analytics.js";
 import { getRequests } from "../api/requests.js";
 import { getProviders } from "../api/providers.js";
 import { Link } from "../router.jsx";
-import { buildProviderMatrix, summarizePool } from "../lib/pools.js";
 import {
   formatLatency, formatNumber, formatPercent, formatRelativeTime,
   providerLabel, EMPTY
@@ -29,11 +25,9 @@ import {
 /**
  * Dashboard.
  *
- * Organized around the router's two independent pools. The headline cards, the
- * Provider Matrix and the health panel all keep TEXT and VISION figures apart —
- * the same provider can be configured in both, with different models, keys,
- * targets, health and latency, and merging them is exactly the confusion this
- * page exists to remove.
+ * One unified view of the gateway. Text and vision are capabilities of a model,
+ * declared in the Model Configurator — not separate routing pools — so every
+ * figure here is computed over all targets together.
  *
  * Every figure comes from the gateway. Where a metric has no data source yet —
  * most obviously request counts on a freshly restarted process — the card reads
@@ -69,29 +63,10 @@ export default function Dashboard() {
   const traffic = analytics.data?.summary ?? null;
   const hasTraffic = (traffic?.total ?? 0) > 0;
 
-  const poolSummary = healthData?.poolSummary ?? null;
   const providerSummary = providersApi.data?.summary ?? null;
+  const providerRows = Array.isArray(providersApi.data?.providers) ? providersApi.data.providers : [];
 
-  // `providersApi.data.providers` are the text rows; `.visionProviders` the
-  // vision rows. Summaries are computed per pool, never over both.
-  const textPool = useMemo(() => summarizePool({
-    pool: "text",
-    providers: providersApi.data?.providers ?? [],
-    summary: providerSummary,
-    poolSummary: poolSummary?.text
-  }), [providersApi.data, providerSummary, poolSummary]);
-
-  const visionPool = useMemo(() => summarizePool({
-    pool: "vision",
-    providers: providersApi.data?.visionProviders ?? [],
-    summary: providerSummary,
-    poolSummary: poolSummary?.vision
-  }), [providersApi.data, providerSummary, poolSummary]);
-
-  const matrix = useMemo(() => buildProviderMatrix({
-    textProviders: providersApi.data?.providers ?? [],
-    visionProviders: providersApi.data?.visionProviders ?? []
-  }), [providersApi.data]);
+  const globalTargets = summary?.total ?? 0;
 
   const recentColumns = useMemo(() => [
     {
@@ -99,13 +74,6 @@ export default function Dashboard() {
       header: "Time",
       get: (row) => row.receivedAt,
       render: (row) => <span className="dim tiny nowrap">{formatRelativeTime(row.receivedAt)}</span>
-    },
-    {
-      key: "pool",
-      header: "Pool",
-      sortable: false,
-      get: (row) => row.pool,
-      render: (row) => <PoolBadge pool={row.pool} />
     },
     {
       key: "target",
@@ -147,7 +115,6 @@ export default function Dashboard() {
   }
 
   const noTargets = !summary || summary.total === 0;
-  const globalTargets = summary?.total ?? textPool.targets + visionPool.targets;
 
   return (
     <div className="page">
@@ -168,37 +135,22 @@ export default function Dashboard() {
 
       {healthError ? <ErrorState error={healthError} onRetry={reloadHealth} compact /> : null}
 
-      <section className="section" aria-label="Pool summary">
-        <PoolSummaryCards text={textPool} vision={visionPool} />
-      </section>
-
-      {noTargets ? (
-        <div className="panel" style={{ marginBottom: "var(--sp-4)" }}>
-          <EmptyState title="No routing targets are configured" icon="server">
-            The gateway is running, but no provider has an API key, model list and base URL
-            configured together. Add one to <code>.env</code> and restart — see the
-            {" "}<Link to="/configuration">Configuration</Link> page for exactly which variables are missing.
-          </EmptyState>
-        </div>
-      ) : null}
-
       <section className="section" aria-label="Global statistics">
         <div className="metrics">
           <MetricCard
             label="Total Providers"
-            value={formatNumber(providerSummary?.knownProviders ?? matrix.length)}
+            value={formatNumber(providerSummary?.knownProviders ?? providerRows.length)}
             hint={[
-              Number.isFinite(providerSummary?.textCapableProviders) ? `${providerSummary.textCapableProviders} text` : null,
-              Number.isFinite(providerSummary?.visionCapableProviders) ? `${providerSummary.visionCapableProviders} vision` : null
+              Number.isFinite(providerSummary?.configuredProviders) ? `${providerSummary.configuredProviders} configured` : null,
+              providerSummary?.disabledProviders ? `${providerSummary.disabledProviders} switched off` : null
             ].filter(Boolean).join(" · ") || null}
             icon="server"
           />
           <MetricCard
             label="Total Targets"
             value={formatNumber(globalTargets)}
-            hint={`TEXT ${formatNumber(textPool.targets)} · VISION ${formatNumber(visionPool.targets)}`}
             icon="box"
-            title="Each provider/model/key combination routes independently, within its own pool"
+            title="Each provider/model/key combination routes independently"
           />
           <MetricCard
             label="Total Requests"
@@ -230,14 +182,17 @@ export default function Dashboard() {
         </div>
       </section>
 
-      <div className="split split--sidebar section">
-        <ProviderMatrix
-          rows={matrix}
-          loading={providersApi.loading}
-          onSelect={setSelectedProvider}
-          selectedId={selectedProvider?.id}
-        />
+      {noTargets ? (
+        <div className="panel" style={{ marginBottom: "var(--sp-4)" }}>
+          <EmptyState title="No routing targets are configured" icon="server">
+            The gateway is running, but no provider has an API key, model list and base URL
+            configured together. Add one to <code>.env</code> and restart — see the
+            {" "}<Link to="/configuration">Configuration</Link> page for exactly which variables are missing.
+          </EmptyState>
+        </div>
+      ) : null}
 
+      <div className="split split--sidebar section">
         <div className="stack">
           <div className="panel">
             <div className="panel__header">
@@ -246,17 +201,12 @@ export default function Dashboard() {
             <div className="panel__body stack" style={{ gap: "var(--sp-4)" }}>
               <div>
                 <div className="row" style={{ justifyContent: "space-between", marginBottom: "var(--sp-2)" }}>
-                  <span className="section__title">Text health</span>
-                  <span className="tiny dim mono">{textPool.healthPercent === null ? "n/a" : `${formatPercent(textPool.healthPercent)} healthy`}</span>
+                  <span className="section__title">Targets</span>
+                  <span className="tiny dim mono">
+                    {summary?.healthPercent === null ? "n/a" : `${formatPercent(summary.healthPercent)} healthy`}
+                  </span>
                 </div>
-                <HealthDistribution counts={poolSummary?.text ?? textPool.counts} />
-              </div>
-              <div>
-                <div className="row" style={{ justifyContent: "space-between", marginBottom: "var(--sp-2)" }}>
-                  <span className="section__title">Vision health</span>
-                  <span className="tiny dim mono">{visionPool.healthPercent === null ? "n/a" : `${formatPercent(visionPool.healthPercent)} healthy`}</span>
-                </div>
-                <HealthDistribution counts={poolSummary?.vision ?? visionPool.counts} />
+                <HealthDistribution counts={summary ?? null} />
               </div>
             </div>
           </div>
@@ -270,7 +220,7 @@ export default function Dashboard() {
             <div className="panel__body">
               {analytics.loading && !analytics.data ? (
                 <TableSkeleton rows={3} label="Loading traffic" />
-              ) : (analytics.data?.series ?? []).some((bucket) => bucket.total > 0) ? (
+              ) : analytics.data?.series.some((bucket) => bucket.total > 0) ? (
                 <Sparkline
                   values={(analytics.data.series ?? []).map((bucket) => bucket.total)}
                   label="Requests per interval"
@@ -307,7 +257,7 @@ export default function Dashboard() {
               rowKey={(row) => row.seq}
               onRowClick={setSelectedRequest}
               compact
-              caption="Most recent requests through the gateway, with the pool that served each one"
+              caption="Most recent requests through the gateway"
             />
           )}
         </div>
@@ -371,7 +321,7 @@ export default function Dashboard() {
         ) : (
           <div className="table-wrap">
             <table className="table table--compact">
-              <caption className="sr-only">Requests that fell back to another target in the same pool</caption>
+              <caption className="sr-only">Requests that fell back to another eligible target</caption>
               <thead>
                 <tr>
                   <th scope="col">Time</th>
@@ -413,12 +363,7 @@ export default function Dashboard() {
         open={Boolean(selectedProvider)}
         onClose={() => setSelectedProvider(null)}
         id={selectedProvider?.id}
-        pools={selectedProvider
-          ? [
-              { pool: "text", record: selectedProvider.text },
-              { pool: "vision", record: selectedProvider.vision }
-            ]
-          : []}
+        record={selectedProvider ?? null}
       />
     </div>
   );

@@ -1,7 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { describeAttempt } from "../errors.js";
 import { buildLifecycle, phaseLabel } from "../../components/domain/RequestTimeline.jsx";
-import { ROUTING_FLOW_STEPS } from "../pools.js";
+
+export const ROUTING_FLOW_STEPS = Object.freeze([
+  { key: "incoming", label: "Incoming Request" },
+  { key: "detect", label: "Detect Required Capabilities" },
+  { key: "route", label: "Route to Eligible Targets" },
+  { key: "chain", label: "Walk the Fallback Chain" },
+  { key: "auto", label: "Automatic Health-Based Fallback" },
+  { key: "fallback", label: "Fallback (Eligible Targets Only)" }
+]);
 
 describe("fallback-chain attempts and skipped rows", () => {
   it("labels skipped rows by reason without calling them failures", () => {

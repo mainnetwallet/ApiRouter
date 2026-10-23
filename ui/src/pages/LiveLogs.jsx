@@ -45,7 +45,6 @@ export default function LiveLogs() {
   const [paused, setPaused] = useState(false);
   const [provider, setProvider] = useState(null);
   const [status, setStatus] = useState(null);
-  const [pool, setPool] = useState(null);
   const [search, setSearch] = useState("");
   const [requestId, setRequestId] = useState("");
   const [stuck, setStuck] = useState(true);
@@ -116,8 +115,8 @@ export default function LiveLogs() {
   }, [paused, applyPayload]);
 
   const filters = useMemo(() => ({
-    provider, status, pool, search: debouncedSearch, requestId: debouncedRequestId
-  }), [provider, status, pool, debouncedSearch, debouncedRequestId]);
+    provider, status, search: debouncedSearch, requestId: debouncedRequestId
+  }), [provider, status, debouncedSearch, debouncedRequestId]);
 
   const visible = useMemo(() => filterRows(rows, filters), [rows, filters]);
 
@@ -164,7 +163,7 @@ export default function LiveLogs() {
   // Every call the page holds, regardless of filters.
   const copyAllText = useCallback(() => formatRowsAsText(rows), [rows]);
 
-  const filtering = Boolean(provider || status || pool || debouncedSearch.trim() || debouncedRequestId.trim());
+  const filtering = Boolean(provider || status || debouncedSearch.trim() || debouncedRequestId.trim());
   const initialLoading = log.loading && !log.data && !streaming && rows.length === 0;
   const disconnected = Boolean(log.error) && !streaming && !paused;
 
@@ -242,15 +241,6 @@ export default function LiveLogs() {
           </div>
           <FilterSelect label="Provider" value={provider} onChange={setProvider} options={providers} />
           <FilterSelect
-            label="Pool"
-            value={pool}
-            onChange={setPool}
-            options={[
-              { value: "text", label: "Text" },
-              { value: "vision", label: "Vision" }
-            ]}
-          />
-          <FilterSelect
             label="Status"
             value={status}
             onChange={setStatus}
@@ -282,7 +272,7 @@ export default function LiveLogs() {
                   <button
                     type="button"
                     className="btn btn--sm"
-                    onClick={() => { setProvider(null); setStatus(null); setPool(null); setSearch(""); setRequestId(""); }}
+                    onClick={() => { setProvider(null); setStatus(null); setSearch(""); setRequestId(""); }}
                   >
                     Clear filters
                   </button>

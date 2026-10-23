@@ -46,16 +46,11 @@ function normalizeRow(raw) {
     executableCapabilities: asArray(raw.executableCapabilities).filter((id) => typeof id === "string"),
     unsupportedCapabilities: asArray(raw.unsupportedCapabilities).filter((id) => typeof id === "string"),
     protocol: asString(raw.protocol) || null,
-    pools: asArray(raw.pools).filter((pool) => pool === "text" || pool === "vision"),
     protocols: asArray(raw.protocols).filter((protocol) => typeof protocol === "string"),
     keyCount: Number.isFinite(raw.keyCount) ? raw.keyCount : 0,
     configuredInEnvironment: raw.configuredInEnvironment !== false,
     stored,
     source: stored ? "configured" : "environment",
-    manualSelection: {
-      text: raw.manualSelection?.text === true,
-      vision: raw.manualSelection?.vision === true
-    },
     warnings: asArray(raw.warnings).filter((warning) => typeof warning === "string"),
     updatedAt: raw.updatedAt ?? null
   };
@@ -160,11 +155,10 @@ export function capabilityState(row, capabilityId) {
   return { declared, executable, unsupported };
 }
 
-export function filterModels(models, { search = "", provider = null, pool = null, status = null, source = null } = {}) {
+export function filterModels(models, { search = "", provider = null, status = null, source = null } = {}) {
   const needle = String(search || "").trim().toLowerCase();
   return asArray(models).filter((row) => {
     if (provider && row.provider !== provider) return false;
-    if (pool && !row.pools.includes(pool)) return false;
     if (status === "enabled" && !row.enabled) return false;
     if (status === "disabled" && row.enabled) return false;
     if (source && row.source !== source) return false;
@@ -275,10 +269,7 @@ export function availabilityNote(row) {
 }
 
 export function selectionLabel(row) {
-  const pools = [];
-  if (row?.manualSelection?.text) pools.push("Text");
-  if (row?.manualSelection?.vision) pools.push("Vision");
-  return pools.length > 0 ? pools.join(", ") : "";
+  return "";
 }
 
 /** Row-level attention: what an operator should look at first. */

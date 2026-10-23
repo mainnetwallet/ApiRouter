@@ -150,14 +150,13 @@ describe("model config view model", () => {
   it("filters by provider, pool, routing, source and free text", () => {
     const models = [
       row(),
-      row({ provider: "gemini", model: "flash", pools: ["vision"], source: "environment", stored: false, capabilities: ["image_input"] }),
+      row({ provider: "gemini", model: "flash", source: "environment", stored: false, capabilities: ["image_input"] }),
       row({ provider: "groq", model: "off", enabled: false, enabledByConfig: false })
     ];
     const ids = (list) => list.map((item) => item.model);
 
     expect(ids(filterModels(models, { search: "flash" }))).toEqual(["flash"]);
     expect(ids(filterModels(models, { search: "image_input" }))).toEqual(["flash"]);
-    expect(ids(filterModels(models, { pool: "vision" }))).toEqual(["flash"]);
     expect(ids(filterModels(models, { status: "disabled" }))).toEqual(["off"]);
     expect(ids(filterModels(models, { source: "configured" }))).toEqual(["llama", "off"]);
     expect(ids(filterModels(models, { provider: "groq" }))).toEqual(["llama", "off"]);
@@ -201,8 +200,8 @@ describe("model config view model", () => {
   });
 
   it("labels manual-selection membership and row attention", () => {
-    expect(selectionLabel(row())).toBe("Text");
-    expect(selectionLabel(row({ manualSelection: { text: true, vision: true } }))).toBe("Text, Vision");
+    expect(selectionLabel(row())).toBe("");
+    expect(selectionLabel(row({ manualSelection: { text: true, vision: true } }))).toBe("");
     expect(selectionLabel(row({ manualSelection: { text: false, vision: false } }))).toBe("");
 
     expect(rowTone(row())).toBe("ok");

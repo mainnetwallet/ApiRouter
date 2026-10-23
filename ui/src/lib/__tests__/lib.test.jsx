@@ -355,18 +355,18 @@ describe("table helpers", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Pool-aware error taxonomy
+// Vision-capability error taxonomy
 // ---------------------------------------------------------------------------
 
-describe("pool error taxonomy", () => {
-  it("reports a missing vision pool as a configuration problem, not a provider outage", () => {
+describe("vision error taxonomy", () => {
+  it("reports a missing vision route as a no-route problem, not a provider outage", () => {
     const error = apiErrorFromResponse(503, {
       error: { type: "no_vision_route", message: "No vision provider is configured" }
     });
-    expect(error.category).toBe(CATEGORY.NO_VISION_ROUTE);
+    expect(error.category).toBe(CATEGORY.NO_ROUTE);
     expect(error.label).toBe("No vision route");
     expect(error.retryable).toBe(false);
-    expect(error.hint).toMatch(/_VISION_/);
+    expect(error.hint).toMatch(/vision/i);
   });
 
   it("explains a model that cannot process images and names it", () => {
@@ -375,7 +375,7 @@ describe("pool error taxonomy", () => {
         type: "model_not_vision_capable",
         model: "deepseek",
         required_capability: "vision",
-        message: 'Vision request rejected: model "deepseek" is not configured for the vision pool'
+        message: 'Vision request rejected: model "deepseek" is not configured for vision'
       }
     });
     expect(error.category).toBe(CATEGORY.CAPABILITY);
@@ -385,12 +385,12 @@ describe("pool error taxonomy", () => {
     expect(error.hint).toContain("deepseek");
   });
 
-  it("classifies both pool failures distinctly from a generic 503", () => {
-    expect(classifyFailure({ httpStatus: 503, errorType: "no_vision_route" })).toBe("no vision route");
+  it("classifies both vision failures distinctly from a generic 503", () => {
+    expect(classifyFailure({ httpStatus: 503, errorType: "no_vision_route" })).toBe("no route");
     expect(classifyFailure({
       httpStatus: 400, errorType: "model_not_vision_capable", errorMessage: "model x"
     })).toBe("capability mismatch");
-    expect(failureLabel("no vision route")).toMatch(/vision/i);
+    expect(failureLabel("no route")).toMatch(/route/i);
     expect(failureLabel("capability mismatch")).toMatch(/images/i);
   });
 
