@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "f803d0b0-666a-479b-8cee-7231fedcc1dc",
-  "updatedAt": "2026-10-27T04:51:19.098Z",
+  "revision": "bbe92780-36f2-4cbf-b7e8-2707a29d7324",
+  "updatedAt": "2026-10-27T04:51:27.434Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -303,7 +303,7 @@
       "metadata": {},
       "version": 1,
       "createdAt": 1792782567631,
-      "updatedAt": 1793076535876
+      "updatedAt": 1793076687434
     },
     {
       "id": "mc_f25eabc7978f5dc2",
