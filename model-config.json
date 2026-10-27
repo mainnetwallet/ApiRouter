@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "0e9fc449-f8ce-48e9-9e73-c9c5229729ea",
-  "updatedAt": "2026-10-27T04:48:27.596Z",
+  "revision": "687168f9-5de9-41d6-852f-0acd2563fbaf",
+  "updatedAt": "2026-10-27T04:48:55.876Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -296,13 +296,14 @@
         "file_input",
         "structured_output",
         "streaming",
-        "reasoning"
+        "reasoning",
+        "file_search"
       ],
       "protocol": null,
       "metadata": {},
       "version": 1,
       "createdAt": 1792782567631,
-      "updatedAt": 1792782567631
+      "updatedAt": 1793076535876
     },
     {
       "id": "mc_f25eabc7978f5dc2",
