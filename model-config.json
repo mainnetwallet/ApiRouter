@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "bbe92780-36f2-4cbf-b7e8-2707a29d7324",
-  "updatedAt": "2026-10-27T04:51:27.434Z",
+  "revision": "ceaf7470-e486-4e44-b86b-b130b940e11a",
+  "updatedAt": "2026-10-27T04:51:56.390Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -299,11 +299,11 @@
         "reasoning",
         "file_search"
       ],
-      "protocol": null,
+      "protocol": "gemini",
       "metadata": {},
       "version": 1,
       "createdAt": 1792782567631,
-      "updatedAt": 1793076687434
+      "updatedAt": 1793076716390
     },
     {
       "id": "mc_f25eabc7978f5dc2",
