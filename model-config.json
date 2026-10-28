@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "485d2488-61dc-4472-95c8-b713f8d8044c",
-  "updatedAt": "2026-10-27T04:52:03.926Z",
+  "revision": "1ff3e9e9-a79e-466a-8cd4-a496510225af",
+  "updatedAt": "2026-10-28T14:30:08.552Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -69,7 +69,7 @@
       "provider": "openrouter",
       "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
       "displayName": "nvidia/nemotron-3-ultra-550b-a55b:free",
-      "enabled": true,
+      "enabled": false,
       "capabilities": [
         "text_input",
         "text_output",
@@ -81,7 +81,7 @@
       "metadata": {},
       "version": 1,
       "createdAt": 1792781120437,
-      "updatedAt": 1792783086904
+      "updatedAt": 1793197808552
     },
     {
       "id": "mc_58d51167851d5d19",
