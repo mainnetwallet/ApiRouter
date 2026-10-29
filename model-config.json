@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "a59e7631-99a3-4822-8e40-c4fa233ed076",
-  "updatedAt": "2026-10-29T19:34:47.153Z",
+  "revision": "5d85cfe9-56b6-4a10-ac95-0abc49750335",
+  "updatedAt": "2026-10-29T19:34:53.388Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -295,6 +295,7 @@
         "image_input",
         "video_input",
         "audio_input",
+        "file_input",
         "structured_output",
         "streaming",
         "reasoning"
@@ -303,7 +304,7 @@
       "metadata": {},
       "version": 1,
       "createdAt": 1793302472377,
-      "updatedAt": 1793302472377
+      "updatedAt": 1793302493388
     },
     {
       "id": "mc_acbfc9204756e300",
