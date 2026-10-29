@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "53c81664-92c4-4ba9-9857-686a4a7d4793",
-  "updatedAt": "2026-10-29T17:44:05.128Z",
+  "revision": "1c3b8fc7-589a-47a7-a6bf-b76d75b94abb",
+  "updatedAt": "2026-10-29T17:47:11.893Z",
   "providers": {
     "cloudflare": {
       "models": [
@@ -56,20 +56,20 @@
     },
     "vercel": {
       "models": [
-        "poolside/laguna-s-2.1-free",
-        "inclusionai/ling-3.1-flash-free",
-        "nvidia/nemotron-3.5-lightning-free",
-        "alibaba/qwen3-coder",
-        "alibaba/qwen3-coder-30b-a3b",
-        "alibaba/qwen3.6-27b",
-        "alibaba/qwen3.8-27b",
-        "alibaba/qwen3.7-flash",
-        "alibaba/qwen3.8-flash",
-        "mistral/codestral",
-        "inception/mercury-coder-small",
-        "inception/mercury-3",
-        "google/gemma-4-31b-it",
-        "meta/muse-spark-open"
+        "moonshotai/kimi-k2.7-code-highspeed",
+        "moonshotai/kimi-k2.6",
+        "moonshotai/kimi-k3",
+        "minimax/minimax-m3.1-flash",
+        "minimax/minimax-m2.7",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v3.2",
+        "google/gemini-3.8-flash",
+        "google/gemini-3.7-flash",
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "mistral/mistral-large-4",
+        "mistral/mistral-medium-3.5",
+        "arcee-ai/trinity-large-thinking"
       ]
     }
   }
