@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "cbab23ae-447c-4157-99ff-83452f7af72f",
-  "updatedAt": "2026-10-29T18:07:17.973Z",
+  "revision": "b2509df2-1692-47b8-b53b-ee11c38764bf",
+  "updatedAt": "2026-10-29T18:17:09.136Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -164,30 +164,6 @@
       "version": 1,
       "createdAt": 1792782150007,
       "updatedAt": 1792782150007
-    },
-    {
-      "id": "mc_acbfc9204756e300",
-      "provider": "gemini",
-      "model": "gemini-3.6-flash",
-      "displayName": "gemini-3.6-flash",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "image_input",
-        "audio_input",
-        "file_input",
-        "structured_output",
-        "streaming",
-        "reasoning",
-        "file_search"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792782567631,
-      "updatedAt": 1793076723926
     },
     {
       "id": "mc_f25eabc7978f5dc2",
@@ -467,54 +443,6 @@
       "version": 1,
       "createdAt": 1792783248369,
       "updatedAt": 1792783248369
-    },
-    {
-      "id": "mc_17aedbc2bd140187",
-      "provider": "gemini",
-      "model": "gemini-3.5-flash-lite",
-      "displayName": "gemini-3.5-flash-lite",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "image_input",
-        "video_input",
-        "audio_input",
-        "file_input",
-        "structured_output",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1793076569205,
-      "updatedAt": 1793076569205
-    },
-    {
-      "id": "mc_39c2e566f68cd9ee",
-      "provider": "gemini",
-      "model": "gemini-3-flash-preview",
-      "displayName": "gemini-3-flash-preview",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "image_input",
-        "video_input",
-        "audio_input",
-        "audio_output",
-        "structured_output",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1793076679098,
-      "updatedAt": 1793076679098
     }
   ]
 }
