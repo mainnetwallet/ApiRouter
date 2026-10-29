@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "0f25da1f-0673-4e95-8b13-00d0ff95e874",
-  "updatedAt": "2026-10-29T17:24:08.144Z",
+  "revision": "332d1996-70ab-470f-a14d-570bc6f1a28c",
+  "updatedAt": "2026-10-29T17:40:51.072Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -564,44 +564,6 @@
       "version": 1,
       "createdAt": 1792783175623,
       "updatedAt": 1792783175623
-    },
-    {
-      "id": "mc_7102a1a636fe30b2",
-      "provider": "vercel",
-      "model": "inclusionai/ling-3.1-flash-free",
-      "displayName": "inclusionai/ling-3.1-flash-free",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792783206807,
-      "updatedAt": 1792783206807
-    },
-    {
-      "id": "mc_1491380ad3331a55",
-      "provider": "vercel",
-      "model": "poolside/laguna-s-2.1-free",
-      "displayName": "poolside/laguna-s-2.1-free",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792783216166,
-      "updatedAt": 1792783216166
     },
     {
       "id": "mc_d80d7292de8e9c53",
