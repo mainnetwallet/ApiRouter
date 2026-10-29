@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "1f8b1759-1fd6-4d96-98a2-21ec2ad164c0",
-  "updatedAt": "2026-10-29T19:10:08.075Z",
+  "revision": "c76fde53-c711-486a-a1c6-d2803d468525",
+  "updatedAt": "2026-10-29T19:14:25.299Z",
   "providers": {
     "cloudflare": {
       "models": [
@@ -20,6 +20,11 @@
         "gemini-3.6-flash",
         "gemini-3.5-flash",
         "gemini-3-flash-preview"
+      ]
+    },
+    "llm7": {
+      "models": [
+        "nemotron-3-nano:30b"
       ]
     },
     "mistral": {
