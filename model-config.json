@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "958751db-daf6-4a5d-99d7-b336c0181365",
-  "updatedAt": "2026-10-29T19:21:14.596Z",
+  "revision": "0375664c-c8bf-4a24-a627-cf25f06a27d8",
+  "updatedAt": "2026-10-29T19:31:22.332Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -181,6 +181,25 @@
       "version": 1,
       "createdAt": 1792783248369,
       "updatedAt": 1792783248369
+    },
+    {
+      "id": "mc_6bf0ce4348268a7f",
+      "provider": "cloudflare",
+      "model": "@cf/nvidia/nemotron-3-120b-a12b",
+      "displayName": "@cf/nvidia/nemotron-3-120b-a12b",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1793302282332,
+      "updatedAt": 1793302282332
     }
   ]
 }
