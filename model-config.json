@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "004b938c-c0de-4d72-8243-719dcff0f4e5",
-  "updatedAt": "2026-10-29T19:37:57.813Z",
+  "revision": "7ad7b51d-4209-4f45-a0aa-4b8685c4e5eb",
+  "updatedAt": "2026-10-29T19:38:03.979Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -444,13 +444,14 @@
         "tool_calling",
         "image_input",
         "structured_output",
-        "streaming"
+        "streaming",
+        "reasoning"
       ],
       "protocol": null,
       "metadata": {},
       "version": 1,
       "createdAt": 1793302669796,
-      "updatedAt": 1793302669796
+      "updatedAt": 1793302683979
     },
     {
       "id": "mc_49397ad3a3af67eb",
