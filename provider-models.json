@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "c389aedd-3b18-4900-956d-05c6f4543dd2",
-  "updatedAt": "2026-10-29T17:40:49.792Z",
+  "revision": "53c81664-92c4-4ba9-9857-686a4a7d4793",
+  "updatedAt": "2026-10-29T17:44:05.128Z",
   "providers": {
     "cloudflare": {
       "models": [
@@ -56,21 +56,20 @@
     },
     "vercel": {
       "models": [
-        "anthropic/claude-fable-5.1",
-        "anthropic/claude-opus-5.5",
-        "anthropic/claude-sonnet-5.5",
-        "openai/gpt-6.1-sol",
-        "openai/gpt-6-sol",
-        "openai/gpt-5.5",
-        "openai/gpt-5.3-codex",
-        "alibaba/qwen3.8-max",
-        "alibaba/qwen3.7-max",
-        "alibaba/qwen3-coder-next",
-        "moonshotai/kimi-k3.1-pro",
-        "moonshotai/kimi-k2.7-code",
-        "minimax/minimax-m3",
-        "deepseek/deepseek-v4-pro-0813",
-        "deepseek/deepseek-v4.1-flash"
+        "poolside/laguna-s-2.1-free",
+        "inclusionai/ling-3.1-flash-free",
+        "nvidia/nemotron-3.5-lightning-free",
+        "alibaba/qwen3-coder",
+        "alibaba/qwen3-coder-30b-a3b",
+        "alibaba/qwen3.6-27b",
+        "alibaba/qwen3.8-27b",
+        "alibaba/qwen3.7-flash",
+        "alibaba/qwen3.8-flash",
+        "mistral/codestral",
+        "inception/mercury-coder-small",
+        "inception/mercury-3",
+        "google/gemma-4-31b-it",
+        "meta/muse-spark-open"
       ]
     }
   }
