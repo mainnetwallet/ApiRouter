@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "e49fd515-cc49-405e-8031-01cac09e0462",
-  "updatedAt": "2026-10-29T19:40:17.362Z",
+  "revision": "686ad2fa-1e6a-46c0-b066-9a2d04c4ee8d",
+  "updatedAt": "2026-10-29T19:40:32.463Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -555,6 +555,25 @@
       "version": 1,
       "createdAt": 1793302817362,
       "updatedAt": 1793302817362
+    },
+    {
+      "id": "mc_e9d1f2a87dcdedbc",
+      "provider": "vercel",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "displayName": "nvidia/nemotron-3-ultra-550b-a55b",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1793302832463,
+      "updatedAt": 1793302832463
     }
   ]
 }
