@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "a9210942-2f36-4697-8e15-70d4ad45ac13",
-  "updatedAt": "2026-10-29T18:25:07.593Z",
+  "revision": "41a269f5-537c-40f4-8b79-66dae272e817",
+  "updatedAt": "2026-10-29T18:32:04.413Z",
   "providers": {
     "cloudflare": {
       "models": [
@@ -15,6 +15,11 @@
         "gemini-3.6-flash",
         "gemini-3.5-flash",
         "gemini-3-flash-preview"
+      ]
+    },
+    "mistral": {
+      "models": [
+        "mistral-medium-3.5"
       ]
     },
     "vercel": {
