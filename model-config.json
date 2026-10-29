@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "b3873f78-70b5-4682-9f6f-2518cdbf7986",
-  "updatedAt": "2026-10-29T19:14:26.290Z",
+  "revision": "958751db-daf6-4a5d-99d7-b336c0181365",
+  "updatedAt": "2026-10-29T19:21:14.596Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -162,83 +162,6 @@
       "version": 1,
       "createdAt": 1792782983909,
       "updatedAt": 1792782983909
-    },
-    {
-      "id": "mc_23f190a74ad631b1",
-      "provider": "pollinations",
-      "model": "claude-fast",
-      "displayName": "claude-fast",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "image_input",
-        "structured_output",
-        "streaming"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792783134510,
-      "updatedAt": 1792783134510
-    },
-    {
-      "id": "mc_bf3bb1d1e65b2e4f",
-      "provider": "pollinations",
-      "model": "deepseek-pro",
-      "displayName": "deepseek-pro",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792783145067,
-      "updatedAt": 1792783145067
-    },
-    {
-      "id": "mc_0e85b0c8dd6519ea",
-      "provider": "pollinations",
-      "model": "glm",
-      "displayName": "glm",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "streaming"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792783158874,
-      "updatedAt": 1792783158874
-    },
-    {
-      "id": "mc_91e6b6bcf524a63d",
-      "provider": "pollinations",
-      "model": "kimi",
-      "displayName": "kimi",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "image_input",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792783175623,
-      "updatedAt": 1792783175623
     },
     {
       "id": "mc_d80d7292de8e9c53",
