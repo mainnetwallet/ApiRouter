@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "d5b67f0e-182b-4f8b-ae74-3ed72b6f8b97",
-  "updatedAt": "2026-10-29T17:40:40.131Z",
+  "revision": "c389aedd-3b18-4900-956d-05c6f4543dd2",
+  "updatedAt": "2026-10-29T17:40:49.792Z",
   "providers": {
     "cloudflare": {
       "models": [
@@ -52,6 +52,25 @@
         "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
         "gemini-3-flash-preview"
+      ]
+    },
+    "vercel": {
+      "models": [
+        "anthropic/claude-fable-5.1",
+        "anthropic/claude-opus-5.5",
+        "anthropic/claude-sonnet-5.5",
+        "openai/gpt-6.1-sol",
+        "openai/gpt-6-sol",
+        "openai/gpt-5.5",
+        "openai/gpt-5.3-codex",
+        "alibaba/qwen3.8-max",
+        "alibaba/qwen3.7-max",
+        "alibaba/qwen3-coder-next",
+        "moonshotai/kimi-k3.1-pro",
+        "moonshotai/kimi-k2.7-code",
+        "minimax/minimax-m3",
+        "deepseek/deepseek-v4-pro-0813",
+        "deepseek/deepseek-v4.1-flash"
       ]
     }
   }
