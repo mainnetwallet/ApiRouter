@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "6a163c6a-49e6-4c25-a32b-7e059ec1c424",
-  "updatedAt": "2026-10-29T19:37:49.796Z",
+  "revision": "004b938c-c0de-4d72-8243-719dcff0f4e5",
+  "updatedAt": "2026-10-29T19:37:57.813Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -451,6 +451,27 @@
       "version": 1,
       "createdAt": 1793302669796,
       "updatedAt": 1793302669796
+    },
+    {
+      "id": "mc_49397ad3a3af67eb",
+      "provider": "pollinations",
+      "model": "openai/gpt-6-sol",
+      "displayName": "openai/gpt-6-sol",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1793302677813,
+      "updatedAt": 1793302677813
     }
   ]
 }
