@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "4d2dd861-847e-41e4-ba82-08f1c4695b36",
-  "updatedAt": "2026-10-29T18:34:25.993Z",
+  "revision": "b3873f78-70b5-4682-9f6f-2518cdbf7986",
+  "updatedAt": "2026-10-29T19:14:26.290Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -142,64 +142,6 @@
       "version": 1,
       "createdAt": 1792782728592,
       "updatedAt": 1792782728592
-    },
-    {
-      "id": "mc_42fdbd077099f896",
-      "provider": "llm7",
-      "model": "DeepSeek-V4-Flash-0731",
-      "displayName": "DeepSeek-V4-Flash-0731",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "structured_output",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792782806525,
-      "updatedAt": 1792782806525
-    },
-    {
-      "id": "mc_1cc4af04014cab48",
-      "provider": "llm7",
-      "model": "GLM-5.3-Flash",
-      "displayName": "GLM-5.3-Flash",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792782823158,
-      "updatedAt": 1792782823158
-    },
-    {
-      "id": "mc_30c253cee21c4efb",
-      "provider": "llm7",
-      "model": "minimax-m2.7",
-      "displayName": "minimax-m2.7",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792782840827,
-      "updatedAt": 1792782840827
     },
     {
       "id": "mc_e55655e35b6ce762",
