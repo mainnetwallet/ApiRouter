@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "1c3b8fc7-589a-47a7-a6bf-b76d75b94abb",
-  "updatedAt": "2026-10-29T17:47:11.893Z",
+  "revision": "d2ff6eb8-41e9-4d39-883a-798f0c825af6",
+  "updatedAt": "2026-10-29T17:48:43.122Z",
   "providers": {
     "cloudflare": {
       "models": [
@@ -56,20 +56,20 @@
     },
     "vercel": {
       "models": [
-        "moonshotai/kimi-k2.7-code-highspeed",
-        "moonshotai/kimi-k2.6",
-        "moonshotai/kimi-k3",
-        "minimax/minimax-m3.1-flash",
-        "minimax/minimax-m2.7",
-        "deepseek/deepseek-v4-flash",
-        "deepseek/deepseek-v3.2",
-        "google/gemini-3.8-flash",
-        "google/gemini-3.7-flash",
-        "nvidia/nemotron-3-ultra-550b-a55b",
-        "nvidia/nemotron-3-super-120b-a12b",
-        "mistral/mistral-large-4",
-        "mistral/mistral-medium-3.5",
-        "arcee-ai/trinity-large-thinking"
+        "openai/gpt-5.2-codex",
+        "openai/gpt-5.1-codex-max",
+        "openai/gpt-5.1-codex",
+        "openai/gpt-5.1-codex-mini",
+        "openai/gpt-5-codex",
+        "openai/gpt-5.4",
+        "openai/gpt-6-astra",
+        "alibaba/qwen3.8-max-prime",
+        "alibaba/qwen3.7-plus",
+        "google/gemini-4-argon",
+        "google/gemini-3.1-pro-preview",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-5.5"
       ]
     }
   }
