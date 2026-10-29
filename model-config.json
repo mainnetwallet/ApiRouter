@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "e7e6e052-0c69-4c55-adf9-966d449bc253",
-  "updatedAt": "2026-10-29T19:31:47.460Z",
+  "revision": "321a5e12-3c89-4f6b-beeb-90a512f84dde",
+  "updatedAt": "2026-10-29T19:31:55.463Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -218,6 +218,25 @@
       "version": 1,
       "createdAt": 1793302307460,
       "updatedAt": 1793302307460
+    },
+    {
+      "id": "mc_f9709bb73f633dd5",
+      "provider": "cloudflare",
+      "model": "@cf/zai-org/glm-4.7-flash",
+      "displayName": "@cf/zai-org/glm-4.7-flash",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1793302315463,
+      "updatedAt": 1793302315463
     }
   ]
 }
