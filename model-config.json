@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "85076b1c-0ea2-448b-bd31-d3a75fb53751",
-  "updatedAt": "2026-10-29T19:32:45.887Z",
+  "revision": "5d265bad-86ea-4bf0-87d9-51a9f375efb7",
+  "updatedAt": "2026-10-29T19:34:19.271Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -257,6 +257,30 @@
       "version": 1,
       "createdAt": 1793302365887,
       "updatedAt": 1793302365887
+    },
+    {
+      "id": "mc_39c2e566f68cd9ee",
+      "provider": "gemini",
+      "model": "gemini-3-flash-preview",
+      "displayName": "gemini-3-flash-preview",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "video_input",
+        "audio_input",
+        "file_input",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1793302459271,
+      "updatedAt": 1793302459271
     }
   ]
 }
