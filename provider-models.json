@@ -1,13 +1,18 @@
 {
   "version": 1,
-  "revision": "41a269f5-537c-40f4-8b79-66dae272e817",
-  "updatedAt": "2026-10-29T18:32:04.413Z",
+  "revision": "96b7dd39-d737-4409-a03f-5adde1bcf40c",
+  "updatedAt": "2026-10-29T18:34:24.801Z",
   "providers": {
     "cloudflare": {
       "models": [
         "@cf/qwen/qwen3.8-27b",
         "@cf/nvidia/nemotron-3-120b-a12b",
         "@cf/zai-org/glm-4.7-flash"
+      ]
+    },
+    "cohere": {
+      "models": [
+        "north-mini-code-1.0"
       ]
     },
     "gemini": {
