@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "47f3a981-15f8-4c1c-b2d9-8760abf6968c",
-  "updatedAt": "2026-10-29T19:37:08.809Z",
+  "revision": "155c3cd3-945a-402c-89cb-681f582b6b60",
+  "updatedAt": "2026-10-29T19:37:16.568Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -390,6 +390,26 @@
       "version": 1,
       "createdAt": 1793302628809,
       "updatedAt": 1793302628809
+    },
+    {
+      "id": "mc_f1ab90492d36d98f",
+      "provider": "pollinations",
+      "model": "moonshotai/kimi-k3",
+      "displayName": "moonshotai/kimi-k3",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1793302636568,
+      "updatedAt": 1793302636568
     }
   ]
 }
