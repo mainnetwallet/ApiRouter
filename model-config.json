@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "791e3d4a-8a8e-40d5-a8df-a9ee97392884",
-  "updatedAt": "2026-10-29T19:39:11.208Z",
+  "revision": "e49fd515-cc49-405e-8031-01cac09e0462",
+  "updatedAt": "2026-10-29T19:40:17.362Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -533,6 +533,28 @@
       "version": 1,
       "createdAt": 1793302751208,
       "updatedAt": 1793302751208
+    },
+    {
+      "id": "mc_90954169f87ee8a9",
+      "provider": "vercel",
+      "model": "minimax/minimax-m3.1-flash",
+      "displayName": "minimax/minimax-m3.1-flash",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "image_input",
+        "video_input",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1793302817362,
+      "updatedAt": 1793302817362
     }
   ]
 }
