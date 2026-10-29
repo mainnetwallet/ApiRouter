@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "5ad7d20f-feba-4170-8806-368bd5a45696",
-  "updatedAt": "2026-10-29T18:25:08.933Z",
+  "revision": "578b21bc-a140-4c82-8d8d-89d8f5a75979",
+  "updatedAt": "2026-10-29T18:32:05.891Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -263,46 +263,6 @@
       "version": 1,
       "createdAt": 1792782840827,
       "updatedAt": 1792782840827
-    },
-    {
-      "id": "mc_ae72c098d1503f42",
-      "provider": "mistral",
-      "model": "devstral-medium-latest",
-      "displayName": "devstral-medium-latest",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "structured_output",
-        "streaming"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792782912657,
-      "updatedAt": 1792782912657
-    },
-    {
-      "id": "mc_fc750ac65d110df6",
-      "provider": "mistral",
-      "model": "mistral-medium-3-5",
-      "displayName": "mistral-medium-3-5",
-      "enabled": true,
-      "capabilities": [
-        "text_input",
-        "text_output",
-        "tool_calling",
-        "image_input",
-        "structured_output",
-        "streaming",
-        "reasoning"
-      ],
-      "protocol": null,
-      "metadata": {},
-      "version": 1,
-      "createdAt": 1792782940280,
-      "updatedAt": 1792782940280
     },
     {
       "id": "mc_e55655e35b6ce762",
