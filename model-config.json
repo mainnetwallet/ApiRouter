@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "revision": "33d3a28a-b45b-44a0-8400-49adc202a311",
-  "updatedAt": "2026-10-29T19:37:00.542Z",
+  "revision": "47f3a981-15f8-4c1c-b2d9-8760abf6968c",
+  "updatedAt": "2026-10-29T19:37:08.809Z",
   "models": [
     {
       "id": "mc_8f0a2ef8f5b577ce",
@@ -370,6 +370,26 @@
       "version": 1,
       "createdAt": 1793302620541,
       "updatedAt": 1793302620541
+    },
+    {
+      "id": "mc_6e4fd1ccfdab3de7",
+      "provider": "pollinations",
+      "model": "deepseek/deepseek-v4.1-flash",
+      "displayName": "deepseek/deepseek-v4.1-flash",
+      "enabled": true,
+      "capabilities": [
+        "text_input",
+        "text_output",
+        "tool_calling",
+        "structured_output",
+        "streaming",
+        "reasoning"
+      ],
+      "protocol": null,
+      "metadata": {},
+      "version": 1,
+      "createdAt": 1793302628809,
+      "updatedAt": 1793302628809
     }
   ]
 }
